@@ -140,14 +140,7 @@ else % This is the normal transmission scheme, as a single bytestring
 end
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
 % Change sampling period of last matrix sent on all channels that use the custom stimulus and re-send
-PulsePalMatrix = PulsePalSystem.CurrentProgram;
-if ~isempty(PulsePalMatrix)
-    TargetChannels = find(cell2mat(PulsePalMatrix(15,2:5))' == TrainID);
-    Phase1Durations = cell2mat(PulsePalMatrix(5,2:5))';
-    Phase1Durations(TargetChannels) = OriginalSamplingPeriod;
-    PulsePalMatrix(5,2:5) = num2cell(Phase1Durations);
-    IsBiphasic = cell2mat(PulsePalMatrix(2,2:5))';
-    IsBiphasic(TargetChannels) = 0;
-    PulsePalMatrix(2,2:5) = num2cell(IsBiphasic);
-    ProgramPulsePal(PulsePalMatrix);
-end
+TargetChannels = PulsePalSystem.Params.CustomTrainID == TrainID;
+PulsePalSystem.Params.Phase1Duration(TargetChannels) = OriginalSamplingPeriod;
+PulsePalSystem.Params.IsBiphasic(TargetChannels) = 0;
+SyncPulsePalParams;

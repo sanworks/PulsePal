@@ -18,22 +18,31 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
-function TriggerPulsePal(BinaryChannelIDsString)
+function TriggerPulsePal(Channels, varargin)
+% This function triggers Pulse Pal's output channels directly.
+% It accepts three possible argument formats to specify the channels:
+%
+% 1. A vector containing a list of output channels to trigger 
+% (i.e. TriggerPulsePal([1 3 4]) to trigger channels 1, 3 and 4 simultaneously)
+% Note: Calling the function this way causes the lowest processing latency.
+%
+% 2. Up to four separate arguments, each listing an output channel to trigger
+% (i.e. TriggerPulsePal(1, 3, 4) to trigger channels 1, 3 and 4 simultaneously)
+%
+% 3. (legacy) A character string specifying the channels to trigger in binary (i.e.
+% TriggerPulsePal('1101') to trigger channels 1, 3 and 4 simultaneously)
+
 global PulsePalSystem;
 
 
-if ~ischar(BinaryChannelIDsString)
-    error('Error: Format the channels to trigger as a string of 1s and 0s')
+if ischar(Channels)
+    TriggerAddress = bin2dec(Channels);
+else
+    if nargin > 1
+        Channels = [Channels cell2mat(varargin)];
+    end
+        TriggerAddress = sum(2.^(Channels-1));
 end
 
-try    
-TriggerAddress = bin2dec(BinaryChannelIDsString);
-catch
-    error('Error: Format the channels to trigger as a string of 1s and 0s')
-end
-
-if TriggerAddress > 15
-     error('Error: There are only four output channels.')
-end
 TriggerAddress = uint8(TriggerAddress);
 PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 77 TriggerAddress], 'uint8');

@@ -1,6 +1,7 @@
 function SetPulsePalVersion
 global PulsePalSystem
 PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 72], 'uint8');
+pause(.1);
 HandShakeOkByte = PulsePalSerialInterface('read', 1, 'uint8');
 if HandShakeOkByte == 75
     PulsePalSystem.FirmwareVersion = PulsePalSerialInterface('read', 1, 'uint32'); % Get firmware version

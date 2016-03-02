@@ -19,39 +19,37 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
 function ConfirmBit = ProgramPulsePal(ProgramMatrix)
-
+% This function is included for legacy compatability. New applications
+% should use SyncPulsePalParams.
 % Import virtual serial port object into this workspace from base
 global PulsePalSystem;
+   if PulsePalSystem.UsingOctave
+       error('On Octave, use SyncPulsePalParams to send all parameters at once. This MATLAB legacy function is not supported.');
+   end
    OriginalProgMatrix = ProgramMatrix;
     
     % Extract trigger address bytes
     Chan1TrigAddressBytes = uint8(cell2mat(ProgramMatrix(13,2:5)));
     Chan2TrigAddressBytes = uint8(cell2mat(ProgramMatrix(14,2:5)));
-    
     % Extract custom override byte (0 if parameterized, 1 if this channel uses custom
     % stimulus train 1, 2 if this channel uses custom stimulus train 2)
     FollowsCustomStimID = uint8(cell2mat(ProgramMatrix(15,2:5)));
-    
     % Extract custom stim target byte (0 if custom timestamps point to
     % pulse onsets ignoring inter-pulse interval, 1 if custom timestamps point to burst onsets, 
     % ignoring inter-burst interval)
     CustomStimTarget = uint8(cell2mat(ProgramMatrix(16,2:5)));
-    
     % Extract custom stim loop byte (0 if the sequence is to be played only
     % once, 1 if it is to be looped until the end of
     % StimulusTrainDuration.)
     CustomStimLoop = uint8(cell2mat(ProgramMatrix(17,2:5)));
-    
     % Extract biphasic settings for the four channels - 0 if monophasic pulses, 1 if biphasic
     IsBiphasic = cell2mat(ProgramMatrix(2,2:5)); IsBiphasic = uint8(IsBiphasic);
-    
     % Extract pulse voltage for phase 1
     Phase1Voltages = cell2mat(ProgramMatrix(3,2:5));
     % Extract pulse voltage for phase 2
     Phase2Voltages = cell2mat(ProgramMatrix(4,2:5));
     % Extract resting voltages
     RestingVoltages = cell2mat(ProgramMatrix(18,2:5));
-    
     % Check if pulse amplitude is in range
     AllVoltages = [Phase1Voltages Phase2Voltages RestingVoltages];
     if (sum(AllVoltages > 10) > 0) || (sum(AllVoltages < -10) > 0)
@@ -88,13 +86,13 @@ global PulsePalSystem;
     
     
     % Extract voltages for phases 1 and 2
-    Phase1Voltages = PulsePalVolts2Bits(Phase1Voltages, PulsePalSystem.RegisterBits);
-    Phase2Voltages = PulsePalVolts2Bits(Phase2Voltages, PulsePalSystem.RegisterBits);
-    RestingVoltages = PulsePalVolts2Bits(RestingVoltages, PulsePalSystem.RegisterBits);
+    Phase1VoltageBits = PulsePalVolts2Bits(Phase1Voltages, PulsePalSystem.RegisterBits);
+    Phase2VoltageBits = PulsePalVolts2Bits(Phase2Voltages, PulsePalSystem.RegisterBits);
+    RestingVoltageBits = PulsePalVolts2Bits(RestingVoltages, PulsePalSystem.RegisterBits);
     
     % Extract input channel settings
     
-    InputChanMode = uint8(cell2mat(ProgramMatrix(2,8:9))); % if 0, "Normal mode", triggers on low to high transitions and ignores triggers until end of stimulus train. 
+    TriggerMode = uint8(cell2mat(ProgramMatrix(2,8:9))); % if 0, "Normal mode", triggers on low to high transitions and ignores triggers until end of stimulus train. 
     % if 1, "Toggle mode", triggers on low to high and shuts off stimulus
     % train on next high to low. If 2, "Button mode", triggers on low to
     % high and shuts off on high to low.
@@ -113,16 +111,35 @@ global PulsePalSystem;
     % Arrange program into a single byte-string
     FormattedProgramTimestamps = TimeData(1:end); 
     if PulsePalSystem.FirmwareVersion < 19 % Pulse Pal 1
-        SingleByteOutputParams = [IsBiphasic; Phase1Voltages; Phase2Voltages; FollowsCustomStimID; CustomStimTarget; CustomStimLoop; RestingVoltages];
-        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes InputChanMode];
+        SingleByteOutputParams = [IsBiphasic; Phase1VoltageBits; Phase2VoltageBits; FollowsCustomStimID; CustomStimTarget; CustomStimLoop; RestingVoltageBits];
+        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
         ByteString = [PulsePalSystem.OpMenuByte 73 typecast(FormattedProgramTimestamps, 'uint8') FormattedParams];
     else % Pulse Pal 2
-        FormattedVoltages = [Phase1Voltages; Phase2Voltages; RestingVoltages];
+        FormattedVoltages = [Phase1VoltageBits; Phase2VoltageBits; RestingVoltageBits];
         FormattedVoltages = uint16(FormattedVoltages(1:end));
         SingleByteOutputParams = [IsBiphasic; FollowsCustomStimID; CustomStimTarget; CustomStimLoop;];
-        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes InputChanMode];
+        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
         ByteString = [PulsePalSystem.OpMenuByte 73 typecast(FormattedProgramTimestamps, 'uint8') typecast(FormattedVoltages, 'uint8') FormattedParams];
     end
     PulsePalSerialInterface('write', ByteString, 'uint8');
     ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
-    PulsePalSystem.CurrentProgram = OriginalProgMatrix; % Update Pulse Pal object
+    PulsePalSystem.CurrentProgram = OriginalProgMatrix; % Update legacy program matrix
+    % Update params struct
+    PulsePalSystem.Params.Phase1Duration = cell2mat(ProgramMatrix(5,2:5));
+    PulsePalSystem.Params.InterPhaseInterval = cell2mat(ProgramMatrix(6,2:5));
+    PulsePalSystem.Params.Phase2Duration = cell2mat(ProgramMatrix(7,2:5));
+    PulsePalSystem.Params.InterPulseInterval = cell2mat(ProgramMatrix(8,2:5));
+    PulsePalSystem.Params.BurstDuration = cell2mat(ProgramMatrix(9,2:5));
+    PulsePalSystem.Params.InterBurstInterval = cell2mat(ProgramMatrix(10,2:5));
+    PulsePalSystem.Params.PulseTrainDuration = cell2mat(ProgramMatrix(11,2:5));
+    PulsePalSystem.Params.PulseTrainDelay = cell2mat(ProgramMatrix(12,2:5));
+    PulsePalSystem.Params.LinkTriggerChannel1 = Chan1TrigAddressBytes;
+    PulsePalSystem.Params.LinkTriggerChannel2 = Chan2TrigAddressBytes;
+    PulsePalSystem.Params.CustomTrainID = FollowsCustomStimID;
+    PulsePalSystem.Params.CustomTrainTarget = CustomStimTarget;
+    PulsePalSystem.Params.CustomTrainLoop = CustomStimLoop;
+    PulsePalSystem.Params.IsBiphasic = IsBiphasic;
+    PulsePalSystem.Params.Phase1Voltage = Phase1Voltages;
+    PulsePalSystem.Params.Phase2Voltage = Phase2Voltages;
+    PulsePalSystem.Params.RestingVoltage = RestingVoltages;
+    PulsePalSystem.Params.TriggerMode = TriggerMode;

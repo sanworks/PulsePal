@@ -45,6 +45,12 @@ function varargout = PulsePalProgramGUI(varargin)
 % Last Modified by GUIDE v2.5 13-May-2014 20:21:12
 
 % Begin initialization code - DO NOT EDIT
+
+% Tough noogies, MATLAB, I'm editing it.
+global PulsePalSystem
+if (PulsePalSystem.UsingOctave)
+    error('The Pulse Pal GUI is currently available only in MATLAB.');
+end
 gui_Singleton = 1;
 gui_State = struct('gui_Name',       mfilename, ...
                    'gui_Singleton',  gui_Singleton, ...

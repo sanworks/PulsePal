@@ -30,7 +30,7 @@ function ConfirmBit = PulsePalSettings(SettingsFileName, Op)
 % ConfirmBit: 1 if completed successfully, 0 if error.
 global PulsePalSystem
 if PulsePalSystem.FirmwareVersion < 20
-    error('Error: Pulse Pal 1 does not have an external microSD memory for settings files.')
+    error('Error: You are connected to Pulse Pal 1.X, which does not have an external microSD memory for settings files.')
 end
 if sum(SettingsFileName == '.') == 0
     error('Error: The file name must have a valid extension.')

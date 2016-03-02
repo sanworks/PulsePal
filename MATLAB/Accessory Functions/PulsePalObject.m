@@ -35,6 +35,8 @@ classdef PulsePalObject < handle
         SerialPort
         OpMenuByte
         SerialInterface
+        UsingOctave
+        Params
     end
     
     methods

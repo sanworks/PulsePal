@@ -19,11 +19,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
 global PulsePalSystem;
-PulsePalDisplay('   MATLAB Link', '   Terminated.')
-pause(1);
-nBytesAvailable = PulsePalSerialInterface('bytesAvailable');
-if nBytesAvailable > 0
-    PulsePalSerialInterface('read', nBytesAvailable, 'uint8');
+if PulsePalSystem.UsingOctave
+  PulsePalDisplay('   OCTAVE Link', '   Terminated.')
+else
+  PulsePalDisplay('   MATLAB Link', '   Terminated.')
+  pause(1);
+  nBytesAvailable = PulsePalSerialInterface('bytesAvailable');
+  if nBytesAvailable > 0
+      PulsePalSerialInterface('read', nBytesAvailable, 'uint8');
+  end
 end
 PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 81], 'uint8');
 PulsePalSerialInterface('end');
