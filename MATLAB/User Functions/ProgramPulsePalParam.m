@@ -46,15 +46,18 @@ function ConfirmBit = ProgramPulsePalParam(Channel, ParamCode, ParamValue)
 % (i.e. 'Phase1Voltage' for slower but more readable code)
 
 % convert string param code to integer
+global PulsePalSystem;
 ValidParamCodes = [1:17 128];
 if ischar(ParamCode)
-    ParamCode = strcmpi(ParamCode, {'isbiphasic' 'phase1voltage' 'phase2voltage' 'phase1duration' 'interphaseinterval' 'phase2duration'...
-        'interpulseinterval' 'burstduration' 'burstinterval' 'pulsetrainduration' 'pulsetraindelay'...
-        'linkedtotriggerCH1' 'linkedtotriggerCH2' 'customtrainid' 'customtraintarget' 'customtrainloop' 'restingvoltage'});
-    if sum(ParamCode) == 0
-        error('Error: invalid parameter code.')
+    if strcmp(ParamCode, 'TriggerMode')
+        ParamCode = 128;
+    else
+        ParamCode = strcmpi(ParamCode, PulsePalSystem.ParamNames);
+        if sum(ParamCode) == 0
+            error('Error: invalid parameter code.')
+        end
+            ParamCode = find(ParamCode);
     end
-    ParamCode = find(ParamCode);
 elseif ~ismember(ParamCode, ValidParamCodes)
     error('Error: invalid parameter code.')
 end
@@ -67,7 +70,6 @@ if ParamCode >= 128
 end
 
 % Import virtual serial port object into this workspace from base
-global PulsePalSystem;
 OriginalValue = ParamValue;
 % Determine whether data is time data
 if (ParamCode < 12) && (ParamCode > 3)
@@ -87,7 +89,7 @@ end
 % Sanity-check time data
 if isTimeData
     if sum(sum(rem(round(ParamValue*1000000), PulsePalSystem.MinPulseDuration))) > 0
-        error(['Non-zero time values for Pulse Pal rev0.4 must be multiples of ' num2str(PulsePalSystem.MinPulseDuration) ' microseconds.']);
+        error(['Non-zero time values for Pulse Pal must be multiples of ' num2str(PulsePalSystem.MinPulseDuration) ' microseconds.']);
     end
     ParamValue = round(ParamValue*PulsePalSystem.CycleFrequency); % Convert to multiple of 100us
 end
@@ -105,7 +107,11 @@ Bytestring = [PulsePalSystem.OpMenuByte 74 ParamCode Channel ParamBytes];
 PulsePalSerialInterface('write', Bytestring, 'uint8');
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
 if ConfirmBit == 1
-    PulsePalSystem.CurrentProgram{ParamCode+1,Channel+1} = OriginalValue;
+    if ParamCode == 128
+        PulsePalSystem.Params.TriggerMode(Channel) = OriginalValue;
+        PulsePalSystem.CurrentProgram{2,Channel+7} = OriginalValue;
+    else
+        PulsePalSystem.Params.(PulsePalSystem.ParamNames{ParamCode})(Channel) = OriginalValue;
+        PulsePalSystem.CurrentProgram{ParamCode+1,Channel+1} = OriginalValue;
+    end
 end
-
-

@@ -74,6 +74,9 @@ catch
     end
     PulsePalSystem.Params = DefaultPulsePalParameters;
     PulsePalSystem.PulsePalPath = PulsePalPath;
+    PulsePalSystem.ParamNames = {'IsBiphasic' 'Phase1Voltage' 'Phase2Voltage' 'Phase1Duration' 'InterPhaseInterval' 'Phase2Duration'...
+        'InterPulseInterval' 'BurstDuration' 'InterBurstInterval' 'PulseTrainDuration' 'PulseTrainDelay'...
+        'LinkTriggerChannel1' 'LinkTriggerChannel2' 'CustomTrainID' 'CustomTrainTarget' 'CustomTrainLoop' 'RestingVoltage'};
     if ~UsingOctave
       PulsePalSystem.OS = strtrim(system_dependent('getos'));
     else
