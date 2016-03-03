@@ -227,6 +227,7 @@ void setup() {
       DACValues[x] = RestingVoltage[x];
     }
     dacWrite(DACValues);
+    
     write2Screen(CommanderString," Click for menu");
     SystemTime = micros();
     LastLoopTime = SystemTime;
@@ -560,13 +561,14 @@ void handler(void) {
           }
           write2Screen(CommanderString," Click for menu");
         } break;
-        case 94: { // Set screensaver state
+        case 94: {
           useScreenSaver = SerialReadByte();
           if (useScreenSaver == 1) {
             SSdelay = SerialReadLong(); // Screensaver onset delay in 50us cycles (i.e. 20000 = 1 second)
           }
           SerialUSB.write(1);
-       } break;
+        } break;
+       }
      }
   }
 
@@ -900,7 +902,6 @@ void handler(void) {
      }
    }
 }
-}
 // Convenience Functions
 
 
@@ -959,307 +960,307 @@ void UpdateSettingsMenu() {
     ClickerY = analogRead(ClickerYLine);
     ClickerButtonState = ReadDebouncedButton();
     if (ClickerButtonState == 1 && LastClickerButtonState == 0) {
+      LastClickerButtonState = 1;
       if (SSactive) {
         SSactive = 0;
         SScount = 0;
         write2Screen(CommanderString," Click for menu");
         delayMicroseconds(100000);
        } else {
-          LastClickerButtonState = 1;
-          switch(inMenu) {
-            case 0: {
-              inMenu = 1;
-              SelectedChannel = 1;
-              write2Screen("Output Channels","<  Channel 1  >");
-              NeedUpdate = 1;
-            } break;
-            case 1: {
-              switch(SelectedChannel) {
-                case 7: { // Reset
-                write2Screen(" "," ");
-                delay(1);
-                  *(SCB_AIRCR) = SCB_AIRCR_RESET;
-                } break;
-                case 8: {
-                  inMenu = 0;
-                  switch (ConnectedToApp) {
-                    case 0: {write2Screen(CommanderString," Click for menu");} break;
-                    case 1: {write2Screen("MATLAB Connected"," Click for menu");} break;
-                  }
-                } break;
-              case 5:{
-                inMenu = 4; // trigger menu
-                SelectedInputAction = 1;
-                SelectedChannel = 1;
-                write2Screen("< Trigger Now  >"," ");
-              } break;  
-              case 6: {
-                inMenu = 4; // trigger menu
-                SelectedInputAction = 1;
-                SelectedChannel = 2;
-                write2Screen("< Trigger Now  >"," ");
-              } break;
-              default: {
-                inMenu = 2; // output menu
-                SelectedAction = 1;
-                write2Screen("< Trigger Now  >"," ");
-              } break;
-             }
-           } break;
-           case 2: {
-            switch (SelectedAction) {
-              case 1: {
-                inMenu = 3; // soft-trigger menu
-                write2Screen("< Single Train >"," ");
-                SelectedStimMode = 1;
-              } break;
-              case 2: {IsBiphasic[SelectedChannel-1] = ReturnUserValue(0, 1, 1, 3);} break; // biphasic (on /off)
-              case 3: {Phase1Voltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2);} break; // Get user to input phase 1 voltage
-              case 4: {Phase1Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 1 duration
-              case 5: {InterPhaseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // inter-phase interval
-              case 6: {Phase2Voltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2);} break; // Get user to input phase 2 voltage
-              case 7: {Phase2Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 2 duration
-              case 8: {InterPulseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // pulse interval
-              case 9: {BurstDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst width
-              case 10: {BurstInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst interval
-              case 11: {PulseTrainDelay[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train delay
-              case 12: {PulseTrainDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train duration
-              case 13: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
-                        byte Ch = SelectedChannel-1;
-                        TriggerAddress[0][Ch] = Bit2Write;
-                        } break; // Follow input 1 (on/off)
-              case 14: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
-                        byte Ch = SelectedChannel-1;
-                        TriggerAddress[1][Ch] = Bit2Write;
-                        } break; // Follow input 2 (on/off)
-              case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 0);} break; // stimulus train duration
-              case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
-              case 17: {
-                        RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
-                        DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; dacWrite(DACValues); // Update DAC
-                        } break; 
-              case 18: {
-                // Exit to channel menu
-              inMenu = 1; RefreshChannelMenu(SelectedChannel);
-              } break;
-             }
-             PulseDuration[SelectedChannel-1] = ComputePulseDuration(IsBiphasic[SelectedChannel-1], Phase1Duration[SelectedChannel-1], InterPhaseInterval[SelectedChannel-1], Phase2Duration[SelectedChannel-1]);
-             if (BurstDuration[SelectedChannel-1] == 0) {UsesBursts[SelectedChannel-1] = false;} else {UsesBursts[SelectedChannel-1] = true;}
-             if ((SelectedAction > 1) && (SelectedAction < 9)) {
-              //EEPROM update channel timer values
-              PrepareOutputChannelMemoryPage1(SelectedChannel-1);
-              WriteEEPROMPage(PageBytes, 32, ((SelectedChannel-1)*64));
-              PrepareOutputChannelMemoryPage2(SelectedChannel-1);
-              WriteEEPROMPage(PageBytes, 32, (((SelectedChannel-1)*64)+32));              
-             }
-            } break;
-            case 3: {
-            switch (SelectedStimMode) {
-              case 1: {
-                // Soft-trigger channel
-                write2Screen("< Single Train >","      ZAP!");
-                delay(100);
-                while (ClickerButtonState == 1) {
-                 ClickerButtonState = ReadDebouncedButton();
-                }
-                write2Screen("< Single Train >"," ");
-                PreStimulusStatus[SelectedChannel-1] = 1;
-                BurstStatus[SelectedChannel-1] = 1;
-                if (StimulatingState == 0) {ResetSystemTime(); StimulatingState = 2;}
-                MicrosTime = micros();
-                PrePulseTrainTimestamps[SelectedChannel-1] = SystemTime;  
-              } break;
-              case 2: {
-                write2Screen("< Single Pulse >","      ZAP!");
-                delay(100);
-                write2Screen("< Single Pulse >"," ");
-                SystemTime = 0;
-                if (IsBiphasic[SelectedChannel-1] == 0) {
-                  DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
-                  NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
-                  MicrosTime = micros(); LastLoopTime = MicrosTime;
-                  dacWrite(DACValues);
-                  while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                    while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
-                      MicrosTime = micros();
-                    }
-                   LastLoopTime = MicrosTime;
-                   SystemTime++; 
-                  }
-                  DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                  dacWrite(DACValues);
-                } else {
-                  DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
-                  NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
-                  MicrosTime = micros(); LastLoopTime = MicrosTime;
-                  dacWrite(DACValues);
-                  while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                    while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
-                      MicrosTime = micros();
-                    }
-                   LastLoopTime = MicrosTime;
-                   SystemTime++; 
-                  }
-                  if (InterPhaseInterval[SelectedChannel-1] > 0) {
-                  DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                  NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
-                  dacWrite(DACValues);
-                  while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                    while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
-                      MicrosTime = micros();
-                    }
-                   LastLoopTime = MicrosTime;
-                   SystemTime++; 
-                  }
-                  }
-                  DACValues[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
-                  NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
-                  dacWrite(DACValues);
-                  while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                    while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
-                      MicrosTime = micros();
-                    }
-                   LastLoopTime = MicrosTime;
-                   SystemTime++; 
-                  }
-                  DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                  dacWrite(DACValues);
-                }
-              } break;
-              case 3: {
-                if (ContinuousLoopMode[SelectedChannel-1] == false) {
-                   write2Screen("<  Continuous  >","      On");
-                   ContinuousLoopMode[SelectedChannel-1] = true;
-               } else {
-                   write2Screen("<  Continuous  >","      Off");
-                   ContinuousLoopMode[SelectedChannel-1] = false;
-                   PulseStatus[SelectedChannel-1] = 0;
-                   BurstStatus[SelectedChannel-1] = 0;
-                   StimulusStatus[SelectedChannel-1] = 0;
-                   CustomPulseTimeIndex[SelectedChannel-1] = 0;
-                   DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                   dacWrite(DACValues);
-                   gpio_write_bit(LED_PIN_PORT, OutputLEDLineBits[SelectedChannel-1], LOW);
-                 }
-              } break;
-              case 4: {
-                inMenu = 2;
-                SelectedAction = 1;
-                write2Screen("< Trigger Now  >"," ");
-              } break;
-             }
-           } break; 
-           case 4: {
-            switch (SelectedInputAction) {
-              case 1: {
-                // Trigger linked output channels
-                write2Screen("< Trigger Now >","      ZAP!");
-                delay(100);
-                while (ClickerButtonState == 1) {
-                 ClickerButtonState = ReadDebouncedButton();
-                }
-                write2Screen("< Trigger Now >"," ");
-                for (int x = 0; x < 4; x++) {
-                  if (TriggerAddress[SelectedChannel-1][x] == 1) {
-                    PreStimulusStatus[x] = 1;
-                    BurstStatus[x] = 1;
-                    if (StimulatingState == 0) {StimulatingState = 2; ResetSystemTime();}
-                    MicrosTime = micros();
-                    PrePulseTrainTimestamps[x] = SystemTime;
-                  }
-                }
-              } break;
-              case 2: {
-                // Change mode of selected channel
-                TriggerMode[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 5); // Get user to input trigger mode
-                //Store changes
-                EEPROM_address = 32;
-                for (int x = 0; x < 4; x++) {
-                  PrepareOutputChannelMemoryPage2(x);
-                  WriteEEPROMPage(PageBytes, 32, EEPROM_address);
-                  EEPROM_address = EEPROM_address + 64;
-                }
-              } break;
-              case 3: {
-                inMenu = 1;
-                SelectedAction = 1;
-                write2Screen("Output Channels","<  Channel 1  >");
-                NeedUpdate = 1;
-                SelectedChannel = SelectedChannel + 4;
-              } break;
-            }
+        switch(inMenu) {
+          case 0: {
+            inMenu = 1;
+            SelectedChannel = 1;
+            write2Screen("Output Channels","<  Channel 1  >");
+            NeedUpdate = 1;
           } break;
-        }
-       }
-    }
-    if (ClickerButtonState == 0 && LastClickerButtonState == 1) {
-      LastClickerButtonState = 0;
-    }
-    if (LastClickerXState != 1 && ClickerX < 800) {
-      LastClickerXState = 1;
-      NeedUpdate = 1;
-      if (inMenu == 1) {SelectedChannel = SelectedChannel - 1;}
-      if (inMenu == 2) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 8)) {
-          SelectedAction = SelectedAction - 4;
-        } else {  
-          SelectedAction = SelectedAction - 1;
-        }
-      }
-      if (inMenu == 3) {SelectedStimMode = SelectedStimMode - 1;}
-      if (inMenu == 4) {SelectedInputAction = SelectedInputAction - 1;}
-      if (SelectedInputAction == 0) {SelectedInputAction = 3;}
-      if (SelectedChannel == 0) {SelectedChannel = 8;}
-      if (SelectedAction == 0) {SelectedAction = 18;}
-      if (SelectedStimMode == 0) {SelectedStimMode = 4;}
-    }
-    if (LastClickerXState != 2 && ClickerX > 3200) {
-      LastClickerXState = 2;
-      NeedUpdate = 1;
-      if (inMenu == 1) {SelectedChannel = SelectedChannel + 1;}
-      if (inMenu == 2) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 4)) {
-          SelectedAction = SelectedAction + 4;
-        } else {
-          SelectedAction = SelectedAction + 1;
-        }
-      }
-      if (inMenu == 3) {SelectedStimMode = SelectedStimMode + 1;}
-      if (inMenu == 4) {SelectedInputAction = SelectedInputAction + 1;}
-      if (SelectedInputAction == 4) {SelectedInputAction = 1;}
-      if (SelectedChannel == 9) {SelectedChannel = 1;}
-      if (SelectedAction == 19) {SelectedAction = 1;}
-      if (SelectedStimMode == 5) {SelectedStimMode = 1;}
-    }
-    if (LastClickerXState != 0 && ClickerX < 2800 && ClickerX > 1200) {
-      LastClickerXState = 0;
-    }
-    if (NeedUpdate == 1) {
-      switch (inMenu) {
-        case 1: {
-          RefreshChannelMenu(SelectedChannel);
-        } break;
-        case 2: {
-          RefreshActionMenu(SelectedAction);
-        } break; 
-        case 3: {
+          case 1: {
+            switch(SelectedChannel) {
+              case 7: { // Reset
+              write2Screen(" "," ");
+              delay(1);
+                *(SCB_AIRCR) = SCB_AIRCR_RESET;
+              } break;
+              case 8: {
+                inMenu = 0;
+                switch (ConnectedToApp) {
+                  case 0: {write2Screen(CommanderString," Click for menu");} break;
+                  case 1: {write2Screen("MATLAB Connected"," Click for menu");} break;
+                }
+              } break;
+            case 5:{
+              inMenu = 4; // trigger menu
+              SelectedInputAction = 1;
+              SelectedChannel = 1;
+              write2Screen("< Trigger Now  >"," ");
+            } break;  
+            case 6: {
+              inMenu = 4; // trigger menu
+              SelectedInputAction = 1;
+              SelectedChannel = 2;
+              write2Screen("< Trigger Now  >"," ");
+            } break;
+            default: {
+              inMenu = 2; // output menu
+              SelectedAction = 1;
+              write2Screen("< Trigger Now  >"," ");
+            } break;
+           }
+         } break;
+         case 2: {
+          switch (SelectedAction) {
+            case 1: {
+              inMenu = 3; // soft-trigger menu
+              write2Screen("< Single Train >"," ");
+              SelectedStimMode = 1;
+            } break;
+            case 2: {IsBiphasic[SelectedChannel-1] = ReturnUserValue(0, 1, 1, 3);} break; // biphasic (on /off)
+            case 3: {Phase1Voltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2);} break; // Get user to input phase 1 voltage
+            case 4: {Phase1Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 1 duration
+            case 5: {InterPhaseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // inter-phase interval
+            case 6: {Phase2Voltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2);} break; // Get user to input phase 2 voltage
+            case 7: {Phase2Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 2 duration
+            case 8: {InterPulseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // pulse interval
+            case 9: {BurstDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst width
+            case 10: {BurstInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst interval
+            case 11: {PulseTrainDelay[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train delay
+            case 12: {PulseTrainDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train duration
+            case 13: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
+                      byte Ch = SelectedChannel-1;
+                      TriggerAddress[0][Ch] = Bit2Write;
+                      } break; // Follow input 1 (on/off)
+            case 14: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
+                      byte Ch = SelectedChannel-1;
+                      TriggerAddress[1][Ch] = Bit2Write;
+                      } break; // Follow input 2 (on/off)
+            case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 0);} break; // stimulus train duration
+            case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
+            case 17: {
+                      RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
+                      DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; dacWrite(DACValues); // Update DAC
+                      } break; 
+            case 18: {
+              // Exit to channel menu
+            inMenu = 1; RefreshChannelMenu(SelectedChannel);
+            } break;
+           }
+           PulseDuration[SelectedChannel-1] = ComputePulseDuration(IsBiphasic[SelectedChannel-1], Phase1Duration[SelectedChannel-1], InterPhaseInterval[SelectedChannel-1], Phase2Duration[SelectedChannel-1]);
+           if (BurstDuration[SelectedChannel-1] == 0) {UsesBursts[SelectedChannel-1] = false;} else {UsesBursts[SelectedChannel-1] = true;}
+           if ((SelectedAction > 1) && (SelectedAction < 9)) {
+            //EEPROM update channel timer values
+            PrepareOutputChannelMemoryPage1(SelectedChannel-1);
+            WriteEEPROMPage(PageBytes, 32, ((SelectedChannel-1)*64));
+            PrepareOutputChannelMemoryPage2(SelectedChannel-1);
+            WriteEEPROMPage(PageBytes, 32, (((SelectedChannel-1)*64)+32));              
+           }
+          } break;
+          case 3: {
           switch (SelectedStimMode) {
-            case 1: {write2Screen("< Single Train >", " ");} break;
-            case 2: {write2Screen("< Single Pulse >", " ");} break;
+            case 1: {
+              // Soft-trigger channel
+              write2Screen("< Single Train >","      ZAP!");
+              delay(100);
+              while (ClickerButtonState == 1) {
+               ClickerButtonState = ReadDebouncedButton();
+              }
+              write2Screen("< Single Train >"," ");
+              PreStimulusStatus[SelectedChannel-1] = 1;
+              BurstStatus[SelectedChannel-1] = 1;
+              if (StimulatingState == 0) {ResetSystemTime(); StimulatingState = 2;}
+              MicrosTime = micros();
+              PrePulseTrainTimestamps[SelectedChannel-1] = SystemTime;  
+            } break;
+            case 2: {
+              write2Screen("< Single Pulse >","      ZAP!");
+              delay(100);
+              write2Screen("< Single Pulse >"," ");
+              SystemTime = 0;
+              if (IsBiphasic[SelectedChannel-1] == 0) {
+                DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
+                MicrosTime = micros(); LastLoopTime = MicrosTime;
+                dacWrite(DACValues);
+                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
+                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                    MicrosTime = micros();
+                  }
+                 LastLoopTime = MicrosTime;
+                 SystemTime++; 
+                }
+                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                dacWrite(DACValues);
+              } else {
+                DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
+                MicrosTime = micros(); LastLoopTime = MicrosTime;
+                dacWrite(DACValues);
+                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
+                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                    MicrosTime = micros();
+                  }
+                 LastLoopTime = MicrosTime;
+                 SystemTime++; 
+                }
+                if (InterPhaseInterval[SelectedChannel-1] > 0) {
+                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
+                dacWrite(DACValues);
+                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
+                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                    MicrosTime = micros();
+                  }
+                 LastLoopTime = MicrosTime;
+                 SystemTime++; 
+                }
+                }
+                DACValues[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
+                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
+                dacWrite(DACValues);
+                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
+                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                    MicrosTime = micros();
+                  }
+                 LastLoopTime = MicrosTime;
+                 SystemTime++; 
+                }
+                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                dacWrite(DACValues);
+              }
+            } break;
             case 3: {
-            if (ContinuousLoopMode[SelectedChannel-1] == false) {
-                 write2Screen("<  Continuous  >","      Off");
-               } else {
+              if (ContinuousLoopMode[SelectedChannel-1] == false) {
                  write2Screen("<  Continuous  >","      On");
+                 ContinuousLoopMode[SelectedChannel-1] = true;
+             } else {
+                 write2Screen("<  Continuous  >","      Off");
+                 ContinuousLoopMode[SelectedChannel-1] = false;
+                 PulseStatus[SelectedChannel-1] = 0;
+                 BurstStatus[SelectedChannel-1] = 0;
+                 StimulusStatus[SelectedChannel-1] = 0;
+                 CustomPulseTimeIndex[SelectedChannel-1] = 0;
+                 DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                 dacWrite(DACValues);
+                 gpio_write_bit(LED_PIN_PORT, OutputLEDLineBits[SelectedChannel-1], LOW);
                }
             } break;
-            case 4: {write2Screen("<     Exit     >"," ");} break;
+            case 4: {
+              inMenu = 2;
+              SelectedAction = 1;
+              write2Screen("< Trigger Now  >"," ");
+            } break;
+           }
+         } break; 
+         case 4: {
+          switch (SelectedInputAction) {
+            case 1: {
+              // Trigger linked output channels
+              write2Screen("< Trigger Now >","      ZAP!");
+              delay(100);
+              while (ClickerButtonState == 1) {
+               ClickerButtonState = ReadDebouncedButton();
+              }
+              write2Screen("< Trigger Now >"," ");
+              for (int x = 0; x < 4; x++) {
+                if (TriggerAddress[SelectedChannel-1][x] == 1) {
+                  PreStimulusStatus[x] = 1;
+                  BurstStatus[x] = 1;
+                  if (StimulatingState == 0) {StimulatingState = 2; ResetSystemTime();}
+                  MicrosTime = micros();
+                  PrePulseTrainTimestamps[x] = SystemTime;
+                }
+              }
+            } break;
+            case 2: {
+              // Change mode of selected channel
+              TriggerMode[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 5); // Get user to input trigger mode
+              //Store changes
+              EEPROM_address = 32;
+              for (int x = 0; x < 4; x++) {
+                PrepareOutputChannelMemoryPage2(x);
+                WriteEEPROMPage(PageBytes, 32, EEPROM_address);
+                EEPROM_address = EEPROM_address + 64;
+              }
+            } break;
+            case 3: {
+              inMenu = 1;
+              SelectedAction = 1;
+              write2Screen("Output Channels","<  Channel 1  >");
+              NeedUpdate = 1;
+              SelectedChannel = SelectedChannel + 4;
+            } break;
           }
         } break;
-        case 4: {
-          RefreshTriggerMenu(SelectedInputAction); 
-        } break;
+      }
+      }
     }
+      if (ClickerButtonState == 0 && LastClickerButtonState == 1) {
+        LastClickerButtonState = 0;
+      }
+      if (LastClickerXState != 1 && ClickerX < 800) {
+        LastClickerXState = 1;
+        NeedUpdate = 1;
+        if (inMenu == 1) {SelectedChannel = SelectedChannel - 1;}
+        if (inMenu == 2) {
+          if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 8)) {
+            SelectedAction = SelectedAction - 4;
+          } else {  
+            SelectedAction = SelectedAction - 1;
+          }
+        }
+        if (inMenu == 3) {SelectedStimMode = SelectedStimMode - 1;}
+        if (inMenu == 4) {SelectedInputAction = SelectedInputAction - 1;}
+        if (SelectedInputAction == 0) {SelectedInputAction = 3;}
+        if (SelectedChannel == 0) {SelectedChannel = 8;}
+        if (SelectedAction == 0) {SelectedAction = 18;}
+        if (SelectedStimMode == 0) {SelectedStimMode = 4;}
+      }
+      if (LastClickerXState != 2 && ClickerX > 3200) {
+        LastClickerXState = 2;
+        NeedUpdate = 1;
+        if (inMenu == 1) {SelectedChannel = SelectedChannel + 1;}
+        if (inMenu == 2) {
+          if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 4)) {
+            SelectedAction = SelectedAction + 4;
+          } else {
+            SelectedAction = SelectedAction + 1;
+          }
+        }
+        if (inMenu == 3) {SelectedStimMode = SelectedStimMode + 1;}
+        if (inMenu == 4) {SelectedInputAction = SelectedInputAction + 1;}
+        if (SelectedInputAction == 4) {SelectedInputAction = 1;}
+        if (SelectedChannel == 9) {SelectedChannel = 1;}
+        if (SelectedAction == 19) {SelectedAction = 1;}
+        if (SelectedStimMode == 5) {SelectedStimMode = 1;}
+      }
+      if (LastClickerXState != 0 && ClickerX < 2800 && ClickerX > 1200) {
+        LastClickerXState = 0;
+      }
+      if (NeedUpdate == 1) {
+        switch (inMenu) {
+          case 1: {
+            RefreshChannelMenu(SelectedChannel);
+          } break;
+          case 2: {
+            RefreshActionMenu(SelectedAction);
+          } break; 
+          case 3: {
+            switch (SelectedStimMode) {
+              case 1: {write2Screen("< Single Train >", " ");} break;
+              case 2: {write2Screen("< Single Pulse >", " ");} break;
+              case 3: {
+              if (ContinuousLoopMode[SelectedChannel-1] == false) {
+                   write2Screen("<  Continuous  >","      Off");
+                 } else {
+                   write2Screen("<  Continuous  >","      On");
+                 }
+              } break;
+              case 4: {write2Screen("<     Exit     >"," ");} break;
+            }
+          } break;
+          case 4: {
+            RefreshTriggerMenu(SelectedInputAction); 
+          } break;
+      }
     NeedUpdate = 0;
   }
 }
@@ -1689,13 +1690,12 @@ void PrepareOutputChannelMemoryPage2(byte ChannelNum) {
   PageBytes[16] = TriggerMode[0];
   PageBytes[17] = TriggerMode[1];
   PageBytes[18] = RestingVoltage[ChannelNum]; 
-  PageBytes[19] = useScreenSaver;
-  breakLong(SSdelay); 
-  PageBytes[20] = BrokenBytes[0];
-  PageBytes[21] = BrokenBytes[1];
-  PageBytes[22] = BrokenBytes[2];
-  PageBytes[23] = BrokenBytes[3];
-  PageBytes[24] = 0; // To be used in future...
+  PageBytes[19] = 0; // To be used in future...
+  PageBytes[20] = 0;
+  PageBytes[21] = 0;
+  PageBytes[22] = 0;
+  PageBytes[23] = 0;
+  PageBytes[24] = 0;
   PageBytes[25] = 0;
   PageBytes[26] = 0;
   PageBytes[27] = 0;
@@ -1755,8 +1755,6 @@ void RestoreParametersFromEEPROM() {
     TriggerMode[1] = PageBytes[17];
     RestingVoltage[Chan] = PageBytes[18];
   }
-   useScreenSaver = PageBytes[19];
-   SSdelay = makeLong(PageBytes[23],PageBytes[22],PageBytes[21],PageBytes[20]);
   ValidEEPROMProgram = PageBytes[31];
 }
 
