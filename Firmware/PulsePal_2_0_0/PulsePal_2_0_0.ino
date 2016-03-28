@@ -319,11 +319,7 @@ void handler(void) {
       switch (CommandByte) {
         case 72: { // Handshake
           SerialUSB.write(75); // Send 'K' (as in ok)
-          breakLong(FirmwareVersion); // Send 32-bit firmware version
-          SerialUSB.write(BrokenBytes[0]);
-          SerialUSB.write(BrokenBytes[1]);
-          SerialUSB.write(BrokenBytes[2]);
-          SerialUSB.write(BrokenBytes[3]); 
+          SerialWriteLong(FirmwareVersion);
           ConnectedToApp = 1;
         } break;
         case 73: { // Program the module - total program (faster than item-wise in some instances)
@@ -590,10 +586,39 @@ void handler(void) {
               currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
               settingsFile.open(currentSettingsFileNameChar, O_READ);
               confirmBit = 0;
-            }
+            } else {
+              // Return parameters from file to update client
+                for (int x = 0; x < 4; x++) {
+                  SerialWriteLong(Phase1Duration[x]);
+                  SerialWriteLong(InterPhaseInterval[x]);
+                  SerialWriteLong(Phase2Duration[x]);
+                  SerialWriteLong(InterPulseInterval[x]);
+                  SerialWriteLong(BurstDuration[x]);
+                  SerialWriteLong(BurstInterval[x]);
+                  SerialWriteLong(PulseTrainDuration[x]);
+                  SerialWriteLong(PulseTrainDelay[x]);
+                } 
+                for (int x = 0; x < 4; x++) {
+                  SerialWriteShort(Phase1Voltage[x]);
+                  SerialWriteShort(Phase2Voltage[x]);
+                  SerialWriteShort(RestingVoltage[x]);
+                }
+                for (int x = 0; x < 4; x++) {
+                  SerialUSB.write(IsBiphasic[x]);
+                  SerialUSB.write(CustomTrainID[x]);
+                  SerialUSB.write(CustomTrainTarget[x]);
+                  SerialUSB.write(CustomTrainLoop[x]);
+                }
+               for (int x = 0; x < 2; x++) { // Read 8 trigger address bytes
+                 for (int y = 0; y < 4; y++) {
+                  SerialUSB.write(TriggerAddress[x][y]);
+                 }
+               }
+               SerialUSB.write(TriggerMode[0]);
+               SerialUSB.write(TriggerMode[1]);
+             }
           }
           settingsFile.rewind();
-          SerialUSB.write(confirmBit);
         } break;
         case 91: { // Return names of all settings files
           // First, determine how many files there are
@@ -607,9 +632,7 @@ void handler(void) {
           }
           fileCount--;
           candidateSettingsFile.close();
-          breakShort(fileCount); // Send 16-bit file count
-          SerialUSB.write(BrokenBytes[0]);
-          SerialUSB.write(BrokenBytes[1]);
+          SerialWriteShort(fileCount);
           // Next, loop through settings files and return names as untrimmed 16-char strings
           sd.vwd()->rewind();
           for (int i = 0; i < fileCount; i++) {
@@ -2173,3 +2196,16 @@ void Software_Reset() {
   RSTC->RSTC_CR = RSTC_CR_KEY(RSTC_KEY) | RSTC_CR_PROCRST | RSTC_CR_PERRST;
   while (true);
 }
+
+void SerialWriteLong(unsigned long num) {
+  SerialUSB.write((byte)num); 
+  SerialUSB.write((byte)(num >> 8)); 
+  SerialUSB.write((byte)(num >> 16)); 
+  SerialUSB.write((byte)(num >> 24));
+}
+
+void SerialWriteShort(word num) {
+  SerialUSB.write((byte)num); 
+  SerialUSB.write((byte)(num >> 8)); 
+}
+

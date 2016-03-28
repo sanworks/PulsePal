@@ -38,13 +38,13 @@ Folder4 = fullfile(PulsePalPath, 'GUI');
 Folder5 = fullfile(PulsePalPath, 'Media');
 Folder6 = fullfile(PulsePalPath, 'Programs');
 addpath(Folder1, Folder2, Folder3, Folder4, Folder5, Folder6);
-if ~UsingOctave
-  ClosePreviousPulsePalInstances;
-end
 try
     evalin('base', 'PulsePalSystem;');
     disp('Pulse Pal is already open. Close it with EndPulsePal first.');
 catch
+    if ~UsingOctave
+      ClosePreviousPulsePalInstances;
+    end
     global PulsePalSystem;
     if ~UsingOctave
       if exist('rng','file') == 2
@@ -89,27 +89,27 @@ catch
     if (nargin == 0) && UsingOctave
         error('Error: On Octave, please specify a serial port. For instance, if Pulse Pal is on port COM3, use: PulsePal(''COM3'')');
     end
-end
-try
-    % Connect to hardware
-    if nargin == 1
-        PulsePalSerialInterface('init', varargin{1});
-    else
-        PulsePalSerialInterface('init');
+    try
+        % Connect to hardware
+        if nargin == 1
+            PulsePalSerialInterface('init', varargin{1});
+        else
+            PulsePalSerialInterface('init');
+        end
+        if UsingOctave
+            SendClientIDString('OCTAVE');
+        else
+            SendClientIDString('MATLAB');
+        end
+        pause(.1);
+        SetPulsePalVersion;
+    catch
+        if ~UsingOctave
+            evalin('base','delete(PulsePalSystem)')
+        end
+        evalin('base','clear PulsePalSystem')
+        rethrow(lasterror)
+        msgbox('Error: Unable to connect to Pulse Pal.', 'Modal')
     end
-    if UsingOctave
-      SendClientIDString('OCTAVE');
-    else
-      SendClientIDString('MATLAB');
-    end
-    pause(.1);
-    SetPulsePalVersion;
-catch
-  if ~UsingOctave
-    evalin('base','delete(PulsePalSystem)')
-  end
-    evalin('base','clear PulsePalSystem') 
-    rethrow(lasterror)
-    msgbox('Error: Unable to connect to Pulse Pal.', 'Modal')
-    
 end
+

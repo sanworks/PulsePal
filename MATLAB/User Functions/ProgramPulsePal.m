@@ -110,7 +110,7 @@ global PulsePalSystem;
     
     % Arrange program into a single byte-string
     FormattedProgramTimestamps = TimeData(1:end); 
-    if PulsePalSystem.FirmwareVersion < 19 % Pulse Pal 1
+    if PulsePalSystem.FirmwareVersion < 20 % Pulse Pal 1
         SingleByteOutputParams = [IsBiphasic; Phase1VoltageBits; Phase2VoltageBits; FollowsCustomStimID; CustomStimTarget; CustomStimLoop; RestingVoltageBits];
         FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
         ByteString = [PulsePalSystem.OpMenuByte 73 typecast(FormattedProgramTimestamps, 'uint8') FormattedParams];

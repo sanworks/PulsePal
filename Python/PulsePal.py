@@ -27,25 +27,27 @@ class PulsePalObject(object):
         self.serialObject = 0
         self.OpMenuByte = 213
         self.firmwareVersion = 0
+        self.model = 0
+        self.dac_bitMax = 0;
         self.cycleFrequency = 20000;
-        self.isBiphasic = [0]*5;
-        self.phase1Voltage = [5]*5;
-        self.phase2Voltage = [-5]*5;
-        self.restingVoltage = [0]*5;
-        self.phase1Duration = [0.001]*5;
-        self.interPhaseInterval = [0.001]*5;
-        self.phase2Duration = [0.001]*5;
-        self.interPulseInterval = [0.01]*5;
-        self.burstDuration = [0]*5;
-        self.interBurstInterval = [0]*5;
-        self.pulseTrainDuration = [1]*5;
-        self.pulseTrainDelay = [0]*5;
-        self.linkTriggerChannel1 = [1]*5;
-        self.linkTriggerChannel2 = [0]*5;
-        self.customTrainID = [0]*5;
-        self.customTrainTarget = [0]*5;
-        self.customTrainLoop = [0]*5;
-        self.triggerMode = [0]*3;
+        self.isBiphasic = [float('nan'), 0, 0, 0, 0];
+        self.phase1Voltage = [float('nan'), 5, 5, 5, 5];
+        self.phase2Voltage = [float('nan'), -5, -5, -5, -5];
+        self.restingVoltage = [float('nan'), 0, 0, 0, 0];
+        self.phase1Duration = [float('nan'), 0.001, 0.001, 0.001, 0.001];
+        self.interPhaseInterval = [float('nan'), 0.001, 0.001, 0.001, 0.001];
+        self.phase2Duration = [float('nan'), 0.001, 0.001, 0.001, 0.001];
+        self.interPulseInterval = [float('nan'), 0.01, 0.01, 0.01, 0.01];
+        self.burstDuration = [float('nan'), 0, 0, 0, 0];
+        self.interBurstInterval = [float('nan'), 0, 0, 0, 0];
+        self.pulseTrainDuration = [float('nan'), 1, 1, 1, 1];
+        self.pulseTrainDelay = [float('nan'), 0, 0, 0, 0];
+        self.linkTriggerChannel1 = [float('nan'), 1, 1, 1, 1];
+        self.linkTriggerChannel2 = [float('nan'), 0, 0, 0, 0];
+        self.customTrainID = [float('nan'), 0, 0, 0, 0];
+        self.customTrainTarget = [float('nan'), 0, 0, 0, 0];
+        self.customTrainLoop = [float('nan'), 0, 0, 0, 0];
+        self.triggerMode = [float('nan'), 0, 0];
         self.outputParameterNames = ['isBiphasic', 'phase1Voltage','phase2Voltage', 'phase1Duration', 'interPhaseInterval',
                                'phase2Duration','interPulseInterval', 'burstDuration', 'interBurstInterval', 'pulseTrainDuration',
                                'pulseTrainDelay', 'linkTriggerChannel1', 'linkTriggerChannel2', 'customTrainID',
@@ -54,12 +56,18 @@ class PulsePalObject(object):
 
     def connect(self, serialPortName):
         import serial
-        self.serialObject = serial.Serial(serialPortName, 115200)
+        self.serialObject = serial.Serial(serialPortName, 115200, timeout=1)
         handshakeByteString = struct.pack('BB', self.OpMenuByte, 72)
         self.serialObject.write(handshakeByteString)
         Response = self.serialObject.read(5)
         fvBytes = Response[1:5]
         self.firmwareVersion = struct.unpack('<I',fvBytes)[0]
+        if self.firmwareVersion < 20:
+            self.model = 1;
+            self.dac_bitMax = 255;
+        else:
+            self.model = 2;
+            self.dac_bitMax = 65535;
         self.serialObject.write('YPYTHON')
 
     def disconnect(self):
@@ -75,14 +83,26 @@ class PulsePalObject(object):
             paramCode = paramName
 
         if 2 <= paramCode <= 3:
-            value = math.ceil(((value+10)/float(20))*255) # Convert volts to bits
-        if paramCode == 17:
-            value = math.ceil(((value+10)/float(20))*255) # Convert volts to bits
-        if 4 <= paramCode <= 11:
+            value = math.ceil(((value+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+            if self.model == 1:
+                programByteString = struct.pack('BBBBB',self.OpMenuByte,74,paramCode,channel,value)
+            else:
+                programByteString = struct.pack('<BBBBH',self.OpMenuByte,74,paramCode,channel,value)
+        elif paramCode == 17:
+            value = math.ceil(((value+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+            if self.model == 1:
+                programByteString = struct.pack('BBBBB',self.OpMenuByte,74,paramCode,channel,value)
+            else:
+                programByteString = struct.pack('<BBBBH',self.OpMenuByte,74,paramCode,channel,value)
+        elif 4 <= paramCode <= 11:
             programByteString = struct.pack('<BBBBL',self.OpMenuByte,74,paramCode,channel,value*self.cycleFrequency)
         else:
             programByteString = struct.pack('BBBBB',self.OpMenuByte,74,paramCode,channel,value)
         self.serialObject.write(programByteString)
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to programOutputChannelParam.')
         # Update the PulsePal object's parameter fields
         if paramCode == 1:
             self.isBiphasic[channel] = originalValue
@@ -127,6 +147,10 @@ class PulsePalObject(object):
             paramCode = paramName
         messageBytes = struct.pack('BBBBB',self.OpMenuByte, 74,paramCode,channel,value)
         self.serialObject.write(messageBytes)
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to programTriggerChannelParam.')
         if paramCode == 1:
             self.triggerMode[channel] = originalValue
 
@@ -149,22 +173,42 @@ class PulsePalObject(object):
         # Pack 32-bit times to bytes and append to program byte-string
         programByteString = programByteString + struct.pack('<LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL' , *programValues)
 
+        # Add 16-bit voltages
+        if self.model == 2:
+            programValues = [0]*12;
+            pos = 0
+            for i in range(1,5):
+                value = math.ceil(((self.phase1Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
+                value = math.ceil(((self.phase2Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
+                value = math.ceil(((self.restingVoltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
+            programByteString = programByteString + struct.pack('<HHHHHHHHHHHH' , *programValues)
         # Add 8-bit params
-        programValues = [0]*28; pos = 0
+        if self.model == 1:
+            programValues = [0]*28;
+        else:
+            programValues = [0]*16;
+        pos = 0
         for i in range(1,5):
             programValues[pos] = self.isBiphasic[i]; pos+=1
-            value = math.ceil(((self.phase1Voltage[i]+10)/float(20))*255) # Convert volts to bits
-            programValues[pos] = value; pos+=1
-            value = math.ceil(((self.phase2Voltage[i]+10)/float(20))*255) # Convert volts to bits
-            programValues[pos] = value; pos+=1
+            if self.model == 1:
+                value = math.ceil(((self.phase1Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
+                value = math.ceil(((self.phase2Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
             programValues[pos] = self.customTrainID[i]; pos+=1
             programValues[pos] = self.customTrainTarget[i]; pos+=1
             programValues[pos] = self.customTrainLoop[i]; pos+=1
-            value = math.ceil(((self.restingVoltage[i]+10)/float(20))*255) # Convert volts to bits
-            programValues[pos] = value; pos+=1
+            if self.model == 1:
+                value = math.ceil(((self.restingVoltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
+                programValues[pos] = value; pos+=1
         # Pack 8-bit params to bytes and append to program byte-string
-        programByteString = programByteString + struct.pack('BBBBBBBBBBBBBBBBBBBBBBBBBBBB', *programValues)
-
+        if self.model == 1:
+            programByteString = programByteString + struct.pack('BBBBBBBBBBBBBBBBBBBBBBBBBBBB', *programValues)
+        else:
+            programByteString = programByteString + struct.pack('BBBBBBBBBBBBBBBB', *programValues)
         # Add trigger channel link params
         programValues = [0]*8; pos = 0
         for i in range(1,5):
@@ -179,36 +223,58 @@ class PulsePalObject(object):
 
         # Send program byte string to PulsePal
         self.serialObject.write(programByteString)
-
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to syncAllParams.')
     def sendCustomPulseTrain(self, customTrainID, pulseTimes, pulseVoltages):
         nPulses = len(pulseTimes)
         for i in range(0,nPulses):
             pulseTimes[i] = pulseTimes[i]*self.cycleFrequency # Convert seconds to multiples of minimum cycle (100us)
-            pulseVoltages[i] = math.ceil(((pulseVoltages[i]+10)/float(20))*255) # Convert volts to bytes
+            pulseVoltages[i] = math.ceil(((pulseVoltages[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bytes
         if customTrainID == 1:
             messageBytes = struct.pack('BB', self.OpMenuByte , 75) # Op code for programming train 1
         else:
             messageBytes = struct.pack('BB', self.OpMenuByte , 76) # Op code for programming train 2
-        messageBytes = messageBytes + struct.pack('<BL', 0, nPulses) # 0 is the USB packet correction byte. See PulsePal wiki
+        if self.model == 1:
+            messageBytes = messageBytes + struct.pack('<BL', 0, nPulses) # 0 is the USB packet correction byte. See PulsePal wiki
+        else:
+            messageBytes = messageBytes + struct.pack('<L', nPulses)
         messageBytes = messageBytes + struct.pack(('<' + 'L'*nPulses), *pulseTimes) # Add pulse times
-        messageBytes = messageBytes + struct.pack(('B'*nPulses), *pulseVoltages) # Add pulse times
+        if self.model == 1:
+            messageBytes = messageBytes + struct.pack(('B'*nPulses), *pulseVoltages) # Add pulse times
+        else:
+            messageBytes = messageBytes + struct.pack(('<' + 'H'*nPulses), *pulseVoltages) # Add pulse times
         self.serialObject.write(messageBytes)
-
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to sendCustomPulseTrain.')
     def sendCustomWaveform(self, customTrainID, pulseWidth, pulseVoltages): # For custom pulse trains with pulse times = pulse width
         nPulses = len(pulseVoltages)
         pulseTimes = [0]*nPulses
         pulseWidth = pulseWidth*self.cycleFrequency # Convert seconds to to multiples of minimum cycle (100us)
         for i in range(0,nPulses):
             pulseTimes[i] = pulseWidth*i # Add consecutive pulse
-            pulseVoltages[i] = math.ceil(((pulseVoltages[i]+10)/float(20))*255) # Convert volts to bytes
+            pulseVoltages[i] = math.ceil(((pulseVoltages[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bytes
         if customTrainID == 1:
             messageBytes = struct.pack('BB', self.OpMenuByte , 75) # Op code for programming train 1
         else:
             messageBytes = struct.pack('BB', self.OpMenuByte , 76) # Op code for programming train 2
-        messageBytes = messageBytes + struct.pack('<BL', 0, nPulses) # 0 is the USB packet correction byte. See PulsePal wiki
+        if self.model == 1:
+            messageBytes = messageBytes + struct.pack('<BL', 0, nPulses) # 0 is the USB packet correction byte. See PulsePal wiki
+        else:
+            messageBytes = messageBytes + struct.pack('<L', nPulses)
         messageBytes = messageBytes + struct.pack(('<' + 'L'*nPulses), *pulseTimes) # Add pulse times
-        messageBytes = messageBytes + struct.pack(('B'*nPulses), *pulseVoltages) # Add pulse times
+        if self.model == 1:
+            messageBytes = messageBytes + struct.pack(('B'*nPulses), *pulseVoltages) # Add pulse times
+        else:
+            messageBytes = messageBytes + struct.pack(('<' + 'H'*nPulses), *pulseVoltages) # Add pulse times
         self.serialObject.write(messageBytes) # Send custom waveform
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to sendCustomWaveform.')
     def triggerOutputChannels(self, channel1, channel2, channel3, channel4):
         triggerByte = 0
         triggerByte = triggerByte + (1*channel1)
@@ -224,11 +290,73 @@ class PulsePalObject(object):
         messageBytes = struct.pack('BBBB',self.OpMenuByte, 82, channel, state)
         self.serialObject.write(messageBytes)
     def setFixedVoltage(self, channel, voltage):
-        voltage = math.ceil(((voltage+10)/float(20))*255) # Convert volts to bytes
-        messageBytes = struct.pack('BBBB',self.OpMenuByte, 79, channel, voltage)
+        voltage = math.ceil(((voltage+10)/float(20))*self.dac_bitMax) # Convert volts to bytes
+        if self.model == 1:
+            messageBytes = struct.pack('BBBB',self.OpMenuByte, 79, channel, voltage)
+        else:
+            messageBytes = struct.pack('<BBBH',self.OpMenuByte, 79, channel, voltage)
         self.serialObject.write(messageBytes)
+        # Receive acknowledgement
+        ok = self.serialObject.read(1)
+        if len(ok) == 0:
+            raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to setFixedVoltage.')
     def setDisplay(self, row1String, row2String):
         messageBytes = row1String + chr(254) + row2String
         messageSize = len(messageBytes)
         messageBytes = chr(self.OpMenuByte) + chr(78) + chr(messageSize) + messageBytes
         self.serialObject.write(messageBytes)
+    def saveSDSettings(self, fileName):
+        if self.model == 1:
+            raise PulsePalError('Pulse Pal 1.X has no microSD card, and therefore does not support on-board settings files.')
+        else:
+            fileNameSize = len(fileName)
+            messageBytes = chr(self.OpMenuByte) + chr(90) + chr(1) + chr(fileNameSize) + fileName
+            self.serialObject.write(messageBytes)
+    def loadSDSettings(self, fileName):
+        if self.model == 1:
+            raise PulsePalError('Pulse Pal 1.X has no microSD card, and therefore does not support on-board settings files.')
+        else:
+            fileNameSize = len(fileName)
+            messageBytes = chr(self.OpMenuByte) + chr(90) + chr(0) + chr(fileNameSize) + fileName
+            self.serialObject.write(messageBytes)
+            response = self.serialObject.read(178)
+            ind = 0
+            cFreq = float(self.cycleFrequency)
+            for i in range(1,5):
+                self.phase1Duration[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.interPhaseInterval[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.phase2Duration[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.interPulseInterval[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.burstDuration[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.interBurstInterval[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.pulseTrainDuration[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+                self.pulseTrainDelay[i] = struct.unpack("<L",response[ind:ind+4])[0]/cFreq; ind+=4;
+            for i in range(1,5):
+                voltageBits = struct.unpack("<H",response[ind:ind+2])[0]; ind+=2;
+                self.phase1Voltage[i] = round((((voltageBits/float(self.dac_bitMax))*20)-10)*100)/100
+                voltageBits = struct.unpack("<H",response[ind:ind+2])[0]; ind+=2;
+                self.phase2Voltage[i] = round((((voltageBits/float(self.dac_bitMax))*20)-10)*100)/100
+                voltageBits = struct.unpack("<H",response[ind:ind+2])[0]; ind+=2;
+                self.restingVoltage[i] = round((((voltageBits/float(self.dac_bitMax))*20)-10)*100)/100
+            for i in range(1,5):
+                self.isBiphasic[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+                self.customTrainID[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+                self.customTrainTarget[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+                self.customTrainLoop[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+            for i in range(1,5):
+                self.linkTriggerChannel1[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+            for i in range(1,5):
+                self.linkTriggerChannel2[i] = struct.unpack("B",response[ind])[0]; ind+=1;
+            self.triggerMode[1] = struct.unpack("B",response[ind])[0]; ind+=1;
+            self.triggerMode[2] = struct.unpack("B",response[ind])[0];
+    def __str__(self):
+        sb = []
+        for key in self.__dict__:
+            sb.append("{key}='{value}'".format(key=key, value=self.__dict__[key]))
+
+        return ', '.join(sb)
+
+    def __repr__(self):
+        return self.__str__()
+class PulsePalError(Exception):
+    pass

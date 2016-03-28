@@ -23,7 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 # Initializing PulsePal
 from PulsePal import PulsePalObject # Import PulsePalObject
 myPulsePal = PulsePalObject() # Create a new instance of a PulsePal object
-myPulsePal.connect('COM3') # Connect to PulsePal on port COM4 (open port, handshake and receive firmware version)
+myPulsePal.connect('COM3') # Connect to PulsePal on port COM3 (open port, handshake and receive firmware version)
 print(myPulsePal.firmwareVersion) # Print firmware version to the console
 
 # Examples of programming individual output channel parameters

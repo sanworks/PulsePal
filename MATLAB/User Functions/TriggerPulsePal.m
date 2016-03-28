@@ -41,7 +41,7 @@ else
     if nargin > 1
         Channels = [Channels cell2mat(varargin)];
     end
-        TriggerAddress = sum(2.^(Channels-1));
+        TriggerAddress = sum(Channels .* [1 2 4 8]);
 end
 
 TriggerAddress = uint8(TriggerAddress);

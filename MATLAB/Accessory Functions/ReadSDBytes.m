@@ -19,7 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
 function Data = ReadSDBytes(StartAddress, nBytes)
-% This function reads bytes from Pulse Pal's EEPROM chip.
+% This function reads bytes from the current file on Pulse Pal 2's MicroSD card.
 global PulsePalSystem;
 nBytesBytes = typecast(uint32(nBytes), 'uint8');
 StartAddressBytes = typecast(uint32(StartAddress), 'uint8');
