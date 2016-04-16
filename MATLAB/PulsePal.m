@@ -91,7 +91,9 @@ catch
     end
     try
         % Connect to hardware
-        if nargin == 1
+        if nargin > 1
+            PulsePalSerialInterface('init', varargin{1}, varargin{2});
+        elseif nargin > 0
             PulsePalSerialInterface('init', varargin{1});
         else
             PulsePalSerialInterface('init');

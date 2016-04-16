@@ -1,1 +1,0 @@
-The C++ API currently only supports Pulse Pal 1.1. Pulse Pal 2 support will be released in a future update.

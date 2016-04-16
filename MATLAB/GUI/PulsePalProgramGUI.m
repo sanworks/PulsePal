@@ -1,8 +1,8 @@
 %{
 ----------------------------------------------------------------------------
 
-This file is part of the PulsePal Project
-Copyright (C) 2014 Joshua I. Sanders, Cold Spring Harbor Laboratory, NY, USA
+This file is part of the Sanworks Pulse Pal repository
+Copyright (C) 2016 Sanworks LLC, Sound Beach, New York, USA
 
 ----------------------------------------------------------------------------
 

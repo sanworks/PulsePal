@@ -1,8 +1,8 @@
 '''
 ----------------------------------------------------------------------------
 
-This file is part of the PulsePal Project
-Copyright (C) 2014 Joshua I. Sanders, Cold Spring Harbor Laboratory, NY, USA
+This file is part of the Sanworks Pulse Pal repository
+Copyright (C) 2016 Sanworks LLC, Sound Beach, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -312,12 +312,19 @@ class PulsePalObject(object):
             fileNameSize = len(fileName)
             messageBytes = chr(self.OpMenuByte) + chr(90) + chr(1) + chr(fileNameSize) + fileName
             self.serialObject.write(messageBytes)
+    def deleteSDSettings(self, fileName):
+        if self.model == 1:
+            raise PulsePalError('Pulse Pal 1.X has no microSD card, and therefore does not support on-board settings files.')
+        else:
+            fileNameSize = len(fileName)
+            messageBytes = chr(self.OpMenuByte) + chr(90) + chr(3) + chr(fileNameSize) + fileName
+            self.serialObject.write(messageBytes)
     def loadSDSettings(self, fileName):
         if self.model == 1:
             raise PulsePalError('Pulse Pal 1.X has no microSD card, and therefore does not support on-board settings files.')
         else:
             fileNameSize = len(fileName)
-            messageBytes = chr(self.OpMenuByte) + chr(90) + chr(0) + chr(fileNameSize) + fileName
+            messageBytes = chr(self.OpMenuByte) + chr(90) + chr(2) + chr(fileNameSize) + fileName
             self.serialObject.write(messageBytes)
             response = self.serialObject.read(178)
             ind = 0

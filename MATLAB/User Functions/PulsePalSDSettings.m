@@ -37,13 +37,15 @@ if sum(SettingsFileName == '.') == 0
 end
 Op = lower(Op);
 switch Op
-    case 'load'
-        OpBit = 0;
     case 'save'
-        OpBit = 1;
+        OpByte = 1;
+    case 'load'
+        OpByte = 2;
+    case 'delete'
+        OpByte = 3;
 end
 SettingsNameLength = length(SettingsFileName);
-Message = [PulsePalSystem.OpMenuByte 90 OpBit SettingsNameLength SettingsFileName];
+Message = [PulsePalSystem.OpMenuByte 90 OpByte SettingsNameLength SettingsFileName];
 PulsePalSerialInterface('write', Message, 'uint8');
 CycleFreq = PulsePalSystem.CycleFrequency;
 RegisterBits = PulsePalSystem.RegisterBits;
@@ -79,7 +81,7 @@ if strcmp(Op, 'load')
         PulsePalSystem.Params.TriggerMode = Msg(Pos:Pos+1);
     end
 end
-
+ConfirmBit = 1;
 function Seconds = Bytes2Seconds(Bytes, CycleFreq)
 Seconds = double(typecast(uint8(Bytes), 'uint32'))/CycleFreq;
 
