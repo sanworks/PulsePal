@@ -20,6 +20,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function ConfirmBit = SetPulsePalVoltage(ChannelID, Voltage)
 global PulsePalSystem
-VoltageOutput = uint8(PulsePalVolts2Bits(Voltage, RegisterBits));
-PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte char(79) char(ChannelID) char(VoltageOutput)], 'uint8');
+if PulsePalSystem.FirmwareVersion < 20
+    VoltageOutput = uint8(PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits));
+else
+    VoltageOutput = typecast(uint16(PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits)), 'uint8');
+end
+PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 79 uint8(ChannelID) VoltageOutput], 'uint8');
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation

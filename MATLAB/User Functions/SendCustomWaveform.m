@@ -31,9 +31,14 @@ SamplingPeriod = SamplingPeriod*PulsePalSystem.CycleFrequency; % Convert to mult
 PulseTimes = 0:SamplingPeriod:((length(Voltages)*SamplingPeriod)-1);
 
 nPulses = length(PulseTimes);
-
-if nPulses > 1000
-    error('Error: Pulse Pal can only store 1000 pulses per stimulus train.');
+if PulsePalSystem.FirmwareVersion > 19
+    if nPulses > 5000
+        error('Error: Pulse Pal 2 can only store 5000 pulses per custom pulse train.');
+    end
+else
+    if nPulses > 1000
+        error('Error: Pulse Pal 1.X can only store 1000 pulses per custom pulse train.');
+    end
 end
 
 % Sanity-check PulseTimes and voltages

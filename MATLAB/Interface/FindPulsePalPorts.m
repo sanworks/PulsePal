@@ -36,13 +36,38 @@ for x = 1:nPorts
 end
 LeafLabsPorts = LeafLabsPorts(1:nPorts);
 % Find Arduino Due ports (in case Pulse Pal 2 is connected)
-[Status RawString] = system('wmic path Win32_SerialPort Where "Caption LIKE ''%Arduino DUE%''" Get DeviceID');
-PortLocations = strfind(RawString, 'COM');
-ArduinoPorts = cell(1,100);
-nPorts = length(PortLocations);
-for x = 1:nPorts
-    Clip = RawString(PortLocations(x):PortLocations(x)+6);
-    ArduinoPorts{x} = Clip(1:find(Clip == 32,1, 'first')-1);
+
+% ------New discovery method, using powershell. 
+[Status, RawString] = system('powershell.exe -inputformat none -command "Get-WMIObject Win32_SerialPort"');
+PortLocations = strfind(RawString, 'Arduino Due (');
+nCandidatePorts = length(PortLocations);
+ArduinoPorts = cell(1,nCandidatePorts);
+for x = 1:nCandidatePorts
+    Clip = RawString(PortLocations(x):PortLocations(x)+19);
+    PortNameLocation = strfind(Clip, 'COM');
+    PortName = Clip(PortNameLocation:end);
+    ArduinoPorts{x} = PortName(uint8(PortName)>47);
 end
+if nCandidatePorts > 0
+    ArduinoPorts = unique(ArduinoPorts);
+    nPorts = length(ArduinoPorts);
+else
+    nPorts = 0;
+end
+% -----
+% Old discovery method, using wmic. This method does not work on Windows
+% home edition. Uncomment, and comment the section above, if you encounter
+% auto-discovery errors. As a fallback, call PulsePal with a serial port
+% argument -i.e. PulsePal('COM3');
+%
+% [Status RawString] = system('wmic path Win32_SerialPort Where "Caption LIKE ''%Arduino DUE%''" Get DeviceID');
+% PortLocations = strfind(RawString, 'COM');
+% ArduinoPorts = cell(1,100);
+% nPorts = length(PortLocations);
+% for x = 1:nPorts
+%     Clip = RawString(PortLocations(x):PortLocations(x)+6);
+%     ArduinoPorts{x} = Clip(1:find(Clip == 32,1, 'first')-1);
+% end
+% -----
 ArduinoPorts = ArduinoPorts(1:nPorts);
 SerialPorts = [LeafLabsPorts ArduinoPorts];

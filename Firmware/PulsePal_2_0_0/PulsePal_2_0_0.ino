@@ -59,7 +59,7 @@ unsigned long FirmwareVersion = 20;
 // initialize Arduino LCD library with the numbers of the interface pins
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
 
-// Variables that define hardware pins
+// Variables that define other hardware pins
 byte TriggerLines[2] = {12,11}; // Trigger channels 1 and 2
 byte InputLEDLines[2] = {13, A0}; // LEDs above trigger channels 1-2. An = Arduino Analog Channel n.
 byte OutputLEDLines[4] = {A1,A7,A11,A10}; // LEDs above output channels 1-4
@@ -117,8 +117,8 @@ unsigned long PulseTrainTimestamps[4] = {0};
 unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pulse-low timestamp for each channel
 unsigned long NextBurstTransitionTime[4] = {0}; // Stores next burst-on or burst-off timestamp for each channel
 unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is supposed to end
-unsigned long CustomPulseTimes[2][1001] = {0};
-uint16_t CustomVoltages[2][1001] = {0};
+unsigned long CustomPulseTimes[2][5001] = {0};
+uint16_t CustomVoltages[2][5001] = {0};
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
 unsigned long LastLoopTime = 0;
 byte PulseStatus[4] = {0}; // This is 0 if not delivering a pulse, 1 if phase 1, 2 if inter phase interval, 3 if phase 2.
@@ -156,7 +156,7 @@ char currentSettingsFileNameChar[100]; // Filename must be converted from string
 char candidateSettingsFileChar[16];
 byte settingsOp = 0; // Reports whether to load an existing settings file, or create/overwrite, or delete
 byte validProgram = 0; // Reports whether the program just loaded from the SD card is valid 
-uint16_t myFilePos = 2; // Index of current file position in folder. . and .. are 0 and 1
+uint16_t myFilePos = 2; // Index of current file position in folder. 0 and 1 are . and ..
 
 // variables used in thumb joystick menus
 char Value2Display[18] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '\0'}; // Holds text for sprintf
@@ -178,6 +178,7 @@ int ClickerMinThreshold = 300; // Joystick position to consider an upwards or le
 int ClickerMaxThreshold = 700;
 boolean ClickerButtonState = 0; // Value of digital reads from button line of joystick input device
 boolean LastClickerButtonState = 1;
+unsigned int DebounceTime = 0; // Time since the joystick button changed states
 int LastClickerYState = 0; // 0 for neutral, 1 for up, 2 for down.
 int LastClickerXState = 0; // 0 for neutral, 1 for left, 2 for right.
 int inMenu = 0; // Menu level: 0 for top, 1 for channel menu, 2 for action menu
@@ -211,7 +212,7 @@ void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 unsigned long callbackStartTime = 0;
-boolean DACFlags[4] = {0}; // Flag for each channel
+boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 
 void setup() {
   SerialUSB.begin(115200);
@@ -228,7 +229,7 @@ void setup() {
   pinMode(TriggerLines[1], INPUT);
   pinMode(ClickerButtonLine, INPUT_PULLUP);
  
-    for (int x = 0; x < 4; x++) {
+  for (int x = 0; x < 4; x++) {
     pinMode(OutputLEDLines[x], OUTPUT);
     digitalWrite(OutputLEDLines[x], LOW);
   }
@@ -246,7 +247,6 @@ void setup() {
     }
     currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
     settingsFile.open(currentSettingsFileNameChar, O_READ);
-    //SPI.begin();
     SPI.beginTransaction(DACSettings);
     digitalWrite(LDACPin, LOW);
     ProgramDAC(16, 0, 31); // Power up DACs
@@ -256,32 +256,31 @@ void setup() {
       digitalWrite(InputLEDLines[x], LOW);
     }
     validProgram = RestoreParametersFromSD();
-    if (validProgram != 252) {
+    if (validProgram != 252) { // 252 is the last byte in a real program file, returned from RestoreParametersFromSD()
       LoadDefaultParameters();
     }
-    
     // Set DAC to resting voltage on all channels
-    for (int x = 0; x < 4; x++) {
-      RestingVoltage[x] = 32768;
-      DACValues[x] = RestingVoltage[x];
+    for (int i = 0; i < 4; i++) {
+      RestingVoltage[i] = 32768; // 16-bit code for 0, in the range of -10 to +10
+      DACValues[i] = RestingVoltage[i];
+      DACFlags[i] = 1; // DACFlags must be set to 1 on each channel, so the channels aren't skipped in dacWrite()
     }
-    dacWrite(DACValues);
+    dacWrite(DACValues); // Update the DAC
     write2Screen(CommanderString," Click for menu");
     DefaultInputLevel = 1 - TriggerLevel;
-    InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); 
+    InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); // Pre-read trigger channels
     InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
     SystemTime = 0;
     LastLoopTime = SystemTime;
     Timer3.attachInterrupt(handler);
-    Timer3.start(50); // Calls every 50us
+    Timer3.start(50); // Calls handler precisely every 50us
 }
 
 void loop() {
 
 }
 
-void handler(void) {
-  //callbackStartTime = micros();
+void handler(void) {                     
   if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
     Timer3.stop();
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
@@ -289,8 +288,8 @@ void handler(void) {
     Timer3.start();
   }
   if (StimulatingState == 0) {
-      if (LastStimulatingState == 1) { // The cycle all pulse trains have finished
-        dacWrite(DACValues); // Update DAC
+      if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
+        dacWrite(DACValues); // Update DAC to final voltages (should be resting voltage)
         DACFlag = 0;
       }
       UpdateSettingsMenu(); // Check for joystick button click, handle if detected
@@ -308,39 +307,39 @@ void handler(void) {
       }
    } else {
 //     if (StimulatingState == 2) {
-//                // Place to include first-cycle operations
+//                // Place to include code that executes on the first cycle of a pulse train
 //     }
-     StimulatingState = 1;
-     if (DACFlag == 1) {
-       dacWrite(DACValues); // Update DAC
-       DACFlag = 0;
-     }
-     SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
-     ClickerButtonState = digitalReadDirect(ClickerButtonLine);
-     if (ClickerButtonState == 0){ // A button click ends ongoing stimulation on all channels.
-       AbortAllPulseTrains();
-     }
-  }
-  for (int i = 0; i<4; i++) {
-    if(SoftTriggerScheduled[i]) {
-      SoftTriggered[i] = 1;
-      SoftTriggerScheduled[i] = 0;
+       StimulatingState = 1;
+       if (DACFlag == 1) { // A DAC update was requested
+         dacWrite(DACValues); // Update DAC
+         DACFlag = 0;
+       }
+       SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
+       ClickerButtonState = digitalReadDirect(ClickerButtonLine); // Read the joystick button
+       if (ClickerButtonState == 0){ // A button click (pulls line to ground, = logic 0) and ends ongoing stimulation on all channels.
+         AbortAllPulseTrains();
+       }
     }
-  }
-  LastStimulatingState = StimulatingState;
+    for (int i = 0; i<4; i++) {
+      if(SoftTriggerScheduled[i]) { // Soft triggers are "scheduled" to be handled on the next cycle, since the serial read took too much time.
+        SoftTriggered[i] = 1;
+        SoftTriggerScheduled[i] = 0;
+      }
+    }
+    LastStimulatingState = StimulatingState;
       
-  if (SerialUSB.available() > 0) {
-    CommandByte = SerialUSB.read();
-    if (CommandByte == OpMenuByte) {
-      CommandByte = SerialReadByte();
+  if (SerialUSB.available()) { // If bytes are available in the serial port buffer
+    CommandByte = SerialUSB.read(); // Read a byte
+    if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
+      CommandByte = SerialReadByte(); // Read the command byte (an op code for the operation to execute)
       switch (CommandByte) {
         case 72: { // Handshake
           SerialUSB.write(75); // Send 'K' (as in ok)
-          SerialWriteLong(FirmwareVersion);
+          SerialWriteLong(FirmwareVersion); // Send the firmware version as a 4 byte unsigned integer
           ConnectedToApp = 1;
         } break;
-        case 73: { // Program the module - total program (faster than item-wise in some instances)
-          for (int x = 0; x < 4; x++) {
+        case 73: { // Program the module - total program (can be faster than item-wise, if many parameters have changed)
+          for (int x = 0; x < 4; x++) { // Read timing parameters (4 byte integers)
             Phase1Duration[x] = SerialReadLong();
             InterPhaseInterval[x] = SerialReadLong();
             Phase2Duration[x] = SerialReadLong();
@@ -350,23 +349,23 @@ void handler(void) {
             PulseTrainDuration[x] = SerialReadLong();
             PulseTrainDelay[x] = SerialReadLong();
           }
-          for (int x = 0; x < 4; x++) {
+          for (int x = 0; x < 4; x++) { // Read voltage parameters (2 byte integers)
             Phase1Voltage[x] = SerialReadShort();
             Phase2Voltage[x] = SerialReadShort();
             RestingVoltage[x] = SerialReadShort();
           }
-          for (int x = 0; x < 4; x++) {
+          for (int x = 0; x < 4; x++) { // Read single byte parameters
             IsBiphasic[x] = SerialReadByte();
             CustomTrainID[x] = SerialReadByte();
             CustomTrainTarget[x] = SerialReadByte();
             CustomTrainLoop[x] = SerialReadByte();
           }
-         for (int x = 0; x < 2; x++) { // Read 8 trigger address bytes
+         for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
            for (int y = 0; y < 4; y++) {
              TriggerAddress[x][y] = SerialReadByte();
            }
          }
-         TriggerMode[0] = SerialReadByte(); 
+         TriggerMode[0] = SerialReadByte(); // Read bytes that set interpretation of trigger channel voltage
          TriggerMode[1] = SerialReadByte();
          SerialUSB.write(1); // Send confirm byte
          for (int x = 0; x < 4; x++) {
@@ -384,8 +383,7 @@ void handler(void) {
          dacWrite(DACValues);
         } break;
         
-        // Program the module - one parameter
-        case 74: {
+        case 74: { // Program one parameter
           inByte2 = SerialReadByte();
           inByte3 = SerialReadByte(); // inByte3 = channel (1-4)
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
@@ -427,8 +425,7 @@ void handler(void) {
           SerialUSB.write(1); // Send confirm byte
         } break;
   
-        // Program custom stimulus 1
-        case 75: {
+        case 75: { // Program custom pulse train 1
           CustomTrainNpulses[0] = SerialReadLong();
           for (int x = 0; x < CustomTrainNpulses[0]; x++) {
             CustomPulseTimes[0][x] = SerialReadLong();
@@ -438,8 +435,8 @@ void handler(void) {
           }
           SerialUSB.write(1); // Send confirm byte
         } break;
-        // Program custom stimulus 2
-        case 76: {
+        
+        case 76: { // Program custom pulse train 2
           CustomTrainNpulses[1] = SerialReadLong();
           for (int x = 0; x < CustomTrainNpulses[1]; x++) {
             CustomPulseTimes[1][x] = SerialReadLong();
@@ -449,16 +446,16 @@ void handler(void) {
           }
           SerialUSB.write(1); // Send confirm byte
         } break;      
-        // Soft-trigger the module
-        case 77: {
+        
+        case 77: { // Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
           inByte2 = SerialReadByte();
-          for (int x = 0; x < 4; x++) {
+          for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
             // (albeit at the expense of ~50us latency)
-            SoftTriggerScheduled[x] = bitRead(inByte2, x); 
+            SoftTriggerScheduled[i] = bitRead(inByte2, i); 
           }
         } break;
-        case 78: { 
+        case 78: { // Display a custom message on the oLED screen
           lcd.clear();
            lcd.home(); 
            byte ByteCount = 0;
@@ -475,81 +472,75 @@ void handler(void) {
               ByteCount++;
           }
         } break;
-        case 79: {
-          // Write specific voltage to output channel (not a pulse train) 
-          inByte = SerialReadByte();
-          inByte = inByte - 1; // Convert for zero-indexing
-          DACValues[inByte] = SerialReadShort();
+        case 79: { // Write specific voltage to an output channel (not a pulse train) 
+          byte myChannel = SerialReadByte();
+          myChannel = myChannel - 1; // Convert for zero-indexing
+          uint16_t val = SerialReadShort();
+          DACValues[myChannel] = val;
+          DACFlags[myChannel] = 1;
           dacWrite(DACValues);
+          if (DACValues[myChannel] == RestingVoltage[myChannel]) {
+            digitalWriteDirect(OutputLEDLines[myChannel], LOW);
+          } else {
+            digitalWriteDirect(OutputLEDLines[myChannel], HIGH);
+          }
           SerialUSB.write(1); // Send confirm byte
         } break;
         case 80: { // Soft-abort ongoing stimulation without disconnecting from client
-         for (int x = 0; x < 4; x++) {
-          killChannel(x);
+         for (int i = 0; i < 4; i++) {
+          killChannel(i);
+          DACFlags[i] = 1;
         }
         dacWrite(DACValues);
        } break;
-       case 81: { // Disconnect from client and store params to SD
+       case 81: { // Disconnect from client
           ConnectedToApp = 0;
           inMenu = 0;
-          for (int x = 0; x < 4; x++) {
-            killChannel(x);
+          for (int i = 0; i < 4; i++) {
+            killChannel(i);
+            DACFlags[i] = 1;
           }
           dacWrite(DACValues);
-          // Store last program to SD Card
-          write2Screen("Saving Settings",".");
-          //SaveCurrentProgram2SD();
-          write2Screen("Saving Settings",". . . . . Done!");
-          delayMicroseconds(400000); 
-          for (int x = 0; x < 16; x++) {
-           CommanderString[x] = DefaultCommanderString[x];
+          for (int i = 0; i < 16; i++) {
+           CommanderString[i] = DefaultCommanderString[i];
          } 
           write2Screen(CommanderString," Click for menu");
          } break;
-         // Set free-run mode
-        case 82:{
-          inByte2 = SerialReadByte();
+        case 82:{ // Set Continuous Loop mode (play the current parametric pulse train indefinitely)
+          inByte2 = SerialReadByte(); // Channel
           inByte2 = inByte2 - 1; // Convert for zero-indexing
-          inByte3 = SerialReadByte();
+          inByte3 = SerialReadByte(); // State (0 = off, 1 = on)
           ContinuousLoopMode[inByte2] = inByte3;
+          if (inByte3) {
+            SoftTriggerScheduled[inByte2] = 1;
+          } else {
+            killChannel(inByte2);
+            DACFlags[inByte2] = 1;
+            dacWrite(DACValues);
+          }
           SerialUSB.write(1);
         } break;
-        case 83: { // Clear stored parameters from EEPROM
-         //WipeEEPROM();
-         if (inMenu == 0) {
-          write2Screen(CommanderString," Click for menu");
-        } else {
-          inMenu = 1;
-          //RefreshChannelMenu(SelectedChannel);
-        }
-       } break;
-       case 84: {
-          inByte2 = SerialReadByte();
-          //EEPROM_address = inByte2;
-          //nBytesToWrite = SerialReadByte();
-          //for (int i = 0; i < nBytesToWrite; i++) {
-          //PageBytes[i] = SerialReadByte();
-          //}
-          //WriteEEPROMPage(PageBytes, nBytesToWrite, EEPROM_address);
-          SerialUSB.write(1);
-        } break; 
-      case 85: {
+//        case 83: { // Clear stored parameters from EEPROM in Pulse Pal 1 (currently unused in Pulse Pal 2)
+//
+//       } break;
+//       case 84: { // Write a page of memory to EEPROM in Pulse Pal 1 (currently unused in Pulse Pal 2)
+//
+//        } break; 
+      case 85: { // Return the currently loaded parameter file from the microSD card
           settingsFile.rewind();
-          unsigned long startByte = SerialReadLong();
-          unsigned long endByte = startByte + SerialReadLong();
-          for (int i = startByte; i < endByte; i++) {
+          for (int i = 0; i < 178; i++) {
             settingsFile.read(buf, sizeof(buf));
             SerialUSB.write(buf[0]);
           }
         } break;
         
-        case 86: { // Override IO Lines
+        case 86: { // Override Arduino IO Lines (for development and debugging only - may disrupt normal function)
           inByte2 = SerialReadByte();
           inByte3 = SerialReadByte();
           pinMode(inByte2, OUTPUT); digitalWrite(inByte2, inByte3);
         } break; 
         
-        case 87: { // Direct Read IO Lines
+        case 87: { // Direct Read IO Lines (for development and debugging only - may disrupt normal function)
           inByte2 = SerialReadByte();
           pinMode(inByte2, INPUT);
           delayMicroseconds(10);
@@ -627,31 +618,6 @@ void handler(void) {
             sd.remove(currentSettingsFileNameChar);
           }
           settingsFile.rewind();
-        } break;
-        case 91: { // Return names of all settings files
-          // First, determine how many files there are
-          sd.vwd()->rewind();
-          byte ok = 1;
-          int fileCount = 0;
-          while (ok == 1) {
-            fileCount++;
-            candidateSettingsFile.close();
-            ok = candidateSettingsFile.openNext(sd.vwd(), O_READ);
-          }
-          fileCount--;
-          candidateSettingsFile.close();
-          SerialWriteShort(fileCount);
-          // Next, loop through settings files and return names as untrimmed 16-char strings
-          sd.vwd()->rewind();
-          for (int i = 0; i < fileCount; i++) {
-            candidateSettingsFile.openNext(sd.vwd(), O_READ);
-            for (int j = 0; j < 16; j++) {candidateSettingsFileChar[j] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            candidateSettingsFile.close();
-            for (int j = 0; j < 16; j++) {
-              SerialUSB.write(candidateSettingsFileChar[j]);
-            }
-          }
         } break;
      }
     }
@@ -759,7 +725,6 @@ void handler(void) {
             if ((CustomTrainID[x] == 0) || ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1))) {
               if (SystemTime == NextPulseTransitionTime[x]) {
                 NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                if ((IsCustomBurstTrain[x] == 1) || (PulseDuration[x] + SystemTime) <= PulseTrainEndTime[x]) { // so that it doesn't start a pulse it can't finish due to pulse train end
                     if (!((UsesBursts[x] == 1) && (NextPulseTransitionTime[x] >= NextBurstTransitionTime[x]))){ // so that it doesn't start a pulse it can't finish due to burst end
                       PulseStatus[x] = 1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
@@ -769,7 +734,6 @@ void handler(void) {
                         DACValues[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
                       }
                     }
-                  }
                  }
               } else {
                if (SystemTime == NextPulseTransitionTime[x]) {
@@ -986,10 +950,6 @@ void handler(void) {
         }
      }
    }
-//   if (StimulatingState) {
-//     MicrosTime = micros() - callbackStartTime;
-//     SerialUSB.write(MicrosTime);
-//   }
 }
 // End main loop
 
@@ -1123,21 +1083,40 @@ void UpdateSettingsMenu() {
                 }
                 settingsFile.open(currentSettingsFileNameChar, O_READ);
               } break;
-              case 9: { // Reset
+              case 9: { // Delete settings
+                inMenu = 7; 
+                settingsFile.close();
+                sd.vwd()->rewind();
+                myFilePos = 1;
+                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
+                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
+                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+                  // Center settings file name
+                  centerText(candidateSettingsFileChar);
+                  for (int i = 0; i < 16; i++) {
+                    candidateSettingsFileChar[i] = centeredText[i];
+                  }
+                  write2Screen("<Click to erase>", candidateSettingsFileChar);
+                  candidateSettingsFile.close();
+                } else {
+                  write2Screen("!Error reading", "SD Card!");
+                }
+              } break;
+              case 10: { // Reset
               write2Screen(" "," ");
               delayMicroseconds(1000000);
                 Software_Reset();
               } break;
-              case 10: {
+              case 11: {
                 inMenu = 0;
                 write2Screen(CommanderString," Click for menu");
               } break;
               
-            default: {
-              inMenu = 2; // output menu
-              SelectedAction = 1;
-              write2Screen("< Trigger Now  >"," ");
-            } break;
+              default: {
+                inMenu = 2; // output menu
+                SelectedAction = 1;
+                write2Screen("< Trigger Now  >"," ");
+              } break;
            }
          } break;
          case 2: { // Channel menu
@@ -1260,6 +1239,8 @@ void UpdateSettingsMenu() {
               if (ContinuousLoopMode[SelectedChannel-1] == false) {
                  write2Screen("<  Continuous  >","      On");
                  ContinuousLoopMode[SelectedChannel-1] = true;
+                 SoftTriggerScheduled[SelectedChannel-1] = 1;
+                 delayMicroseconds(200000); // Debounce
              } else {
                  write2Screen("<  Continuous  >","      Off");
                  ContinuousLoopMode[SelectedChannel-1] = false;
@@ -1318,7 +1299,7 @@ void UpdateSettingsMenu() {
           if (myFilePos < 1) {
             inMenu = 1;
             SelectedChannel = 8;
-            write2Screen("-LOAD SETTINGS- ","<Click to load >");
+            write2Screen(" LOAD SETTINGS  ","<Click to load >");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
@@ -1340,7 +1321,7 @@ void UpdateSettingsMenu() {
               delayMicroseconds(1000000);
               inMenu = 1;
               SelectedChannel = 8;
-              write2Screen("-LOAD SETTINGS- ","<Click to load >");
+              write2Screen(" LOAD SETTINGS  ","<Click to load >");
               NeedUpdate = 1;
             }
           }
@@ -1349,7 +1330,7 @@ void UpdateSettingsMenu() {
           if (myFilePos < 1) {
             inMenu = 1;
             SelectedChannel = 7;
-            write2Screen("-SAVE SETTINGS- ","<Click to save >");
+            write2Screen(" SAVE SETTINGS  ","<Click to save >");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
@@ -1454,9 +1435,26 @@ void UpdateSettingsMenu() {
             delayMicroseconds(1000000);
             inMenu = 1;
             SelectedChannel = 7;
-            write2Screen("-SAVE SETTINGS- ","<Click to save >");
+            write2Screen(" SAVE SETTINGS  ","<Click to save >");
             NeedUpdate = 1;
             myFilePos = 2;
+          }
+        } break;
+        case 7: { // Handle click in delete menu
+          if (myFilePos < 2) {
+            inMenu = 1;
+            SelectedChannel = 9;
+            write2Screen(" ERASE SETTINGS ","<Click to erase>");
+            NeedUpdate = 1;
+            myFilePos = 1;
+          } else {
+            sd.remove(candidateSettingsFileChar);
+            write2Screen("Settings erased."," ");
+            delayMicroseconds(1000000);
+            inMenu = 1;
+            SelectedChannel = 9;
+            write2Screen(" ERASE SETTINGS ","<Click to erase>");
+            NeedUpdate = 1;
           }
         } break;
       }
@@ -1478,10 +1476,11 @@ void UpdateSettingsMenu() {
       }
       if (inMenu == 3) {SelectedStimMode = SelectedStimMode - 1;}
       if (inMenu == 4) {SelectedInputAction = SelectedInputAction - 1;}
-      if (inMenu == 5) {if (myFilePos > 0) {myFilePos = myFilePos - 1;}};
-      if (inMenu == 6) {if (myFilePos > 0) {myFilePos = myFilePos - 1;}};
+      if ((inMenu > 4) && (inMenu < 8)) {
+        if (myFilePos > 0) {myFilePos = myFilePos - 1;}
+      }
       if (SelectedInputAction == 0) {SelectedInputAction = 3;}
-      if (SelectedChannel == 0) {SelectedChannel = 10;}
+      if (SelectedChannel == 0) {SelectedChannel = 11;}
       if (SelectedAction == 0) {SelectedAction = 18;}
       if (SelectedStimMode == 0) {SelectedStimMode = 4;}
     }
@@ -1498,14 +1497,11 @@ void UpdateSettingsMenu() {
       }
       if (inMenu == 3) {SelectedStimMode++;}
       if (inMenu == 4) {SelectedInputAction++;}
-      if (inMenu == 5) {
-        myFilePos = myFilePos + 1;
-      }
-      if (inMenu == 6) {
-        myFilePos = myFilePos + 1;
+      if (inMenu > 4 && inMenu < 8) {
+        myFilePos++;
       }
       if (SelectedInputAction == 4) {SelectedInputAction = 1;}
-      if (SelectedChannel == 11) {SelectedChannel = 1;}
+      if (SelectedChannel == 12) {SelectedChannel = 1;}
       if (SelectedAction == 19) {SelectedAction = 1;}
       if (SelectedStimMode == 5) {SelectedStimMode = 1;}
     }
@@ -1584,6 +1580,28 @@ void UpdateSettingsMenu() {
             candidateSettingsFile.close();
           }
         } break;
+        case 7: {
+          if (myFilePos == 0) {
+            write2Screen("<    Cancel    >", " ");
+          } else {
+            candidateSettingsFile.close();
+            if (!skipToFile(myFilePos)) {
+              if (myFilePos > 1) {
+                skipToFile(myFilePos-1);
+                myFilePos = myFilePos - 1;
+              }
+            }
+            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
+            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+            // Center settings file name
+            centerText(candidateSettingsFileChar);
+            for (int i = 0; i < 16; i++) {
+              candidateSettingsFileChar[i] = centeredText[i];
+            }
+            write2Screen("<Click to erase>", candidateSettingsFileChar);
+            candidateSettingsFile.close();
+          }
+        } break;
     }
     NeedUpdate = 0;
   }
@@ -1596,7 +1614,6 @@ void centerText(char myText[]) {
     if (myText[i] == 0) {spaceCounter++;}
     tempText[i] = 32;
   }
-  SerialUSB.println(spaceCounter);
   fileNameOffset = spaceCounter/2;
     for (int i = fileNameOffset; i < 16; i++) {
       tempText[i] = myText[i-fileNameOffset];
@@ -1624,10 +1641,11 @@ void RefreshChannelMenu(int ThisChannel) {
         case 4: {write2Screen("Output Channels","<  Channel 4  >");} break;
         case 5: {write2Screen("Trigger Channels","<  Channel 1  >");} break;
         case 6: {write2Screen("Trigger Channels","<  Channel 2  >");} break;
-        case 7: {write2Screen("-SAVE SETTINGS- ","< Select File >");} break;
-        case 8: {write2Screen("-LOAD SETTINGS- ","< Select File >");} break;
-        case 9: {write2Screen("    -RESET-       ","<Click to reset>");} break;
-        case 10: {write2Screen("<Click to exit>"," ");} break;
+        case 7: {write2Screen(" SAVE SETTINGS  ","< Select File >");} break;
+        case 8: {write2Screen(" LOAD SETTINGS  ","< Select File >");} break;
+        case 9: {write2Screen(" ERASE SETTINGS ","< Select File >");} break;
+        case 10: {write2Screen("    -RESET-       ","<Click to reset>");} break;
+        case 11: {write2Screen("<Click to exit>"," ");} break;
   }
 }
 void RefreshActionMenu(int ThisAction) {
@@ -1728,9 +1746,8 @@ if (Units == 2) {
   return Value2Display;
 }
 boolean ReadDebouncedButton() {
-  unsigned int DebounceTime = millis();
+  DebounceTime = millis();
   ClickerButtonState = digitalRead(ClickerButtonLine);
-  //ClickerButtonState = gpio_read_bit(INPUT_PIN_PORT, ClickerButtonBit);
     if (ClickerButtonState != lastButtonState) {lastDebounceTime = DebounceTime;}
     lastButtonState = ClickerButtonState;
    if (((DebounceTime - lastDebounceTime) > 75) && (ClickerButtonState == 0)) {
@@ -1738,7 +1755,6 @@ boolean ReadDebouncedButton() {
    } else {
      return 0;
    }
-   
 }
 
 unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit, unsigned long StepSize, byte Units) {
@@ -2220,4 +2236,3 @@ void SerialWriteShort(word num) {
   SerialUSB.write((byte)num); 
   SerialUSB.write((byte)(num >> 8)); 
 }
-

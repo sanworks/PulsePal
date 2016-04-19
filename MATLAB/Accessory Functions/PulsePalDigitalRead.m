@@ -18,12 +18,12 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
-function LogicLevel = PulsePalDigitalRead(MaplePin)
-% Writes logic 0 or 1 to an i/o pin on Maple. Pin will be automatically configured for output.
+function LogicLevel = PulsePalDigitalRead(MicrocontrollerPin)
+% Writes logic 0 or 1 to an i/o pin on the microcontroller. Pin will be automatically configured for output.
 global PulsePalSystem;
-if (MaplePin < 1) || (MaplePin > 45)
-    error('Error: Invalid Maple pin.')
+if (MicrocontrollerPin < 1) || (MicrocontrollerPin > 45)
+    error('Error: Invalid microcontroller pin.')
 end
-PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 87 MaplePin], 'uint8');
+PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 87 MicrocontrollerPin], 'uint8');
 LogicLevel = PulsePalSerialInterface('read', 1, 'uint8');
 

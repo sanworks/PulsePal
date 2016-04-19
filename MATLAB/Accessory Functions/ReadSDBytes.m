@@ -18,11 +18,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
-function Data = ReadSDBytes(StartAddress, nBytes)
+function Data = ReadSDProgram
 % This function reads bytes from the current file on Pulse Pal 2's MicroSD card.
 global PulsePalSystem;
 nBytesBytes = typecast(uint32(nBytes), 'uint8');
-StartAddressBytes = typecast(uint32(StartAddress), 'uint8');
-fwrite(PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 85 StartAddressBytes nBytesBytes], 'uint8');
-
-Data = fread(PulsePalSystem.SerialPort, nBytes);
+PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 85 nBytesBytes], 'uint8');
+Data = PulsePalSerialInterface('read', nBytes, 'uint8');
