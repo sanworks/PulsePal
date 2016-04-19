@@ -24,7 +24,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // ** DEPENDENCIES YOU NEED TO INSTALL FIRST **
 
-// 1. This firmware uses the DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
+// 1. This firmware uses the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
 // Download it from here: https://github.com/ivanseidel/DueTimer
 // and copy it to your /Arduino/Libraries folder.
 // The DueTimer library is open source, and protected by the MIT License.
@@ -1185,6 +1185,7 @@ void UpdateSettingsMenu() {
               SystemTime = 0;
               if (IsBiphasic[SelectedChannel-1] == 0) {
                 DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
                 dacWrite(DACValues);
@@ -1196,9 +1197,11 @@ void UpdateSettingsMenu() {
                  SystemTime++; 
                 }
                 DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 dacWrite(DACValues);
               } else {
                 DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
                 dacWrite(DACValues);
@@ -1211,6 +1214,7 @@ void UpdateSettingsMenu() {
                 }
                 if (InterPhaseInterval[SelectedChannel-1] > 0) {
                 DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
                 dacWrite(DACValues);
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
@@ -1222,6 +1226,7 @@ void UpdateSettingsMenu() {
                 }
                 }
                 DACValues[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
                 dacWrite(DACValues);
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
@@ -1232,6 +1237,7 @@ void UpdateSettingsMenu() {
                  SystemTime++; 
                 }
                 DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                DACFlags[SelectedChannel-1] = 1;
                 dacWrite(DACValues);
               }
             } break;
