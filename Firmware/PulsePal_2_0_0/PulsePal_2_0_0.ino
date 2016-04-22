@@ -184,6 +184,7 @@ int LastClickerXState = 0; // 0 for neutral, 1 for left, 2 for right.
 int inMenu = 0; // Menu level: 0 for top, 1 for channel menu, 2 for action menu
 int SelectedChannel = 0; // Channel the user has selected
 int SelectedAction = 1; // Action the user has selected
+byte isNegativeZero = 0; // Keeps track of negative zero in digit-wise voltage adjustment menu
 byte SelectedInputAction = 1; // Trigger channel action the user has selected
 int SelectedStimMode = 1; // Manual trigger from joystick menu. 1 = Single train, 2 = Single pulse, 3 = continuous stimulation
 int lastDebounceTime = 0; // to debounce the joystick button
@@ -215,7 +216,7 @@ unsigned long callbackStartTime = 0;
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 
 void setup() {
-  SerialUSB.begin(115200);
+  SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
   // set up the LCD
   lcd.begin(16, 2);
   lcd.clear();
@@ -225,18 +226,18 @@ void setup() {
   lcd.display() ;
   
   // Pin modes
-  pinMode(TriggerLines[0], INPUT);
+  pinMode(TriggerLines[0], INPUT); // Configure trigger pins as digital inputs
   pinMode(TriggerLines[1], INPUT);
-  pinMode(ClickerButtonLine, INPUT_PULLUP);
+  pinMode(ClickerButtonLine, INPUT_PULLUP); // Configure clicker button as digital input with an internal pullup resistor
  
   for (int x = 0; x < 4; x++) {
-    pinMode(OutputLEDLines[x], OUTPUT);
-    digitalWrite(OutputLEDLines[x], LOW);
+    pinMode(OutputLEDLines[x], OUTPUT); // Configure channel LED pins as outputs
+    digitalWrite(OutputLEDLines[x], LOW); // Initialize channel LEDs to low (off)
   }
-    pinMode(SyncPin, OUTPUT);
+    pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
     pinMode(LDACPin, OUTPUT);
     pinMode(SDChipSelect, OUTPUT);
-    // SD setup
+    // microSD setup
     delay(100);
     if (!sd.begin(SDChipSelect, SPI_FULL_SPEED)) {
       sd.initErrorHalt();
@@ -1149,7 +1150,9 @@ void UpdateSettingsMenu() {
             case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
             case 17: {
                       RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
-                      DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; dacWrite(DACValues); // Update DAC
+                      DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; 
+                      DACFlags[SelectedChannel-1] = 1; 
+                      dacWrite(DACValues); // Update DAC
                       } break; 
             case 18: {
               // Exit to channel menu
@@ -1178,7 +1181,7 @@ void UpdateSettingsMenu() {
               MicrosTime = micros();
               PrePulseTrainTimestamps[SelectedChannel-1] = SystemTime;  
             } break;
-            case 2: {
+            case 2: { // Single example pulse. Timing for the example pulse is done with micros() instead of the HW timer.
               write2Screen("< Single Pulse >","      ZAP!");
               delayMicroseconds(100000);
               write2Screen("< Single Pulse >"," ");
@@ -1675,6 +1678,7 @@ void RefreshActionMenu(int ThisAction) {
           case 17: {write2Screen("<RestingVoltage>",FormatNumberForDisplay(RestingVoltage[SelectedChannel-1], 2));} break;
           case 18: {write2Screen("<     Exit     >"," ");} break;
      }
+     isNegativeZero = 0;
 }
 void RefreshTriggerMenu(int ThisAction) {
     switch (SelectedInputAction) {
@@ -1713,6 +1717,11 @@ if (Units == 2) {
       }
     } break;
     case 2: {
+        if (InputNum == 0) {
+          if (isNegativeZero) {
+            InputNum = InputNum-0.000001;
+          }
+        }
         if (InputNum >= 0) {
           sprintf (Value2Display, "     %04.2f V ", InputNum);
         } else {
@@ -1814,11 +1823,13 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
     }
     if (Units == 2) {
       UVTemp = round(((((float)UVTemp/DACBits)*20) - 10)*100);
+      if (UVTemp < 0) {isNegativeZero = 1;}
       Digits[2] = (UVTemp % 10);
       UVTemp = UVTemp/10;
       Digits[1] = (UVTemp % 10);
       UVTemp = UVTemp/10;
       Digits[0] = UVTemp;
+      if (isNegativeZero && (Digits[0] == 0)) {Digits[0] = 255;} // 255 codes for -0, required because interface changes value by digit
       if (Digits[1] < 0) {Digits[1] = Digits[1]*-1;}
       if (Digits[2] < 0) {Digits[2] = Digits[2]*-1;}
     }
@@ -1881,22 +1892,31 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
                 }
             } break;
             case 2: {
-                if (((CursorPos > 0) && (Digits[CursorPos] < 9)) || (((CursorPos == 0) && (Digits[CursorPos] < 10)))) {
+                if (((CursorPos > 0) && (Digits[CursorPos] < 9)) || ((CursorPos == 0) && ((Digits[0] < 10) || (Digits[0] == 255)))) {
                     if (UserValue < DACBits) {
-                      Digits[CursorPos] = Digits[CursorPos] + 1;
+                      if (Digits[CursorPos] == 255) {Digits[CursorPos] = 0;}
+                      else if (Digits[CursorPos] == -1) {Digits[CursorPos] = 255;}
+                      else {Digits[CursorPos] = Digits[CursorPos] + 1;}
                       if (abs(Digits[0]) == 10) {
                         CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
                       } else {
                         CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
                       }
                       CandidateVoltage = 0;
-                      CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      if (Digits[0] < 0) {
+                      if (Digits[0] != 255) {
+                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
+                      }
+                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
                         CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
                         CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
                       } else {
                         CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
                         CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
+                      }
+                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
+                        isNegativeZero = 1;
+                      } else {
+                        isNegativeZero = 0;
                       }
                       
                       if (CandidateVoltage > 10) {
@@ -1935,31 +1955,37 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
                 }
             } break;
             case 2: {
-              if (((CursorPos > 0) && (Digits[CursorPos] > 0)) || (((CursorPos == 0) && (Digits[CursorPos] > -10)))) {
+              if (((CursorPos > 0) && (Digits[CursorPos] > 0)) || ((CursorPos == 0) && ((Digits[0] > -10) || (Digits[0] == 255)))) {
                     if (UserValue > 0) {
-                      Digits[CursorPos] = Digits[CursorPos] - 1;
+                      if (Digits[CursorPos] == 255) {Digits[CursorPos] = -1;}
+                      else if (Digits[CursorPos] == 0) {Digits[CursorPos] = 255;}
+                      else {Digits[CursorPos] = Digits[CursorPos] - 1;}
                       if (abs(Digits[0]) == 10) {
                         CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
                       } else {
                         CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
                       }
                       CandidateVoltage = 0;
-                      CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      if (Digits[0] < 0) {
+                      if (Digits[0] != 255) {
+                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
+                      }
+                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
                         CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
                         CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
                       } else {
                         CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
                         CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
                       }
-//                      if (CandidateVoltage < 0) {
-//                        Digits[CursorPos] = Digits[CursorPos] + 1;
-//                      } else {
-                        CandidateVoltage = ((CandidateVoltage+10)/20)*DACBits;
-                        UserValue = (unsigned int)CandidateVoltage;
-                        delayMicroseconds(1000);
-//                      }
-                    }
+                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
+                        isNegativeZero = 1;
+                      } else {
+                        isNegativeZero = 0;
+                      }
+                      CandidateVoltage = ((CandidateVoltage+10)/20)*DACBits;
+                      UserValue = (unsigned int)CandidateVoltage;
+                      delayMicroseconds(1000);
+//                  }
+                  }
                 } 
             } break;
             default: {
