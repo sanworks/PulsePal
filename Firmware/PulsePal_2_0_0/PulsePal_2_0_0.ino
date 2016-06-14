@@ -216,6 +216,20 @@ unsigned long callbackStartTime = 0;
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 
 void setup() {
+  pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
+  pinMode(LDACPin, OUTPUT);
+  SPI.begin();
+  SPI.beginTransaction(DACSettings);
+  digitalWriteDirect(LDACPin, LOW);
+  ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
+  // Set DAC to resting voltage on all channels
+  for (int i = 0; i < 4; i++) {
+    RestingVoltage[i] = 32768; // 16-bit code for 0, in the range of -10 to +10
+    DACValues[i] = RestingVoltage[i];
+    DACFlags[i] = 1; // DACFlags must be set to 1 on each channel, so the channels aren't skipped in dacWrite()
+  }
+  ProgramDAC(16, 0, 31); // Power up DACs
+  dacWrite(DACValues); // Update the DAC
   SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
   // set up the LCD
   lcd.begin(16, 2);
@@ -234,8 +248,6 @@ void setup() {
     pinMode(OutputLEDLines[x], OUTPUT); // Configure channel LED pins as outputs
     digitalWrite(OutputLEDLines[x], LOW); // Initialize channel LEDs to low (off)
   }
-    pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
-    pinMode(LDACPin, OUTPUT);
     pinMode(SDChipSelect, OUTPUT);
     // microSD setup
     delay(100);
@@ -248,10 +260,7 @@ void setup() {
     }
     currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
     settingsFile.open(currentSettingsFileNameChar, O_READ);
-    SPI.beginTransaction(DACSettings);
-    digitalWrite(LDACPin, LOW);
-    ProgramDAC(16, 0, 31); // Power up DACs
-    ProgramDAC(12, 0, 4); // Set range to +/- 10V
+    
     for (int x = 0; x < 2; x++) {
       pinMode(InputLEDLines[x], OUTPUT);
       digitalWrite(InputLEDLines[x], LOW);
@@ -260,13 +269,6 @@ void setup() {
     if (validProgram != 252) { // 252 is the last byte in a real program file, returned from RestoreParametersFromSD()
       LoadDefaultParameters();
     }
-    // Set DAC to resting voltage on all channels
-    for (int i = 0; i < 4; i++) {
-      RestingVoltage[i] = 32768; // 16-bit code for 0, in the range of -10 to +10
-      DACValues[i] = RestingVoltage[i];
-      DACFlags[i] = 1; // DACFlags must be set to 1 on each channel, so the channels aren't skipped in dacWrite()
-    }
-    dacWrite(DACValues); // Update the DAC
     write2Screen(CommanderString," Click for menu");
     DefaultInputLevel = 1 - TriggerLevel;
     InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); // Pre-read trigger channels
