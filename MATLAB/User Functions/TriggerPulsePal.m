@@ -34,7 +34,6 @@ function TriggerPulsePal(Channels, varargin)
 
 global PulsePalSystem;
 
-
 if ischar(Channels)
     TriggerAddress = bin2dec(Channels);
 else
@@ -45,6 +44,4 @@ else
         ChannelsBinary(Channels) = 1;
         TriggerAddress = sum(ChannelsBinary .* [1 2 4 8]);
 end
-
-TriggerAddress = uint8(TriggerAddress);
-PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 77 TriggerAddress], 'uint8');
+ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 77 TriggerAddress], 'uint8');

@@ -80,9 +80,10 @@ end
 
 % Extract voltages for phases 1 and 2
 if (ParamCode == 2) || (ParamCode == 3) || (ParamCode == 17)
-    ParamValue = uint8(PulsePalVolts2Bits(ParamValue, PulsePalSystem.RegisterBits));
-    if PulsePalSystem.FirmwareVersion > 19 % Pulse Pal 2
-        ParamValue = typecast(uint16(ParamValue), 'uint8');
+    if PulsePalSystem.FirmwareVersion < 20 % Pulse Pal 1
+        ParamValue = uint8(PulsePalVolts2Bits(ParamValue, PulsePalSystem.RegisterBits));
+    else % Pulse Pal 2
+        ParamValue = typecast(uint16(PulsePalVolts2Bits(ParamValue, PulsePalSystem.RegisterBits)), 'uint8');
     end
 end
 
@@ -102,9 +103,8 @@ else
     ParamBytes = ParamValue;
 end
 
-% Assemble byte string instructing PulsePal to recieve a new single parameter (op code 74) and specify parameter and target channel before data
-Bytestring = [PulsePalSystem.OpMenuByte 74 ParamCode Channel ParamBytes];
-PulsePalSerialInterface('write', Bytestring, 'uint8');
+% Send byte string instructing PulsePal to recieve a new single parameter (op code 74) and specify parameter and target channel before data
+ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 74 ParamCode Channel ParamBytes], 'uint8');
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
 if ConfirmBit == 1
     if ParamCode == 128

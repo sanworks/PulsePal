@@ -46,36 +46,30 @@ switch Op
 end
 SettingsNameLength = length(SettingsFileName);
 Message = [PulsePalSystem.OpMenuByte 90 OpByte SettingsNameLength SettingsFileName];
-PulsePalSerialInterface('write', Message, 'uint8');
+ArCOM_PulsePal('write', PulsePalSystem.SerialPort, Message, 'uint8');
 CycleFreq = PulsePalSystem.CycleFrequency;
 RegisterBits = PulsePalSystem.RegisterBits;
 maxBits = 2^RegisterBits - 1;
 if strcmp(Op, 'load')
     pause(.1);
-    if PulsePalSerialInterface('bytesAvailable') > 0
+    if ArCOM_PulsePal('bytesAvailable', PulsePalSystem.SerialPort) > 0
         Pos = 1;
-        Msg = PulsePalSerialInterface('read',178, 'uint8');
-        for i = 1:4
-            PulsePalSystem.Params.Phase1Duration(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.InterPhaseInterval(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.Phase2Duration(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.InterPulseInterval(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.BurstDuration(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.InterBurstInterval(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.PulseTrainDuration(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-            PulsePalSystem.Params.PulseTrainDelay(i) = Bytes2Seconds(Msg(Pos:Pos+3), CycleFreq); Pos = Pos + 4;
-        end
-        for i = 1:4
-            PulsePalSystem.Params.Phase1Voltage(i) = Bytes2Volts(Msg(Pos:Pos+1), maxBits); Pos = Pos + 2;
-            PulsePalSystem.Params.Phase2Voltage(i) = Bytes2Volts(Msg(Pos:Pos+1), maxBits); Pos = Pos + 2;
-            PulsePalSystem.Params.RestingVoltage(i) = Bytes2Volts(Msg(Pos:Pos+1), maxBits); Pos = Pos + 2;
-        end
-        for i = 1:4
-            PulsePalSystem.Params.IsBiphasic(i) = Msg(Pos); Pos = Pos + 1;
-            PulsePalSystem.Params.CustomTrainID(i) = Msg(Pos); Pos = Pos + 1;
-            PulsePalSystem.Params.CustomTrainTarget(i) = Msg(Pos); Pos = Pos + 1;
-            PulsePalSystem.Params.CustomTrainLoop(i) = Msg(Pos); Pos = Pos + 1;
-        end
+        Msg = ArCOM_PulsePal('read', PulsePalSystem.SerialPort, 178, 'uint8');
+        PulsePalSystem.Params.Phase1Duration = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.InterPhaseInterval = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.Phase2Duration = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.InterPulseInterval = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.BurstDuration = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.InterBurstInterval = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.PulseTrainDuration = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.PulseTrainDelay = Bytes2Seconds(Msg(Pos:Pos+15), CycleFreq); Pos = Pos + 16;
+        PulsePalSystem.Params.Phase1Voltage = Bytes2Volts(Msg(Pos:Pos+7), maxBits); Pos = Pos + 8;
+        PulsePalSystem.Params.Phase2Voltage = Bytes2Volts(Msg(Pos:Pos+7), maxBits); Pos = Pos + 8;
+        PulsePalSystem.Params.RestingVoltage = Bytes2Volts(Msg(Pos:Pos+7), maxBits); Pos = Pos + 8;
+        PulsePalSystem.Params.IsBiphasic = Msg(Pos:Pos+3); Pos = Pos + 4;
+        PulsePalSystem.Params.CustomTrainID = Msg(Pos:Pos+3); Pos = Pos + 4;
+        PulsePalSystem.Params.CustomTrainTarget = Msg(Pos:Pos+3); Pos = Pos + 4;
+        PulsePalSystem.Params.CustomTrainLoop = Msg(Pos:Pos+3); Pos = Pos + 4;
         PulsePalSystem.Params.LinkTriggerChannel1 = Msg(Pos:Pos+3); Pos = Pos + 4;
         PulsePalSystem.Params.LinkTriggerChannel2 = Msg(Pos:Pos+3); Pos = Pos + 4;
         PulsePalSystem.Params.TriggerMode = Msg(Pos:Pos+1);

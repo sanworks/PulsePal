@@ -38,7 +38,7 @@ LeafLabsPorts = LeafLabsPorts(1:nPorts);
 % Find Arduino Due ports (in case Pulse Pal 2 is connected)
 
 % ------New discovery method, using powershell. 
-[Status, RawString] = system('powershell.exe -inputformat none -command "Get-WMIObject Win32_SerialPort"');
+[Status, RawString] = system('powershell.exe -inputformat none -command Get-WMIObject Win32_SerialPort');
 PortLocations = strfind(RawString, 'Arduino Due (');
 nCandidatePorts = length(PortLocations);
 ArduinoPorts = cell(1,nCandidatePorts);

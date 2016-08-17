@@ -24,12 +24,12 @@ if PulsePalSystem.UsingOctave
 else
   PulsePalDisplay('   MATLAB Link', '   Terminated.')
   pause(1);
-  nBytesAvailable = PulsePalSerialInterface('bytesAvailable');
+  nBytesAvailable = ArCOM_PulsePal('bytesAvailable', PulsePalSystem.SerialPort);
   if nBytesAvailable > 0
-      PulsePalSerialInterface('read', nBytesAvailable, 'uint8');
+      ArCOM_PulsePal('read', PulsePalSystem.SerialPort, nBytesAvailable, 'uint8');
   end
 end
-PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 81], 'uint8');
-PulsePalSerialInterface('end');
+ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 81], 'uint8');
+ArCOM_PulsePal('close', PulsePalSystem.SerialPort);
 clear global PulsePalSystem
 disp('Pulse Pal successfully disconnected.')

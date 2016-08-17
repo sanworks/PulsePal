@@ -124,26 +124,15 @@ if strcmp(PulsePalSystem.OS, 'Microsoft Windows XP') && PulsePalSystem.FirmwareV
     end
     
 else % This is the normal transmission scheme, as a single bytestring
-    nPulsesByte = uint32(nPulses);
     if PulsePalSystem.FirmwareVersion < 20
-        ByteString = [PulsePalSystem.OpMenuByte OpCode 0 typecast(nPulsesByte, 'uint8') typecast(TimeOutput, 'uint8') uint8(VoltageOutput)];
-    else 
-        TimeBytes = typecast(TimeOutput, 'uint8');
-        VoltageBytes = typecast(uint16(VoltageOutput), 'uint8');
-%         TimeVoltageBytes = uint8(zeros(1,length(TimeBytes)+length(VoltageBytes)));
-%         Tpos = 1; Vpos = 1; TVpos = 1;
-%         for x = 1:nPulses
-%             TimeVoltageBytes(TVpos:TVpos+5) = [TimeBytes(Tpos:Tpos+3) VoltageBytes(Vpos:Vpos+1)];
-%             Tpos = Tpos + 4;
-%             Vpos = Vpos + 2;
-%             TVpos = TVpos + 6;
-%         end
-        ByteString = [PulsePalSystem.OpMenuByte OpCode typecast(nPulsesByte, 'uint8') TimeBytes VoltageBytes];
+        ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte OpCode 0], 'uint8',...
+            [nPulses TimeOutput], 'uint32', VoltageOutput, 'uint8');
+    else % Pulse Pal 2
+        ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte OpCode], 'uint8',...
+            [nPulses TimeOutput], 'uint32', VoltageOutput, 'uint16');
     end
-    PulsePalSerialInterface('write', ByteString, 'uint8');
-    
 end
-ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+ConfirmBit = ArCOM_PulsePal('read', PulsePalSystem.SerialPort, 1, 'uint8'); % Get confirmation
 % Change sampling period of last matrix sent on all channels that use the custom stimulus and re-send
 TargetChannels = PulsePalSystem.Params.CustomTrainID == TrainID;
 PulsePalSystem.Params.Phase1Duration(TargetChannels) = OriginalSamplingPeriod;

@@ -20,10 +20,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function ConfirmBit = SetPulsePalVoltage(ChannelID, Voltage)
 global PulsePalSystem
+Message = [PulsePalSystem.OpMenuByte 79 ChannelID];
 if PulsePalSystem.FirmwareVersion < 20
-    VoltageOutput = uint8(PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits));
+    ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [Message PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits)], 'uint8');
 else
-    VoltageOutput = typecast(uint16(PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits)), 'uint8');
+    ArCOM_PulsePal('write', PulsePalSystem.SerialPort, Message, 'uint8', PulsePalVolts2Bits(Voltage, PulsePalSystem.RegisterBits), 'uint16');
 end
-PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 79 uint8(ChannelID) VoltageOutput], 'uint8');
-ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+ConfirmBit = ArCOM_PulsePal('read', PulsePalSystem.SerialPort, 1, 'uint8'); % Get confirmation

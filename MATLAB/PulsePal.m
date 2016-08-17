@@ -46,6 +46,7 @@ catch
       ClosePreviousPulsePalInstances;
     end
     global PulsePalSystem;
+    evalin('base', 'global PulsePalSystem;');
     if ~UsingOctave
       if exist('rng','file') == 2
           rng('shuffle', 'twister'); % Seed the random number generator by CPU clock
@@ -53,25 +54,15 @@ catch
           rand('twister', sum(100*fliplr(clock))); % For older versions of MATLAB
       end
     end
-    UsingObject = 0;
-    if ~UsingOctave
-      if ~verLessThan('matlab', '7.6.0')
-          evalin('base','global PulsePalSystem;');
-          evalin('base','PulsePalSystem = PulsePalObject;');
-          UsingObject = 1;
-      end
-    end
-    if ~UsingObject
-        % Initialize empty fields
-        PulsePalSystem = struct;
-        PulsePalSystem.GUIHandles = struct;
-        PulsePalSystem.Graphics = struct;
-        PulsePalSystem.LastProgramSent = [];
-        PulsePalSystem.PulsePalPath = [];
-        PulsePalSystem.SerialPort = [];
-        PulsePalSystem.CurrentProgram = [];
-        PulsePalSystem.UsingOctave = UsingOctave;
-    end
+    % Initialize empty fields
+    PulsePalSystem = struct;
+    PulsePalSystem.GUIHandles = struct;
+    PulsePalSystem.Graphics = struct;
+    PulsePalSystem.LastProgramSent = [];
+    PulsePalSystem.PulsePalPath = [];
+    PulsePalSystem.SerialPort = [];
+    PulsePalSystem.CurrentProgram = [];
+    PulsePalSystem.UsingOctave = UsingOctave;
     PulsePalSystem.Params = DefaultPulsePalParameters;
     PulsePalSystem.PulsePalPath = PulsePalPath;
     PulsePalSystem.ParamNames = {'IsBiphasic' 'Phase1Voltage' 'Phase2Voltage' 'Phase1Duration' 'InterPhaseInterval' 'Phase2Duration'...
@@ -107,7 +98,7 @@ catch
         SetPulsePalVersion;
     catch
         if ~UsingOctave
-            evalin('base','delete(PulsePalSystem)')
+            evalin('base','delete(''PulsePalSystem'')')
         end
         evalin('base','clear PulsePalSystem')
         rethrow(lasterror)

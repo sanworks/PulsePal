@@ -35,4 +35,4 @@ if (State == 0) || (State == 1)
 else
     error('Error: Channel state must be 0 (for normal playback) or 1 (for continuous looping)')
 end
-ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+ConfirmBit = ArCOM_PulsePal('read', PulsePalSystem.SerialPort, 1, 'uint8'); % Get confirmation

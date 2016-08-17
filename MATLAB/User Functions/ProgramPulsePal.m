@@ -109,20 +109,28 @@ global PulsePalSystem;
     TimeData = uint32(TimeData*PulsePalSystem.CycleFrequency); % Convert to multiple of cycle frequency
     
     % Arrange program into a single byte-string
+    if PulsePalSystem.FirmwareVersion > 20
+        TimeData = TimeData';
+    end
     FormattedProgramTimestamps = TimeData(1:end); 
     if PulsePalSystem.FirmwareVersion < 20 % Pulse Pal 1
         SingleByteOutputParams = [IsBiphasic; Phase1VoltageBits; Phase2VoltageBits; FollowsCustomStimID; CustomStimTarget; CustomStimLoop; RestingVoltageBits];
-        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
-        ByteString = [PulsePalSystem.OpMenuByte 73 typecast(FormattedProgramTimestamps, 'uint8') FormattedParams];
+        SingleByteParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
+        ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 73], 'uint8',...
+            FormattedProgramTimestamps, 'uint32', SingleByteParams, 'uint8');
     else % Pulse Pal 2
         FormattedVoltages = [Phase1VoltageBits; Phase2VoltageBits; RestingVoltageBits];
-        FormattedVoltages = uint16(FormattedVoltages(1:end));
-        SingleByteOutputParams = [IsBiphasic; FollowsCustomStimID; CustomStimTarget; CustomStimLoop;];
-        FormattedParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
-        ByteString = [PulsePalSystem.OpMenuByte 73 typecast(FormattedProgramTimestamps, 'uint8') typecast(FormattedVoltages, 'uint8') FormattedParams];
+        SingleByteOutputParams = [IsBiphasic; FollowsCustomStimID; CustomStimTarget; CustomStimLoop];
+        
+        if PulsePalSystem.FirmwareVersion > 20
+            FormattedVoltages = FormattedVoltages';
+            SingleByteOutputParams = SingleByteOutputParams';
+        end
+            SingleByteParams = [SingleByteOutputParams(1:end) Chan1TrigAddressBytes Chan2TrigAddressBytes TriggerMode];
+        ArCOM_PulsePal('write', PulsePalSystem.SerialPort, [PulsePalSystem.OpMenuByte 73], 'uint8',...
+            FormattedProgramTimestamps, 'uint32', FormattedVoltages(1:end), 'uint16', SingleByteParams, 'uint8');
     end
-    PulsePalSerialInterface('write', ByteString, 'uint8');
-    ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+    ConfirmBit = ArCOM_PulsePal('read', PulsePalSystem.SerialPort, 1, 'uint8'); % Get confirmation
     PulsePalSystem.CurrentProgram = OriginalProgMatrix; % Update legacy program matrix
     % Update params struct
     PulsePalSystem.Params.Phase1Duration = cell2mat(ProgramMatrix(5,2:5));

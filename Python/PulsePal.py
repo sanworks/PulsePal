@@ -61,6 +61,8 @@ class PulsePalObject(object):
         self.serialObject.write(handshakeByteString)
         Response = self.serialObject.read(5)
         fvBytes = Response[1:5]
+        if len(fvBytes) < 4
+            raise PulsePalError('Error: Pulse Pal did not return a valid firmware version.')
         self.firmwareVersion = struct.unpack('<I',fvBytes)[0]
         if self.firmwareVersion < 20:
             self.model = 1;
@@ -161,15 +163,33 @@ class PulsePalObject(object):
 
         # Add 32-bit time params
         programValues = [0]*32; pos = 0
-        for i in range(1,5):
-            programValues[pos] = self.phase1Duration[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.interPhaseInterval[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.phase2Duration[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.interPulseInterval[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.burstDuration[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.interBurstInterval[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.pulseTrainDuration[i]*self.cycleFrequency; pos+=1
-            programValues[pos] = self.pulseTrainDelay[i]*self.cycleFrequency; pos+=1
+        if self.model == 2:
+            for i in range(1,5):
+                programValues[pos] = self.phase1Duration[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.interPhaseInterval[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.phase2Duration[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.interPulseInterval[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.burstDuration[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.interBurstInterval[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.pulseTrainDuration[i]*self.cycleFrequency; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.pulseTrainDelay[i]*self.cycleFrequency; pos+=1
+        else:
+            for i in range(1,5):
+                programValues[pos] = self.phase1Duration[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.interPhaseInterval[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.phase2Duration[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.interPulseInterval[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.burstDuration[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.interBurstInterval[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.pulseTrainDuration[i]*self.cycleFrequency; pos+=1
+                programValues[pos] = self.pulseTrainDelay[i]*self.cycleFrequency; pos+=1
         # Pack 32-bit times to bytes and append to program byte-string
         programByteString = programByteString + struct.pack('<LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL' , *programValues)
 
@@ -180,8 +200,10 @@ class PulsePalObject(object):
             for i in range(1,5):
                 value = math.ceil(((self.phase1Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
+            for i in range(1,5):
                 value = math.ceil(((self.phase2Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
+            for i in range(1,5):
                 value = math.ceil(((self.restingVoltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
             programByteString = programByteString + struct.pack('<HHHHHHHHHHHH' , *programValues)
@@ -191,19 +213,27 @@ class PulsePalObject(object):
         else:
             programValues = [0]*16;
         pos = 0
-        for i in range(1,5):
-            programValues[pos] = self.isBiphasic[i]; pos+=1
-            if self.model == 1:
+        if self.model == 1:
+            for i in range(1,5):
+                programValues[pos] = self.isBiphasic[i]; pos+=1
                 value = math.ceil(((self.phase1Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
                 value = math.ceil(((self.phase2Voltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
-            programValues[pos] = self.customTrainID[i]; pos+=1
-            programValues[pos] = self.customTrainTarget[i]; pos+=1
-            programValues[pos] = self.customTrainLoop[i]; pos+=1
-            if self.model == 1:
+                programValues[pos] = self.customTrainID[i]; pos+=1
+                programValues[pos] = self.customTrainTarget[i]; pos+=1
+                programValues[pos] = self.customTrainLoop[i]; pos+=1
                 value = math.ceil(((self.restingVoltage[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bits
                 programValues[pos] = value; pos+=1
+        else:
+            for i in range(1,5):
+                programValues[pos] = self.isBiphasic[i]; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.customTrainID[i]; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.customTrainTarget[i]; pos+=1
+            for i in range(1,5):
+                programValues[pos] = self.customTrainLoop[i]; pos+=1
         # Pack 8-bit params to bytes and append to program byte-string
         if self.model == 1:
             programByteString = programByteString + struct.pack('BBBBBBBBBBBBBBBBBBBBBBBBBBBB', *programValues)
