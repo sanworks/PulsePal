@@ -80,9 +80,11 @@ end
 
 % Extract voltages for phases 1 and 2
 if (ParamCode == 2) || (ParamCode == 3) || (ParamCode == 17)
-    ParamValue = uint8(PulsePalVolts2Bits(ParamValue, PulsePalSystem.RegisterBits));
+    ParamValue = PulsePalVolts2Bits(ParamValue, PulsePalSystem.RegisterBits);
     if PulsePalSystem.FirmwareVersion > 19 % Pulse Pal 2
         ParamValue = typecast(uint16(ParamValue), 'uint8');
+    else
+        ParamValue = uint8(ParamValue);
     end
 end
 
