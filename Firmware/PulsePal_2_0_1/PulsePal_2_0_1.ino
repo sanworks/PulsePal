@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2016 Joshua I. Sanders, Sanworks LLC, NY, USA
+Copyright (C) 2017 Joshua I. Sanders, Sanworks LLC, NY, USA
 
 ----------------------------------------------------------------------------
 
@@ -19,18 +19,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-// PULSE PAL firmware v2.0.0 
-// Josh Sanders, April 2016
+// PULSE PAL firmware v2.0.1 
+// Josh Sanders, May 2017
 //
-// ** DEPENDENCIES YOU NEED TO INSTALL FIRST **
+// ** DEPENDENCY YOU NEED TO INSTALL FIRST **
 
-// 1. This firmware uses the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
-// It is already included in this folder, but it can also be downloaded from here: https://github.com/ivanseidel/DueTimer
-// The DueTimer library is open source, and protected by the MIT License.
-
-// 2. This firmware uses the sdFat library, developed by Bill Greiman. (Thanks Bill!!)
+// 1. This firmware uses the sdFat library, developed by Bill Greiman. (Thanks Bill!!)
 // Download it from here: https://github.com/greiman/SdFat
 // and copy it to your /Arduino/Libraries folder.
+
+// Note: This firmware uses the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
+// Download it from here: https://github.com/ivanseidel/DueTimer
+// and copy it to your /Arduino/Libraries folder.
+// The DueTimer library is open source, and protected by the MIT License.
 
 // ** Next, upload the firmware to Pulse Pal 2's Arduino Due **
 // See here for driver installation and upload instructions: https://www.arduino.cc/en/Guide/ArduinoDue
@@ -41,7 +42,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdint.h>
 #include <SPI.h>
 #include <SdFat.h>
-//#include <SdFatUtil.h>
 
 // Define macros for compressing sequential bytes read from the serial port into long and short ints
 #define makeUnsignedLong(msb, byte2, byte3, lsb) ((msb << 24) | (byte2 << 16) | (byte3 << 8) | (lsb))
@@ -53,7 +53,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TriggerLevel 0
 
 // Firmware build number. Pulse Pal 1.X ranges from 1-19. Pulse Pal 2.X ranges from 20+
-unsigned long FirmwareVersion = 20;
+unsigned long FirmwareVersion = 21;
 
 // initialize Arduino LCD library with the numbers of the interface pins
 LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
@@ -138,7 +138,6 @@ byte LastStimulatingState = 0;
 boolean WasStimulating = 0; // true if any channel was stimulating on the previous loop. Used to force a DAC write after all channels end their stimulation, to return lines to 0
 int nStimulatingChannels = 0; // number of actively stimulating channels
 boolean DACFlag = 0; // true if any DAC channel needs to be updated
-uint16_t DACValues[4] = {0};
 byte DefaultInputLevel = 0; // 0 for PulsePal 0.3, 1 for 0.2 and 0.1. Logic is inverted by optoisolator
 
 // SD variables
@@ -213,6 +212,11 @@ boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (fo
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 unsigned long callbackStartTime = 0;
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
+byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
+union {
+    byte byteArray[8];
+    uint16_t uint16[4];
+} dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
 
 void setup() {
   pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
@@ -224,11 +228,11 @@ void setup() {
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
     RestingVoltage[i] = 32768; // 16-bit code for 0, in the range of -10 to +10
-    DACValues[i] = RestingVoltage[i];
+    dacValue.uint16[i] = RestingVoltage[i];
     DACFlags[i] = 1; // DACFlags must be set to 1 on each channel, so the channels aren't skipped in dacWrite()
   }
   ProgramDAC(16, 0, 31); // Power up DACs
-  dacWrite(DACValues); // Update the DAC
+  dacWrite(); // Update the DAC
   SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
   // set up the LCD
   lcd.begin(16, 2);
@@ -291,7 +295,7 @@ void handler(void) {
   }
   if (StimulatingState == 0) {
       if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
-        dacWrite(DACValues); // Update DAC to final voltages (should be resting voltage)
+        dacWrite(); // Update DAC to final voltages (should be resting voltage)
         DACFlag = 0;
       }
       UpdateSettingsMenu(); // Check for joystick button click, handle if detected
@@ -313,7 +317,7 @@ void handler(void) {
 //     }
        StimulatingState = 1;
        if (DACFlag == 1) { // A DAC update was requested
-         dacWrite(DACValues); // Update DAC
+         dacWrite(); // Update DAC
          DACFlag = 0;
        }
        SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
@@ -380,9 +384,9 @@ void handler(void) {
            } else {
             IsCustomBurstTrain[x] = 0;
            }
-           DACValues[x] = RestingVoltage[x];
+           dacValue.uint16[x] = RestingVoltage[x]; 
          }
-         dacWrite(DACValues);
+         dacWrite();
         } break;
         
         case 74: { // Program one parameter
@@ -415,8 +419,8 @@ void handler(void) {
             if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 0)) {UsesBursts[inByte3] = false;}
           }
           if (inByte2 == 17) {
-            DACValues[inByte3] = RestingVoltage[inByte3];
-            dacWrite(DACValues);
+            dacValue.uint16[inByte3] = RestingVoltage[inByte3];
+            dacWrite();
           }
           PulseDuration[inByte3] = ComputePulseDuration(IsBiphasic[inByte3], Phase1Duration[inByte3], InterPhaseInterval[inByte3], Phase2Duration[inByte3]);
           if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 1)) {
@@ -478,10 +482,10 @@ void handler(void) {
           byte myChannel = SerialReadByte();
           myChannel = myChannel - 1; // Convert for zero-indexing
           uint16_t val = SerialReadShort();
-          DACValues[myChannel] = val;
+          dacValue.uint16[myChannel] = val;
           DACFlags[myChannel] = 1;
-          dacWrite(DACValues);
-          if (DACValues[myChannel] == RestingVoltage[myChannel]) {
+          dacWrite();
+          if (dacValue.uint16[myChannel] == RestingVoltage[myChannel]) {
             digitalWriteDirect(OutputLEDLines[myChannel], LOW);
           } else {
             digitalWriteDirect(OutputLEDLines[myChannel], HIGH);
@@ -493,7 +497,7 @@ void handler(void) {
           killChannel(i);
           DACFlags[i] = 1;
         }
-        dacWrite(DACValues);
+        dacWrite();
        } break;
        case 81: { // Disconnect from client
           ConnectedToApp = 0;
@@ -502,7 +506,7 @@ void handler(void) {
             killChannel(i);
             DACFlags[i] = 1;
           }
-          dacWrite(DACValues);
+          dacWrite();
           for (int i = 0; i < 16; i++) {
            CommanderString[i] = DefaultCommanderString[i];
          } 
@@ -518,7 +522,7 @@ void handler(void) {
           } else {
             killChannel(inByte2);
             DACFlags[inByte2] = 1;
-            dacWrite(DACValues);
+            dacWrite();
           }
           SerialUSB.write(1);
         } break;
@@ -653,7 +657,7 @@ void handler(void) {
                      KillChannel = 1;
                 }
                 if ((TriggerMode[y] == 2) && (LineTriggerEvent[y] == 2)) {
-                    if (TriggerMode[1-y] == 2) {
+                    if ((TriggerMode[1-y] == 2) && (TriggerAddress[1-y][x])) {
                       if (InputValues[1-y] == DefaultInputLevel) {
                         KillChannel = 1;
                       }
@@ -709,7 +713,7 @@ void handler(void) {
           }
           if (CustomTrainID[x] == 0) {
             NextPulseTransitionTime[x] = SystemTime;
-            DACValues[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+            dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
           } else {
             NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0]; 
             CustomPulseTimeIndex[x] = 0;
@@ -731,9 +735,9 @@ void handler(void) {
                       PulseStatus[x] = 1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
                       if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                        DACValues[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                        dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
                       } else {
-                        DACValues[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                        dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
                       }
                     }
                  }
@@ -755,7 +759,7 @@ void handler(void) {
                      if (SkipNextInterval == 0) {
                         PulseStatus[x] = 1;
                      }
-                     DACValues[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                     dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
                      digitalWriteDirect(OutputLEDLines[x], HIGH);
                      if (IsBiphasic[x] == 0) {
                         CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
@@ -778,7 +782,7 @@ void handler(void) {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
                       PulseStatus[x] = 0;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
-                      DACValues[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
                   } else {
                     if (CustomTrainTarget[x] == 0) {
                       NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
@@ -789,7 +793,7 @@ void handler(void) {
                       if (CustomTrainLoop[x] == 1) {
                               CustomPulseTimeIndex[x] = 0;
                               PulseTrainTimestamps[x] = SystemTime;
-                              DACValues[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                              dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
                               if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
                                 PulseStatus[x] = 1;
                               } else {
@@ -803,7 +807,7 @@ void handler(void) {
                     } else {
                       PulseStatus[x] = 0;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
-                      DACValues[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
                     }
                   }
      
@@ -812,13 +816,13 @@ void handler(void) {
                     NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
                     PulseStatus[x] = 3;
                     if (CustomTrainID[x] == 0) {
-                      DACValues[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
                     } else {
                       
                        if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
-                         DACValues[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
+                         dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
                        } else {
-                         DACValues[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
+                         dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
                        }
                        if (CustomTrainTarget[x] == 0) {
                            CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
@@ -827,7 +831,7 @@ void handler(void) {
                   } else {
                     NextPulseTransitionTime[x] = SystemTime + InterPhaseInterval[x];
                     PulseStatus[x] = 2;
-                    DACValues[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                    dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
                   }
                 }
               }
@@ -837,19 +841,19 @@ void handler(void) {
                  NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
                  PulseStatus[x] = 3;
                  if (CustomTrainID[x] == 0) {
-                   DACValues[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;  
+                   dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;  
                  } else {
                    if (CustomTrainID[x] == 1) {
                      if (CustomVoltages[0][CustomPulseTimeIndex[x]] < 32768) {
-                       DACValues[x] = 32768 + (32768 - CustomVoltages[0][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
+                       dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[0][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
                      } else {
-                       DACValues[x] = 32768 - (CustomVoltages[0][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
+                       dacValue.uint16[x] = 32768 - (CustomVoltages[0][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
                      }
                    } else {
                      if (CustomVoltages[1][CustomPulseTimeIndex[x]] < 32768) {
-                       DACValues[x] = 32768 + (32768 - CustomVoltages[1][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
+                       dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[1][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
                      } else {
-                       DACValues[x] = 32768 - (CustomVoltages[1][CustomPulseTimeIndex[x]]-32768); DACFlag = 1; DACFlags[x] = 1;
+                       dacValue.uint16[x] = 32768 - (CustomVoltages[1][CustomPulseTimeIndex[x]]-32768); DACFlag = 1; DACFlags[x] = 1;
                      } 
                    }
                    if (CustomTrainTarget[x] == 0) {
@@ -884,11 +888,11 @@ void handler(void) {
                  if (!((CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0))) { 
                    PulseStatus[x] = 0;
                    digitalWriteDirect(OutputLEDLines[x], LOW);
-                   DACValues[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                   dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
                  } else {
                    PulseStatus[x] = 1;
                    NextPulseTransitionTime[x] = (NextPulseTransitionTime[x] - InterPulseInterval[x]) + (Phase1Duration[x]);
-                   DACValues[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                   dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
                  }
                }
             } break;
@@ -919,7 +923,7 @@ void handler(void) {
               }
             }
               BurstStatus[x] = 0;
-              DACValues[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+              dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
           } else {
           // Determine if burst status should go to 1 now
             NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
@@ -928,15 +932,15 @@ void handler(void) {
             if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {              
               if (CustomTrainID[x] == 1) {
                  if (CustomPulseTimeIndex[x] < CustomTrainNpulses[0]){
-                    DACValues[x] = CustomVoltages[0][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                    dacValue.uint16[x] = CustomVoltages[0][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
                  }
               } else {
                 if (CustomPulseTimeIndex[x] < CustomTrainNpulses[1]){
-                    DACValues[x] = CustomVoltages[1][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                    dacValue.uint16[x] = CustomVoltages[1][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
                  }
               }
             } else {
-                 DACValues[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                 dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
             }
             BurstStatus[x] = 1;
          }
@@ -988,19 +992,19 @@ void killChannel(byte outputChannel) {
   StimulusStatus[outputChannel] = 0;
   PulseStatus[outputChannel] = 0;
   BurstStatus[outputChannel] = 0;
-  DACValues[outputChannel] = RestingVoltage[outputChannel]; DACFlag = 1; DACFlags[outputChannel] = 1;
+  dacValue.uint16[outputChannel] = RestingVoltage[outputChannel]; DACFlag = 1; DACFlags[outputChannel] = 1;
   digitalWriteDirect(OutputLEDLines[outputChannel], LOW);
 }
 
-
-void dacWrite(uint16_t DACValues[]) {
+void dacWrite() {
   digitalWriteDirect(LDACPin,HIGH);
   for (int i = 0; i<4; i++) {
     if (DACFlags[i]) {
       digitalWriteDirect(SyncPin,LOW);
-      SPI.transfer (i);
-      SPI.transfer (highByte(DACValues[i]));
-      SPI.transfer (lowByte(DACValues[i]));
+      dacBuffer[0] = i;
+      dacBuffer[1] = dacValue.byteArray[1+(i*2)];
+      dacBuffer[2] = dacValue.byteArray[0+(i*2)];
+      SPI.transfer(dacBuffer,3);
       digitalWriteDirect(SyncPin,HIGH);
       DACFlags[i] = 0;
     }
@@ -1151,9 +1155,9 @@ void UpdateSettingsMenu() {
             case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
             case 17: {
                       RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
-                      DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; 
+                      dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; 
                       DACFlags[SelectedChannel-1] = 1; 
-                      dacWrite(DACValues); // Update DAC
+                      dacWrite(); // Update DAC
                       } break; 
             case 18: {
               // Exit to channel menu
@@ -1188,11 +1192,11 @@ void UpdateSettingsMenu() {
               write2Screen("< Single Pulse >"," ");
               SystemTime = 0;
               if (IsBiphasic[SelectedChannel-1] == 0) {
-                DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
-                dacWrite(DACValues);
+                dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
                   while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
@@ -1200,15 +1204,15 @@ void UpdateSettingsMenu() {
                  LastLoopTime = MicrosTime;
                  SystemTime++; 
                 }
-                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
-                dacWrite(DACValues);
+                dacWrite();
               } else {
-                DACValues[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
-                dacWrite(DACValues);
+                dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
                   while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
@@ -1217,10 +1221,10 @@ void UpdateSettingsMenu() {
                  SystemTime++; 
                 }
                 if (InterPhaseInterval[SelectedChannel-1] > 0) {
-                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
-                dacWrite(DACValues);
+                dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
                   while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
@@ -1229,10 +1233,10 @@ void UpdateSettingsMenu() {
                  SystemTime++; 
                 }
                 }
-                DACValues[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
-                dacWrite(DACValues);
+                dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
                   while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
@@ -1240,9 +1244,9 @@ void UpdateSettingsMenu() {
                  LastLoopTime = MicrosTime;
                  SystemTime++; 
                 }
-                DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
                 DACFlags[SelectedChannel-1] = 1;
-                dacWrite(DACValues);
+                dacWrite();
               }
             } break;
             case 3: {
@@ -1258,8 +1262,8 @@ void UpdateSettingsMenu() {
                  BurstStatus[SelectedChannel-1] = 0;
                  StimulusStatus[SelectedChannel-1] = 0;
                  CustomPulseTimeIndex[SelectedChannel-1] = 0;
-                 DACValues[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                 dacWrite(DACValues);
+                 dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
+                 dacWrite();
                  digitalWrite(OutputLEDLines[SelectedChannel-1], LOW);
                }
             } break;
@@ -2114,7 +2118,7 @@ void AbortAllPulseTrains() {
     for (int x = 0; x < 4; x++) {
       killChannel(x);
     }
-    dacWrite(DACValues);
+    dacWrite();
     write2Screen("   PULSE TRAIN","     ABORTED");
     delayMicroseconds(1000000);
     if (inMenu == 0) {

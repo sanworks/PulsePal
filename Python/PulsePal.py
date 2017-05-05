@@ -68,6 +68,9 @@ class PulsePalObject(object):
         else:
             self.model = 2;
             self.dac_bitMax = 65535;
+        if self.firmwareVersion == 20:
+            print "Notice: NOTE: A firmware update is available. It fixes a bug in Pulse Gated trigger mode when used with multiple inputs."
+            print "To update, follow the instructions at https://sites.google.com/site/pulsepalwiki/updating-firmware"
         self.serialObject.write('YPYTHON')
 
     def disconnect(self):
