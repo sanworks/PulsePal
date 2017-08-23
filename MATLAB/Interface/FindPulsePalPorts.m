@@ -44,6 +44,10 @@ nCandidatePorts = length(PortLocations);
 ArduinoPorts = cell(1,nCandidatePorts);
 for x = 1:nCandidatePorts
     Clip = RawString(PortLocations(x):PortLocations(x)+19);
+    NewLinePosition = find(Clip == 10);
+    if ~isempty(NewLinePosition)
+        Clip = Clip(1:NewLinePosition-1);
+    end
     PortNameLocation = strfind(Clip, 'COM');
     PortName = Clip(PortNameLocation:end);
     ArduinoPorts{x} = PortName(uint8(PortName)>47);
