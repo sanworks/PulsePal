@@ -1,3 +1,11 @@
+This fork is an UNOFFICIAL port of Pulse pal API to Python 3. Use at your own risk! 
+
+
+
+
+
+
+
 This is the Sanworks Pulse Pal repository, maintained by Sanworks LLC.
 
 It is an improved version of the original Pulse Pal project:
