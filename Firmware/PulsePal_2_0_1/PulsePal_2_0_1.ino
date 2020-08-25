@@ -42,7 +42,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdint.h>
 #include <SPI.h>
 #include <SdFat.h>
-#include <SdFatUtil.h>
 #include "ArCOM.h"
 
 // Create an ArCOM USB serial port object (to streamline transfer of different datatypes and arrays over serial)
@@ -2243,4 +2242,3 @@ void sendCurrentParams() {
      }
      PPUSB.writeByteArray(TriggerMode, 2);
 }
-
