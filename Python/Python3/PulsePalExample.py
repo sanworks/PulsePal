@@ -22,7 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Initializing PulsePal
 from PulsePal import PulsePalObject # Import PulsePalObject
-myPulsePal = PulsePalObject('COM21') # Create a new instance of a PulsePal object
+myPulsePal = PulsePalObject('COM3') # Create a new instance of a PulsePal object (set this to your USB serial port)
 print(myPulsePal.firmwareVersion) # Print firmware version to the console
 
 # Examples of programming individual output channel parameters
@@ -55,8 +55,8 @@ for i in voltages:
     voltages[i] = math.sin(voltages[i]/float(10))*10 # Set 1,000 voltages to create a 20V peak-to-peak sine waveform
 pulseWidth = 0.001 # Set the sampling period for 1kHz sampling
 myPulsePal.sendCustomWaveform(1, pulseWidth, voltages)
-myPulsePal.programOutputChannelParam('customTrainID', 1, 1) # Program output channel 2 to use custom train 1
-myPulsePal.programOutputChannelParam('phase1Duration', 1, pulseWidth) # Program output channel 2 to use correct pulse width for the waveform
+myPulsePal.programOutputChannelParam('customTrainID', 2, 1) # Program output channel 2 to use custom train 1
+myPulsePal.programOutputChannelParam('phase1Duration', 2, pulseWidth) # Program output channel 2 to use correct pulse width for the waveform
 
 # Soft-triggering output channels
 

@@ -1,5 +1,6 @@
 from ArCOM import ArCOMObject
 import math
+import numpy as np
 
 class PulsePalObject(object):
     def __init__(self, PortName):
@@ -199,6 +200,10 @@ class PulsePalObject(object):
         if len(ok) == 0:
             raise PulsePalError('Error: Pulse Pal did not return an acknowledgement byte after a call to syncAllParams.')
     def sendCustomPulseTrain(self, customTrainID, pulseTimes, pulseVoltages):
+        if isinstance(pulseTimes, np.ndarray):
+            pulseTimes = pulseTimes.tolist()
+        if isinstance(pulseVoltages, np.ndarray):
+            pulseVoltages = pulseVoltages.tolist()
         nPulses = len(pulseTimes)
         for i in range(0,nPulses):
             pulseTimes[i] = pulseTimes[i]*self.cycleFrequency # Convert seconds to multiples of minimum cycle (100us)
@@ -217,6 +222,8 @@ class PulsePalObject(object):
         nPulses = len(pulseVoltages)
         pulseTimes = [0]*nPulses
         pulseWidth = pulseWidth*self.cycleFrequency # Convert seconds to to multiples of minimum cycle (100us)
+        if isinstance(pulseVoltages, np.ndarray):
+            pulseVoltages = pulseVoltages.tolist()
         for i in range(0,nPulses):
             pulseTimes[i] = pulseWidth*i # Add consecutive pulse
             pulseVoltages[i] = math.ceil(((pulseVoltages[i]+10)/float(20))*self.dac_bitMax) # Convert volts to bytes
