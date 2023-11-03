@@ -382,7 +382,7 @@ void PulsePal::setFixedVoltage(uint8_t channel, float voltage) // JS 1/30/2014
 		voltageBytes = voltageToInt16(voltage);
 		uint8_t voltageByte2 = (uint8_t)(voltageBytes);
 		uint8_t voltageByte1 = (uint8_t)(voltageBytes >> 8);
-		uint8_t message1[5] = { 213, 79, channel, voltageByte1, voltageByte2 };
+		uint8_t message1[5] = { 213, 79, channel, voltageByte2, voltageByte1 };
 		serial.writeBytes(message1, 5);
 	}
 }
