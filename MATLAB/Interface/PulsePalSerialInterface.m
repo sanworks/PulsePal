@@ -18,15 +18,15 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 function varargout = PulsePalSerialInterface(op, varargin)
-% PulsePalSerialInterface wraps either MATLAB/Java, Psychtoolbox or Octave serial
+% PulsePalSerialInterface wraps either MATLAB built-in, Psychtoolbox or Octave serial
 % interface (automatically determined) to communicate with Pulse Pal.
 % op = 'init', 'read', 'write', 'bytesAvailable', 'end'
-% op = 
+% op =
 % 'init': 2 optional arguments: SerialPort, ForceJava
 % SerialPort = a string with the serial port as it is known to the OS
-% ForceJava = 1 to use Matlab's native Java serial interface instead of 
+% ForceJava = 1 to use Matlab's built-in serial interface instead of
 %               PsychToolbox (the default when psychtoolbox is installed).
-% 
+%
 % 'read': 2 required arguments: nIntegers, dataType
 % nIntegers = how many numbers to read
 % dataType = 'uint8', 'uint16', 'uint32' for 8, 16 or 32 bit unsigned ints respectively
@@ -46,45 +46,51 @@ switch op
     case 'init'
         disp('Searching for Pulse Pal. Please wait.')
         if PulsePalSystem.UsingOctave
-          try
-            pkg load instrument-control
-          catch
-            error('Please install the instrument control toolbox first. See http://wiki.octave.org/Instrument_control_package');
-          end
-          if (exist('serial') ~= 3)
-              error('Serial port communication is necessary for Pulse Pal, but is not supported in Octave on your platform.');
-          end
-          warning('off', 'Octave:num-to-str');
+            try
+                pkg load instrument-control
+            catch
+                error('Please install the instrument control toolbox first. See http://wiki.octave.org/Instrument_control_package');
+            end
+            if (exist('serial') ~= 3)
+                error('Serial port communication is necessary for Pulse Pal, but is not supported in Octave on your platform.');
+            end
+            warning('off', 'Octave:num-to-str');
         end
         LastPortPath = fullfile(PulsePalSystem.PulsePalPath, 'LastSerialPortUsed.mat');
         BaudRate = 9600; % Setting this to higher baud rate on mac causes crashes, but on all platforms it is effectively ignored - actual transmission proceeds at ~1MB/s
         if nargin > 1
             Ports = varargin(1);
             if nargin > 2
-              InterfaceType = varargin{2};
-              if strcmp(InterfaceType, 'ForceJava')
-                ForceJava = 1;
-              end
+                InterfaceType = varargin{2};
+                if strcmp(InterfaceType, 'ForceJava')
+                    ForceJava = 1;
+                end
             end
         else
             % Make list of all ports
-            if ispc
-                Ports = FindPulsePalPorts;
-            elseif ismac
-                [trash, RawSerialPortList] = system('ls /dev/tty.*');
-                Ports = ParseCOMString_MAC(RawSerialPortList);
+            if exist('serialportlist','file')
+                Ports = sort(serialportlist('available'));
+            elseif exist('seriallist','file')
+                Ports = sort(seriallist('available'));
             else
-                VerifyMatlabSerialPortAccessForUbuntu;
-                [trash, RawSerialPortList] = system('ls /dev/ttyACM*');
-                Ports = ParseCOMString_LINUX(RawSerialPortList);
+                if ispc
+                    Ports = FindPulsePalPorts;
+                elseif ismac
+                    [trash, RawSerialPortList] = system('ls /dev/tty.*');
+                    Ports = ParseCOMString_MAC(RawSerialPortList);
+                else
+                    VerifyMatlabSerialPortAccessForUbuntu;
+                    [trash, RawSerialPortList] = system('ls /dev/ttyACM*');
+                    Ports = ParseCOMString_LINUX(RawSerialPortList);
+                end
             end
             if isempty(Ports)
                 error('Could not connect to Pulse Pal: no available serial ports found.');
             end
-            % Make it search on the last successful port first
+            % Search on the last successful port first
             if (exist(LastPortPath) == 2)
                 load(LastPortPath);
-                pos = strmatch(LastComPortUsed, Ports, 'exact'); 
+                pos = strmatch(LastComPortUsed, Ports, 'exact');
                 if ~isempty(pos)
                     Temp = Ports;
                     Ports{1} = LastComPortUsed;
@@ -92,28 +98,32 @@ switch op
                 end
             end
         end
-        
+
         if isempty(Ports)
             error('Could not connect to Pulse Pal: no available serial ports found.');
         end
         if isempty(Ports{1})
             error('Could not connect to Pulse Pal: no available serial ports found.');
         end
-        % Determine if PsychToolbox is installed. If so, serial communication
+        % Determine if PsychToolbox is installed. If so, on MATLAB pre-2019b, serial communication
         % will proceed through lower latency psychtoolbox IOport serial interface (compiled for each platform).
-        % Otherwise, Pulse Pal defaults to MATLAB's Java based serial interface.
+        % Otherwise, Pulse Pal defaults to MATLAB's built-in serial interface.
         if PulsePalSystem.UsingOctave
-          PulsePalSystem.SerialInterface = 2; % Octave Instrument Control Toolbox
+            PulsePalSystem.SerialInterface = 2; % Octave Instrument Control Toolbox
         else
-          try
-              V = PsychtoolboxVersion;
-              PulsePalSystem.SerialInterface = 1; % Psych toolbox IOPORT / MATLAB
-              if ForceJava
-                  PulsePalSystem.SerialInterface = 0;
-              end
-          catch
-              PulsePalSystem.SerialInterface = 0; % Java/MATLAB
-          end
+            if verLessThan('matlab','9.7')
+                try
+                    V = PsychtoolboxVersion;
+                    PulsePalSystem.SerialInterface = 1; % Psych toolbox IOPORT / MATLAB
+                    if ForceJava
+                        PulsePalSystem.SerialInterface = 0;
+                    end
+                catch
+                    PulsePalSystem.SerialInterface = 0; % Java/MATLAB
+                end
+            else
+                PulsePalSystem.SerialInterface = 3; % MATLAB serialport class, r2019b or newer
+            end
         end
         Found = 0;
         i = 0;
@@ -166,7 +176,7 @@ switch op
             case 1 % Psych toolbox serial interface
                 disp('Connecting with PsychToolbox serial interface (low latency).')
                 IOPort('Verbosity', 0);
-                 while (Found == 0) && (i < length(Ports)) && ~isempty(Ports{1})
+                while (Found == 0) && (i < length(Ports)) && ~isempty(Ports{1})
                     i = i + 1;
                     disp(['Trying port ' Ports{i}])
                     try
@@ -186,33 +196,72 @@ switch op
                         IOPort('Close', TestPort);
                     catch
                     end
-                 end
-                 if Found ~= 0
-                     if ispc
-                         PortString = ['\\.\' Ports{Found}];
-                     else
-                         PortString = Ports{Found};
-                     end
-                     PulsePalSystem.SerialPort = IOPort('OpenSerialPort', PortString, 'BaudRate=115200, OutputBufferSize=100000, DTR=1');
-                 else
-                     error('No valid serial port detected.')
-                 end
-              case 2 % Octave instrument control toolbox serial interface
-              Found = 1;
-              PortString = Ports{Found};
-              if ispc
-                PortNum = str2double(PortString(4:end));
-                if PortNum > 9
-                  PortString = ['\\\\.\\COM' num2str(PortNum)]; % As of Octave instrument control toolbox v0.2.2, ports higher than COM9 must use this syntax
                 end
-              end
-              try
-                  PulsePalSystem.SerialPort = serial(PortString, BaudRate,  1);
-              catch
-                  error('Error: could not find your Pulse Pal device. Please make sure it is connected and drivers are installed.');
-              end
-              pause(.2);
-              srl_flush(PulsePalSystem.SerialPort);
+                if Found ~= 0
+                    if ispc
+                        PortString = ['\\.\' Ports{Found}];
+                    else
+                        PortString = Ports{Found};
+                    end
+                    PulsePalSystem.SerialPort = IOPort('OpenSerialPort', PortString, 'BaudRate=115200, OutputBufferSize=100000, DTR=1');
+                else
+                    error('No valid serial port detected.')
+                end
+            case 2 % Octave instrument control toolbox serial interface
+                Found = 1;
+                PortString = Ports{Found};
+                if ispc
+                    PortNum = str2double(PortString(4:end));
+                    if PortNum > 9
+                        PortString = ['\\\\.\\COM' num2str(PortNum)]; % As of Octave instrument control toolbox v0.2.2, ports higher than COM9 must use this syntax
+                    end
+                end
+                try
+                    PulsePalSystem.SerialPort = serial(PortString, BaudRate,  1);
+                catch
+                    error('Error: could not find your Pulse Pal device. Please make sure it is connected and drivers are installed.');
+                end
+                pause(.2);
+                srl_flush(PulsePalSystem.SerialPort);
+            case 3
+                disp('Connecting with MATLAB serialport interface (low latency).')
+                while (Found == 0) && (i < length(Ports))
+                    i = i + 1;
+                    disp(['Trying port ' Ports{i}])
+                    TestPort = serialport(Ports{i}, 12000000, 'Timeout', 1);
+                    setDTR(TestPort, true);
+                    pause(.1);
+                    TestPort.write([PulsePalSystem.OpMenuByte 72], 'uint8');
+                    tic
+                    while TestPort.NumBytesAvailable == 0
+                        TestPort.write([PulsePalSystem.OpMenuByte 72], 'uint8');
+                        if toc > 1
+                            break
+                        end
+                        pause(.1);
+                    end
+                    g = 0;
+                    try
+                        warning off
+                        g = TestPort.read(1, 'uint8');
+                    catch
+                        % ok
+                    end
+                    warning on
+                    if g == 75
+                        Found = i;
+                    end
+                    clear TestPort
+                end
+                pause(.1);
+                if Found ~= 0
+                    % Note: DTR is now to "on" here - was off for earlier versions of Pulse Pal 1, but
+                    % this seems to work for both
+                    PulsePalSystem.SerialPort = serialport(Ports{Found}, 12000000, 'Timeout', 1);
+                    setDTR(PulsePalSystem.SerialPort, true);
+                else
+                    error('Error: could not find your Pulse Pal device. Please make sure it is connected.');
+                end
         end
         LastComPortUsed = Ports{Found};
         if PulsePalSystem.UsingOctave
@@ -228,7 +277,7 @@ switch op
         switch PulsePalSystem.SerialInterface
             case 0
                 varargout{1} = fread(PulsePalSystem.SerialPort, nIntegers, Datatype);
-            case 1 % MATLAB/PsychToolbox 
+            case 1 % MATLAB/PsychToolbox
                 nIntegers = double(nIntegers);
                 switch Datatype
                     case 'uint8'
@@ -242,18 +291,20 @@ switch op
                         Data = uint8(Data);
                         varargout{1} = double(typecast(Data, 'uint32'));
                 end
-             case 2 % Octave
-               nIntegers = double(nIntegers);
-               switch Datatype
-                  case 'uint8'
-                      varargout{1} = srl_read(PulsePalSystem.SerialPort, nIntegers);
-                  case 'uint16'
-                      Data = srl_read(PulsePalSystem.SerialPort, nIntegers*2);
-                      varargout{1} = double(typecast(Data, 'uint16'));
-                  case 'uint32'
-                      Data = srl_read(PulsePalSystem.SerialPort, nIntegers*4);
-                      varargout{1} = double(typecast(Data, 'uint32'));
-               end
+            case 2 % Octave
+                nIntegers = double(nIntegers);
+                switch Datatype
+                    case 'uint8'
+                        varargout{1} = srl_read(PulsePalSystem.SerialPort, nIntegers);
+                    case 'uint16'
+                        Data = srl_read(PulsePalSystem.SerialPort, nIntegers*2);
+                        varargout{1} = double(typecast(Data, 'uint16'));
+                    case 'uint32'
+                        Data = srl_read(PulsePalSystem.SerialPort, nIntegers*4);
+                        varargout{1} = double(typecast(Data, 'uint32'));
+                end
+            case 3 % MATLAB serialport class
+                varargout{1} = PulsePalSystem.SerialPort.read(nIntegers, Datatype);
         end
     case 'write'
         ByteString = varargin{1};
@@ -271,14 +322,16 @@ switch op
                         IOPort('Write', PulsePalSystem.SerialPort, typecast(uint32(ByteString), 'uint8'), 1);
                 end
             case 2 % Octave
-              switch Datatype
-                  case 'uint8'
-                      srl_write(PulsePalSystem.SerialPort, char(ByteString));
-                  case 'uint16'
-                      srl_write(PulsePalSystem.SerialPort, char(typecast(uint16(ByteString), 'uint8')));
-                  case 'uint32'
-                      srl_write(PulsePalSystem.SerialPort, char(typecast(uint32(ByteString), 'uint8')));
-              end
+                switch Datatype
+                    case 'uint8'
+                        srl_write(PulsePalSystem.SerialPort, char(ByteString));
+                    case 'uint16'
+                        srl_write(PulsePalSystem.SerialPort, char(typecast(uint16(ByteString), 'uint8')));
+                    case 'uint32'
+                        srl_write(PulsePalSystem.SerialPort, char(typecast(uint32(ByteString), 'uint8')));
+                end
+            case 3
+                PulsePalSystem.SerialPort.write(ByteString, Datatype);
         end
 
     case 'bytesAvailable'
@@ -289,6 +342,8 @@ switch op
                 varargout{1} = IOPort('BytesAvailable', PulsePalSystem.SerialPort);
             case 2 % Octave
                 error('Reading available bytes from a serial port buffer is not supported in Octave as of instrument control toolbox 0.2.2');
+            case 3
+                varargout{1} = PulsePalSystem.SerialPort.NumBytesAvailable;
         end
     case 'end'
         switch PulsePalSystem.SerialInterface
@@ -301,6 +356,8 @@ switch op
                 fclose(PulsePalSystem.SerialPort);
                 PulsePalSystem.SerialPort = [];
                 clear PulsePalSystem
+            case 3
+                % No special shutdown required
         end
         PulsePalSystem.SerialPort = [];
         clear PulsePalSystem
