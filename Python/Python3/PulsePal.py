@@ -18,7 +18,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-from arcom import ArCom
+from ArCOM import ArCom
 from decimal import Decimal
 import numpy as np
 import math
@@ -67,6 +67,15 @@ class PulsePalObject(object):
             print("Notice: NOTE: A firmware update is available. It fixes a bug in Pulse Gated trigger mode when used with multiple inputs.")
             print("To update, follow the instructions at https://sites.google.com/site/pulsepalwiki/updating-firmware")
         self.Port.write((self.OP_MENU_BYTE, 89, 80, 89, 84, 72, 79, 78), 'uint8')  # Client name op + 'PYTHON' in ASCII
+        self.outputParameterNames = ['isBiphasic', 'phase1Voltage', 'phase2Voltage', 'phase1Duration', 
+                                     'interPhaseInterval', 'phase2Duration', 'interPulseInterval', 'burstDuration', 
+                                     'interBurstInterval', 'pulseTrainDuration', 'pulseTrainDelay', 
+                                     'linkTriggerChannel1', 'linkTriggerChannel2', 'customTrainID',
+                                     'customTrainTarget', 'customTrainLoop', 'restingVoltage']
+        self.triggerParameterNames = ['triggerMode']
+        self.set2DefaultParams()  # Initializes all parameters to default values
+
+    def set2DefaultParams(self):
         self.isBiphasic = [float('nan'), 0, 0, 0, 0]
         self.phase1Voltage = [float('nan'), 5, 5, 5, 5]
         self.phase2Voltage = [float('nan'), -5, -5, -5, -5]
@@ -85,12 +94,6 @@ class PulsePalObject(object):
         self.customTrainTarget = [float('nan'), 0, 0, 0, 0]
         self.customTrainLoop = [float('nan'), 0, 0, 0, 0]
         self.triggerMode = [float('nan'), 0, 0]
-        self.outputParameterNames = ['isBiphasic', 'phase1Voltage', 'phase2Voltage', 'phase1Duration', 
-                                     'interPhaseInterval', 'phase2Duration', 'interPulseInterval', 'burstDuration', 
-                                     'interBurstInterval', 'pulseTrainDuration', 'pulseTrainDelay', 
-                                     'linkTriggerChannel1', 'linkTriggerChannel2', 'customTrainID',
-                                     'customTrainTarget', 'customTrainLoop', 'restingVoltage']
-        self.triggerParameterNames = ['triggerMode']
         self.syncAllParams()  # Sets all parameters to known values
 
     def setFixedVoltage(self, channel, voltage):

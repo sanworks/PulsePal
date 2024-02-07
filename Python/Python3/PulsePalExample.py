@@ -21,14 +21,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 # Example usage of PulsePal's Python API
 
 # Import the PulsePal class
-from pulsepal import PulsePalObject  # Import PulsePalObject
+from PulsePal import PulsePalObject  # Import PulsePalObject
 
 # Import math and time (required for examples)
 import math
 import time
 
 # Initializing PulsePal
-myPulsePal = PulsePalObject('COM3')  # Create a new instance of a PulsePal object (set this to your USB serial port)
+myPulsePal = PulsePalObject('COM41')  # Create a new instance of a PulsePal object (set this to your USB serial port)
 print(myPulsePal.firmware_version)  # Print firmware version to the console
 
 # Examples of programming individual output channel parameters
