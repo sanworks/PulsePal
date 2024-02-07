@@ -28,7 +28,7 @@ import math
 import time
 
 # Initializing PulsePal
-myPulsePal = PulsePalObject('COM41')  # Create a new instance of a PulsePal object (set this to your USB serial port)
+myPulsePal = PulsePalObject('COM3')  # Create a new instance of a PulsePal object (set this to your USB serial port)
 print(myPulsePal.firmware_version)  # Print firmware version to the console
 
 # Examples of programming individual output channel parameters

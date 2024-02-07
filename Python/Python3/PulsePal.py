@@ -74,6 +74,7 @@ class PulsePalObject(object):
                                      'customTrainTarget', 'customTrainLoop', 'restingVoltage']
         self.triggerParameterNames = ['triggerMode']
         self.set2DefaultParams()  # Initializes all parameters to default values
+        self.syncAllParams()  # Sets all parameters on the device to the current class parameters
 
     def set2DefaultParams(self):
         """
@@ -98,7 +99,6 @@ class PulsePalObject(object):
         self.customTrainTarget = [float('nan'), 0, 0, 0, 0]
         self.customTrainLoop = [float('nan'), 0, 0, 0, 0]
         self.triggerMode = [float('nan'), 0, 0]
-        self.syncAllParams()  # Sets all parameters to known values
 
     def setFixedVoltage(self, channel, voltage):
         """
