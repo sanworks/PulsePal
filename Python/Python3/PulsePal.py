@@ -76,6 +76,10 @@ class PulsePalObject(object):
         self.set2DefaultParams()  # Initializes all parameters to default values
 
     def set2DefaultParams(self):
+        """
+           Returns all params to the defaults. This is called by the constructor, and may be
+           subsequently called by the user (e.g. before running a new experiment)
+        """
         self.isBiphasic = [float('nan'), 0, 0, 0, 0]
         self.phase1Voltage = [float('nan'), 5, 5, 5, 5]
         self.phase2Voltage = [float('nan'), -5, -5, -5, -5]
