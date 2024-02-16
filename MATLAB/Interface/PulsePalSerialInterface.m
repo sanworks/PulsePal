@@ -59,7 +59,7 @@ switch op
         LastPortPath = fullfile(PulsePalSystem.PulsePalPath, 'LastSerialPortUsed.mat');
         BaudRate = 9600; % Setting this to higher baud rate on mac causes crashes, but on all platforms it is effectively ignored - actual transmission proceeds at ~1MB/s
         if nargin > 1
-            Ports = varargin(1);
+            Ports{1} = varargin{1};
             if nargin > 2
                 InterfaceType = varargin{2};
                 if strcmp(InterfaceType, 'ForceJava')
@@ -84,27 +84,28 @@ switch op
                     Ports = ParseCOMString_LINUX(RawSerialPortList);
                 end
             end
-            if isempty(Ports)
-                error('Could not connect to Pulse Pal: no available serial ports found.');
-            end
-            % Search on the last successful port first
-            if (exist(LastPortPath) == 2)
-                load(LastPortPath);
-                pos = strmatch(LastComPortUsed, Ports, 'exact');
-                if ~isempty(pos)
-                    Temp = Ports;
-                    Ports{1} = LastComPortUsed;
-                    Ports(2:length(Temp)) = Temp(1:length(Temp) ~= pos);
-                end
-            end
         end
-
         if isempty(Ports)
             error('Could not connect to Pulse Pal: no available serial ports found.');
         end
         if isempty(Ports{1})
             error('Could not connect to Pulse Pal: no available serial ports found.');
         end
+
+        % Remove COM1. USB Serial ports are assigned beginning with COM3 on Windows
+        Ports = Ports(~strcmp(Ports, 'COM1'));
+
+        % Search on the last successful port first
+        if (exist(LastPortPath) == 2)
+            load(LastPortPath);
+            pos = strmatch(LastComPortUsed, Ports, 'exact');
+            if ~isempty(pos)
+                Temp = Ports;
+                Ports{1} = LastComPortUsed;
+                Ports(2:length(Temp)) = Temp(1:length(Temp) ~= pos);
+            end
+        end
+
         % Determine if PsychToolbox is installed. If so, on MATLAB pre-2019b, serial communication
         % will proceed through lower latency psychtoolbox IOport serial interface (compiled for each platform).
         % Otherwise, Pulse Pal defaults to MATLAB's built-in serial interface.
