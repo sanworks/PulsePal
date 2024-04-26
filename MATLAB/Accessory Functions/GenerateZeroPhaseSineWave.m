@@ -35,6 +35,3 @@ else
     SamplingFrequency = PulsePalSystem.CycleFrequency/2;
 end 
 Wave = sin(pi:((2*pi)/(SamplingFrequency/Frequency)):3*pi)*Amplitude;
-if length(Wave) > 1000
-    error('Pulse Pal has insufficient memory to store one iteration of this wave.')
-end
