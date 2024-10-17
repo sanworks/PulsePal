@@ -1,7 +1,7 @@
 This is the Sanworks Pulse Pal repository, maintained by Sanworks LLC.
 
 It is an improved version of the original Pulse Pal project:
-https://github.com/PulsePal/PulsePal
+https://www.frontiersin.org/journals/neuroengineering/articles/10.3389/fneng.2014.00043/full
 
 Pulse Pal is an open source instrument, released into the public domain under the GNU public license version 3 (see LICENSE.txt).
 
