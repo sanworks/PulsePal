@@ -197,8 +197,9 @@ uint8_t buf2[2];
 uint8_t buf4[4];
 //SdFat sd;
 SdFs sd;
-SdFile settingsFile;
-SdFile candidateSettingsFile;
+FsFile root;
+FsFile settingsFile;
+FsFile candidateSettingsFile;
 
 String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
 byte settingsFileNameLength = 0; // Set when a new file name is entered
@@ -311,7 +312,7 @@ void setup() {
   lcd.noDisplay();
   delay(100);
   lcd.display();
-  //write2Screen(CommanderString," Click for menu");
+
   // Pin modes
   pinMode(TriggerLines[0], INPUT); // Configure trigger pins as digital inputs
   pinMode(TriggerLines[1], INPUT);
@@ -344,6 +345,10 @@ void setup() {
     sd.mkdir("Pulse_Pal");
     sd.chdir("Pulse_Pal");
   }
+  if (!root.open("/Pulse_Pal")) {
+    write2Screen("Startup Failed:"," SD Card ERROR");
+    sd.initErrorHalt();
+  }
   currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
   settingsFile.open(currentSettingsFileNameChar, O_READ);
   
@@ -362,14 +367,14 @@ void setup() {
 
   #if (HARDWARE_VERSION == 2)
     Timer3.attachInterrupt(handler);
-    Timer3.start(TIMER_PERIOD); // Calls handler precisely every 50us
+    Timer3.start(TIMER_PERIOD); // Calls handler precisely every TIMER_PERIOD us
   #else
     hardwareTimer.begin(handler, TIMER_PERIOD);
   #endif
 }
 
 void loop() {
-
+  // Todo: T4 must read long serial messages here (e.g. custom pulse trains?)
 }
 
 void handler(void) {                   
@@ -620,12 +625,6 @@ void handler(void) {
           }
           SerialUSB.write(1);
         } break;
-//        case 83: { // Clear stored parameters from EEPROM in Pulse Pal 1 (currently unused in Pulse Pal 2)
-//
-//       } break;
-//       case 84: { // Write a page of memory to EEPROM in Pulse Pal 1 (currently unused in Pulse Pal 2)
-//
-//        } break; 
       case 85: { // Return the currently loaded parameter file from the microSD card
           settingsFile.rewind();
           for (int i = 0; i < 178; i++) {
@@ -647,8 +646,6 @@ void handler(void) {
           LogicLevel = digitalRead(inByte2);
           SerialUSB.write(LogicLevel);
         } break; 
-//        case 88: { // Unused
-//        } break;
         case 89: { // Receive new CommanderString (displayed on top line of OLED, i.e. "MATLAB connected"
           for (int x = 0; x < 6; x++) {
             CommanderString[x] = SerialReadByte();
@@ -1051,7 +1048,7 @@ void handler(void) {
      }
    }
 }
-// End main loop
+// End hw timer callback
 
 
 unsigned long SerialReadLong() {
@@ -1174,41 +1171,41 @@ void UpdateSettingsMenu() {
               case 8: { // Load settings
                 inMenu = 5; // file load menu
                 settingsFile.close();
-                //sd.vwd()->rewind();
+                root.rewindDirectory();
                 myFilePos = 1;
-                // if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                //   for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                //   candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                //   // Center settings file name
-                //   centerText(candidateSettingsFileChar);
-                //   for (int i = 0; i < 16; i++) {
-                //     candidateSettingsFileChar[i] = centeredText[i];
-                //   }
-                //   write2Screen("<Click to load >", candidateSettingsFileChar);
-                //   candidateSettingsFile.close();
-                // } else {
-                //   write2Screen("!Error reading", "SD Card!");
-                // }
+                if (candidateSettingsFile.openNext(&root, O_READ)) {
+                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
+                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+                  // Center settings file name
+                  centerText(candidateSettingsFileChar);
+                  for (int i = 0; i < 16; i++) {
+                    candidateSettingsFileChar[i] = centeredText[i];
+                  }
+                  write2Screen("<Click to load >", candidateSettingsFileChar);
+                  candidateSettingsFile.close();
+                } else {
+                  write2Screen("!Error reading", "SD Card!");
+                }
                 settingsFile.open(currentSettingsFileNameChar, O_READ);
               } break;
               case 9: { // Delete settings
                 inMenu = 7; 
                 settingsFile.close();
-                //sd.vwd()->rewind();
+                root.rewindDirectory();
                 myFilePos = 1;
-                // if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                //   for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                //   candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                //   // Center settings file name
-                //   centerText(candidateSettingsFileChar);
-                //   for (int i = 0; i < 16; i++) {
-                //     candidateSettingsFileChar[i] = centeredText[i];
-                //   }
-                //   write2Screen("<Click to erase>", candidateSettingsFileChar);
-                //   candidateSettingsFile.close();
-                // } else {
-                //   write2Screen("!Error reading", "SD Card!");
-                // }
+                if (candidateSettingsFile.openNext(&root, O_READ)) {
+                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
+                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+                  // Center settings file name
+                  centerText(candidateSettingsFileChar);
+                  for (int i = 0; i < 16; i++) {
+                    candidateSettingsFileChar[i] = centeredText[i];
+                  }
+                  write2Screen("<Click to erase>", candidateSettingsFileChar);
+                  candidateSettingsFile.close();
+                } else {
+                  write2Screen("!Error reading", "SD Card!");
+                }
               } break;
               case 10: { // Reset
               write2Screen(" "," ");
@@ -1745,10 +1742,10 @@ void centerText(char myText[]) {
 
 byte skipToFile(unsigned int fileNumber) {
   byte ok = 0;
-  //sd.vwd()->rewind();
+  root.rewindDirectory();
   for (int i = 0; i < fileNumber; i++) {
     candidateSettingsFile.close();
-    //ok = candidateSettingsFile.openNext(sd.vwd(), O_READ);
+    ok = candidateSettingsFile.openNext(&root, O_READ);
   }
   return ok;
 }
@@ -2320,7 +2317,6 @@ byte readByteFromSD() {
 void SaveCurrentProgram2SD() {
   settingsFile.close();
   settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR);
-  //settingsFile.rewind();
   // This function saves all parameters to the SD card. See the memory map on the PulsePal wiki for a table describing how parameters are organized in memory
   for (int chan = 0; chan < 4; chan++) {
     breakLong(Phase1Duration[chan]); writeLong2SD();
@@ -2387,10 +2383,10 @@ void Software_Reset() {
   #if (HARDWARE_VERSION == 2)
     const int RSTC_KEY = 0xA5;
     RSTC->RSTC_CR = RSTC_CR_KEY(RSTC_KEY) | RSTC_CR_PROCRST | RSTC_CR_PERRST;
-    while (true);
   #else
-      // Add reset here
+      SCB_AIRCR = 0x05FA0004;
   #endif
+  while (true);  // Wait for reset
 }
 
 void SerialWriteLong(unsigned long num) {
