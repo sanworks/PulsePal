@@ -55,6 +55,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdio.h>
 #include <stdint.h>
 #include <SPI.h>
+#include <ctype.h>
 
 #if (HARDWARE_VERSION == 2)
   #include <LiquidCrystal.h>
@@ -1885,6 +1886,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
       // LowerLimit and UpperLimit are the limits for this selection, StepSize is the smallest step size the system will scroll. Units (as for Write2Screen) codes none=0, time=1, volts=2 True/False=3
      unsigned long ValueToAdd = 0;
      CursorPos = 0;
+     isNegativeZero = 0;
      for (int i = 0; i < 9; i++) {
        Digits[i] = 0;
        ValidCursorPositions[i] = 0;
@@ -1915,7 +1917,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
      }
      long UVTemp = UserValue;
      inMenu = 3; // Temporarily goes a menu layer deeper so leading zeros are displayed by FormatNumberForDisplay
-     LCD_setCursor(0, 1); LCD_print("                ");
+     LCD_setCursor(0, 1); LCD_print_no_trim("                ");
      delayMicroseconds(100000);
      LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
      ChoiceMade = 0;
@@ -1943,14 +1945,27 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
     }
     
      // Assign valid cursor positions by unit type
-     switch(Units) {
-       case 0: {ValidCursorPositions[0] = 7;} break;
-       case 1: {ValidCursorPositions[0] = 2; ValidCursorPositions[1] = 3; ValidCursorPositions[2] = 4; ValidCursorPositions[3] = 5; ValidCursorPositions[4] = 7; ValidCursorPositions[5] = 8; ValidCursorPositions[6] = 9; ValidCursorPositions[7] = 10; ValidCursorPositions[8] = 11;} break;
-       case 2: {ValidCursorPositions[0] = 5; ValidCursorPositions[1] = 7; ValidCursorPositions[2] = 8;} break;
-       case 3: {ValidCursorPositions[0] = 7;} break;
-       case 4: {ValidCursorPositions[0] = 7;} break;
-       case 5: {ValidCursorPositions[0] = 7;} break;
-     }
+     #if (HARDWARE_VERSION < 3)
+      switch(Units) {
+        case 0: {ValidCursorPositions[0] = 7;} break;
+        case 1: {ValidCursorPositions[0] = 2; ValidCursorPositions[1] = 3; ValidCursorPositions[2] = 4; ValidCursorPositions[3] = 5; ValidCursorPositions[4] = 7; ValidCursorPositions[5] = 8; ValidCursorPositions[6] = 9; ValidCursorPositions[7] = 10; ValidCursorPositions[8] = 11;} break;
+        case 2: {ValidCursorPositions[0] = 5; ValidCursorPositions[1] = 7; ValidCursorPositions[2] = 8;} break;
+        case 3: {ValidCursorPositions[0] = 7;} break;
+        case 4: {ValidCursorPositions[0] = 7;} break;
+        case 5: {ValidCursorPositions[0] = 7;} break;
+      }
+      uint8_t negSignOffset = 0;
+     #else
+      switch(Units) {
+        case 0: {ValidCursorPositions[0] = 0;} break;
+        case 1: {ValidCursorPositions[0] = 0; ValidCursorPositions[1] = 1; ValidCursorPositions[2] = 2; ValidCursorPositions[3] = 3; ValidCursorPositions[4] = 5; ValidCursorPositions[5] = 6; ValidCursorPositions[6] = 7; ValidCursorPositions[7] = 8; ValidCursorPositions[8] = 9;} break;
+        case 2: {ValidCursorPositions[0] = 0; ValidCursorPositions[1] = 2; ValidCursorPositions[2] = 3;} break;
+        case 3: {ValidCursorPositions[0] = 0;} break;
+        case 4: {ValidCursorPositions[0] = 0;} break;
+        case 5: {ValidCursorPositions[0] = 0;} break;
+      }
+      uint8_t negSignOffset = 1;
+     #endif
      // Initialize cursor starting positions and limits by unit type
      switch (Units) {
        case 0: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Index
@@ -1977,8 +1992,17 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
        CursorToggleTimer++;
        if (CursorToggleTimer == CursorToggleThreshold) {
          switch (CursorOn) {
-           case 0: {LCD_setCursor(ValidCursorPositions[CursorPos], 1); LCD_cursor(); CursorOn = 1;} break;
-           case 1: {LCD_noCursor(); CursorOn = 0;} break;
+           case 0: {
+            if (Digits[0] < 0 || isNegativeZero) {
+              LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
+            } else {
+              LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
+            }
+            LCD_cursor(); CursorOn = 1;
+            } break;
+           case 1: {
+            LCD_noCursor(); CursorOn = 0;
+            } break;
          }
          CursorToggleTimer = 0;
        }
@@ -2050,6 +2074,9 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           }
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
+          #if (HARDWARE_VERSION == 3)
+            LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+          #endif
           LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
        }
       else if (ClickerY > ClickerMaxThreshold) {
@@ -2107,6 +2134,9 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           }
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
+          #if (HARDWARE_VERSION == 3)
+            LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+          #endif
           LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
        } else {
          ScrollSpeedDelay = 0;
@@ -2116,19 +2146,29 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
          ScrollSpeedDelay = 200000;
          LCD_noCursor();
           LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-         LCD_setCursor(ValidCursorPositions[CursorPos], 1); LCD_cursor(); CursorOn = 1; 
+          if (Digits[0] < 0 || isNegativeZero) {
+            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
+          } else {
+            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
+          }
+         LCD_cursor(); CursorOn = 1; 
        }
        if ((ClickerX < ClickerMinThreshold) && (CursorPos > CursorPosLeftLimit)) {
          CursorPos = CursorPos - 1;
          ScrollSpeedDelay = 200000;
          LCD_noCursor();
          LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-         LCD_setCursor(ValidCursorPositions[CursorPos], 1); LCD_cursor(); CursorOn = 1; 
+          if (Digits[0] < 0 || isNegativeZero) {
+            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
+          } else {
+            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
+          } 
+         LCD_cursor(); CursorOn = 1; 
        }
      delayMicroseconds(ScrollSpeedDelay);  
      }
      LCD_noCursor();
-     LCD_setCursor(0, 1); LCD_print("                ");
+     LCD_setCursor(0, 1); LCD_print_no_trim("                ");
      if (Units == 5) {
        inMenu = 4;
      } else {
@@ -2255,14 +2295,6 @@ void write2Screen(const char* Line1, const char* Line2) {
     LCD_print(Line1); 
     LCD_setCursor(0, 1); 
     LCD_print(Line2);
-    // u8g2.clearBuffer(); 
-    // clear_sBuffer();
-    // u8g2.setFont(u8g2_font_HelvetiPixel_tr);
-    // strcpy(sBuffer, Line1);
-    // // Insert line break here
-    // strcpy(sBuffer, Line2);
-    // u8g2.drawStr(1,30,sBuffer);
-    // u8g2.sendBuffer(); // Is this necessary?
 }
 
 void clear_sBuffer() {
@@ -2422,6 +2454,17 @@ void LCD_clear() {
 template <typename T>
 void LCD_print(const T &value) {
   #if (HARDWARE_VERSION == 3)
+    trimString(value);
+    lcd.print(value);
+    lcd.render();
+  #else
+    
+  #endif
+}
+
+template <typename T>
+void LCD_print_no_trim(const T &value) {
+  #if (HARDWARE_VERSION == 3)
     lcd.print(value);
     lcd.render();
   #else
@@ -2463,4 +2506,22 @@ void LCD_write(uint8_t byte) {
   #else
     
   #endif
+}
+
+void trimString(char *str) {
+  if (str == nullptr || *str == '\0') {
+    return;
+  }
+  char *end = str + strlen(str) - 1;
+  while (end > str && isspace((unsigned char)*end)) {
+    end--;
+  }
+  *(end + 1) = '\0';
+  char *start = str;
+  while (*start && isspace((unsigned char)*start)) {
+    start++;
+  }
+  if (start != str) {
+    memmove(str, start, strlen(start) + 1);
+  }
 }
