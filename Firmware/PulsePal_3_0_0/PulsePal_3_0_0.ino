@@ -90,6 +90,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte SyncPin=44; // AD5724 Pin 7 (Sync)
   byte LDACPin=A2; // AD5724 Pin 10 (LDAC)
   byte SDChipSelect=14; // microSD CS Pin 
+  byte dacMap[4] = {0,1,2,3}; // Mapping of DAC output pins to output BNC connectors from left to right
 #else
   // initialize u8g2 graphics library with the numbers of the interface pins
   #define CS 17
@@ -108,13 +109,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
   byte SyncPin=14; // AD5724 Pin 7 (Sync)
   byte LDACPin=39; // AD5724 Pin 10 (LDAC)
+  byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   // Note: SDChipSelect not required for Pulse Pal v3
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
   char sBuffer[30]; // Screen text buffer
 #endif
 
 // Variables for SPI bus
-SPISettings DACSettings(25000000, MSBFIRST, SPI_MODE2); // Settings for DAC
+#if (HARDWARE_VERSION == 2)
+  SPISettings DACSettings(25000000, MSBFIRST, SPI_MODE2); // Settings for DAC
+#else
+  SPISettings DACSettings(30000000, MSBFIRST, SPI_MODE2);
+#endif
 
 // Parameters that define pulse trains currently loaded on the 4 output channels
 // For a visual description of these parameters, see https://sites.google.com/site/pulsepalwiki/parameter-guide
@@ -275,6 +281,7 @@ void setup() {
   SPI.begin();
   SPI.beginTransaction(DACSettings);
   digitalWriteDirect(LDACPin, LOW);
+  digitalWriteDirect(SyncPin, HIGH);
   ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
@@ -284,6 +291,7 @@ void setup() {
   }
   ProgramDAC(16, 0, 31); // Power up DACs
   dacWrite(); // Update the DAC
+
   #if (HARDWARE_VERSION == 2)
     SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
   #endif
@@ -318,6 +326,7 @@ void setup() {
     pinMode(OutputLEDLines[i], OUTPUT); // Configure channel LED pins as outputs
     digitalWrite(OutputLEDLines[i], LOW); // Initialize channel LEDs to low (off)
   }
+
   // microSD setup
   #if (HARDWARE_VERSION == 2)
     delay(100);
@@ -350,6 +359,7 @@ void setup() {
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;
   LastLoopTime = SystemTime; 
+
   #if (HARDWARE_VERSION == 2)
     Timer3.attachInterrupt(handler);
     Timer3.start(TIMER_PERIOD); // Calls handler precisely every 50us
@@ -1085,7 +1095,7 @@ void dacWrite() {
   for (int i = 0; i<4; i++) {
     if (DACFlags[i]) {
       digitalWriteDirect(SyncPin,LOW);
-      dacBuffer[0] = i;
+      dacBuffer[0] = dacMap[i];
       dacBuffer[1] = dacValue.byteArray[1+(i*2)];
       dacBuffer[2] = dacValue.byteArray[0+(i*2)];
       SPI.transfer(dacBuffer,3);

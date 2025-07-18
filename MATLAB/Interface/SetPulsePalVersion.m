@@ -38,6 +38,11 @@ if HandShakeOkByte == 75
             PulsePalSystem.MinPulseDuration = round(100); % Minimum user settable pulse duration in microseconds
             PulsePalSystem.Bits = 12;
             PulsePalSystem.RegisterBits = 16;
+        case 22
+            PulsePalSystem.CycleFrequency = round(20000); % Loops x 20k/sec
+            PulsePalSystem.MinPulseDuration = round(100); % Minimum user settable pulse duration in microseconds
+            PulsePalSystem.Bits = 12;
+            PulsePalSystem.RegisterBits = 16;
     end
     PulsePalSystem.VoltageStep = 20/(2^PulsePalSystem.Bits);
 else
