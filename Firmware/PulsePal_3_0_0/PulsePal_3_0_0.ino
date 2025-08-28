@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, NY, USA
+Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, Rochester, NY, USA
 
 ----------------------------------------------------------------------------
 
@@ -37,8 +37,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
 // Download it from here: https://github.com/olikraus/U8g2_Arduino
 // You can also install it from within Arduino IDE by searching for u8g2 in the Library manager. 
-
-// ***NOTE*** All references to sd.vwd are commented out
 
 #define FIRMWARE_VERSION 22
 
@@ -303,9 +301,14 @@ void setup() {
     u8g2.begin();
     // SplashScreen
     u8g2.clearBuffer();
-    u8g2.drawXBMP(0, 0, GFX_PPlogo_width, GFX_PPlogo_height, GFX_PPlogo);
+    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
     u8g2.sendBuffer();
     delay(2000);
+    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
+    u8g2.sendBuffer();
+    delay(2000);
+    u8g2.setContrast(64); // Brightness of oLED display. Use 64 max (of 256) because:
+                          // 1. Higher values can draw too much current from the USB supply. 2. To extend the lifetime of the display
   #endif
   lcd.begin(16, 2);
   lcd.clear();
@@ -1917,7 +1920,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
      }
      long UVTemp = UserValue;
      inMenu = 3; // Temporarily goes a menu layer deeper so leading zeros are displayed by FormatNumberForDisplay
-     LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+     LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
      delayMicroseconds(100000);
      LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
      ChoiceMade = 0;
@@ -2075,7 +2078,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
           #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+            LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
           #endif
           LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
        }
@@ -2135,7 +2138,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
           #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+            LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
           #endif
           LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
        } else {
@@ -2168,7 +2171,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
      delayMicroseconds(ScrollSpeedDelay);  
      }
      LCD_noCursor();
-     LCD_setCursor(0, 1); LCD_print_no_trim("                ");
+     LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
      if (Units == 5) {
        inMenu = 4;
      } else {
@@ -2291,8 +2294,14 @@ unsigned long ComputePulseDuration(byte myBiphasic, unsigned long myPhase1, unsi
 
 void write2Screen(const char* Line1, const char* Line2) {
     LCD_clear(); 
-    LCD_home(); 
-    LCD_print(Line1); 
+    #if (HARDWARE_VERSION == 3)
+      trimString(Line1);
+      lcd.print(Line1);
+    #else
+      // In-line LCD_print without render
+      LCD_home();
+      LCD_print(Line1);
+    #endif
     LCD_setCursor(0, 1); 
     LCD_print(Line2);
 }
@@ -2412,7 +2421,7 @@ byte RestoreParametersFromSD() {
 }
 
 void Software_Reset() {
-  #if (HARDWARE_VERSION == 2)
+  #if (HARDWARE_VERSION < 3)
     const int RSTC_KEY = 0xA5;
     RSTC->RSTC_CR = RSTC_CR_KEY(RSTC_KEY) | RSTC_CR_PROCRST | RSTC_CR_PERRST;
   #else
@@ -2436,7 +2445,6 @@ void SerialWriteShort(word num) {
 void LCD_home() {
   #if (HARDWARE_VERSION == 3)
     lcd.home();
-    lcd.render();
   #else
 
   #endif
@@ -2445,7 +2453,6 @@ void LCD_home() {
 void LCD_clear() {
   #if (HARDWARE_VERSION == 3)
     lcd.clear();
-    lcd.render();
   #else
     
   #endif
@@ -2463,10 +2470,9 @@ void LCD_print(const T &value) {
 }
 
 template <typename T>
-void LCD_print_no_trim(const T &value) {
+void LCD_print_no_trim_no_render(const T &value) {
   #if (HARDWARE_VERSION == 3)
     lcd.print(value);
-    lcd.render();
   #else
     
   #endif
@@ -2475,7 +2481,7 @@ void LCD_print_no_trim(const T &value) {
 void LCD_setCursor(uint8_t col, uint8_t row) {
   #if (HARDWARE_VERSION == 3)
     lcd.setCursor(col, row);
-    lcd.render();
+    //lcd.render();
   #else
     
   #endif

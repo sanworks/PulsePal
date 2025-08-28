@@ -49,7 +49,7 @@ void LiquidCrystal_U8G2::setFont(const uint8_t *font) {
 }
 void LiquidCrystal_U8G2::clear() {
   for (int i = 0; i < _rows; ++i) memset(_text_buffer[i], ' ', _cols);
-  home(); render();
+  home(); // render(); // render on clear disabled for this firmware
 }
 void LiquidCrystal_U8G2::home() { _cursor_col = 0; _cursor_row = 0; }
 void LiquidCrystal_U8G2::setCursor(uint8_t col, uint8_t row) {
