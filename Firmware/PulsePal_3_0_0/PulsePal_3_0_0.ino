@@ -25,7 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Pulse Pal v2 requires the sdFat library v1, developed by Bill Greiman. (Thanks Bill!!)
 // Download it from here: https://github.com/greiman/SdFat/releases/tag/1.1.4
-// and copy it to your /Arduino/Libraries folder.
+// and copy it to your /Arduino/libraries folder.
 
 // Pulse Pal v2 requires the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
 // Download it from here: https://github.com/ivanseidel/DueTimer
@@ -49,7 +49,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 #include "SdFat.h"
-#include <SD.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <SPI.h>
@@ -59,6 +58,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   #include <LiquidCrystal.h>
   #include "DueTimer.h"
 #else
+  #include <SD.h>
   #include <U8g2lib.h>
   #include "LiquidCrystal_U8G2.h"
   #include "GFXData.h"
@@ -111,7 +111,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   // Note: SDChipSelect not required for Pulse Pal v3
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
-  char sBuffer[30]; // Screen text buffer
 #endif
 
 // Variables for SPI bus
@@ -190,15 +189,20 @@ boolean DACFlag = 0; // true if any DAC channel needs to be updated
 byte DefaultInputLevel = 0; // 0 for PulsePal 0.3, 1 for 0.2 and 0.1. Logic is inverted by optoisolator
 
 // SD variables
-//const size_t BUF_SIZE = 1;
 uint8_t buf[1];
 uint8_t buf2[2];
 uint8_t buf4[4];
-//SdFat sd;
-SdFs sd;
-FsFile root;
-FsFile settingsFile;
-FsFile candidateSettingsFile;
+
+#if (HARDWARE_VERSION < 3)
+  SdFat sd;
+  SdFile settingsFile;
+  SdFile candidateSettingsFile;
+#else
+  SdFs sd;
+  FsFile root;
+  FsFile settingsFile;
+  FsFile candidateSettingsFile;
+#endif
 
 String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
 byte settingsFileNameLength = 0; // Set when a new file name is entered
@@ -349,10 +353,12 @@ void setup() {
     sd.mkdir("Pulse_Pal");
     sd.chdir("Pulse_Pal");
   }
-  if (!root.open("/Pulse_Pal")) {
-    write2Screen("Startup Failed:"," SD Card ERROR");
-    sd.initErrorHalt();
-  }
+  #if (HARDWARE_VERSION > 2)
+    if (!root.open("/Pulse_Pal")) {
+      write2Screen("Startup Failed:"," SD Card ERROR");
+      sd.initErrorHalt();
+    }
+  #endif
   currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
   settingsFile.open(currentSettingsFileNameChar, O_READ);
   
@@ -1175,9 +1181,13 @@ void UpdateSettingsMenu() {
               case 8: { // Load settings
                 inMenu = 5; // file load menu
                 settingsFile.close();
-                root.rewindDirectory();
+                rewindDirectory();
                 myFilePos = 1;
+                #if (HARDWARE_VERSION > 2)
                 if (candidateSettingsFile.openNext(&root, O_READ)) {
+                #else
+                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
+                #endif
                   for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
                   candidateSettingsFile.getName(candidateSettingsFileChar, 16);
                   // Center settings file name
@@ -1195,9 +1205,13 @@ void UpdateSettingsMenu() {
               case 9: { // Delete settings
                 inMenu = 7; 
                 settingsFile.close();
-                root.rewindDirectory();
+                rewindDirectory();
                 myFilePos = 1;
+                #if (HARDWARE_VERSION > 2)
                 if (candidateSettingsFile.openNext(&root, O_READ)) {
+                #else
+                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
+                #endif
                   for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
                   candidateSettingsFile.getName(candidateSettingsFileChar, 16);
                   // Center settings file name
@@ -1746,10 +1760,14 @@ void centerText(char myText[]) {
 
 byte skipToFile(unsigned int fileNumber) {
   byte ok = 0;
-  root.rewindDirectory();
+  rewindDirectory();
   for (int i = 0; i < fileNumber; i++) {
     candidateSettingsFile.close();
-    ok = candidateSettingsFile.openNext(&root, O_READ);
+    #if (HARDWARE_VERSION > 2)
+      ok = candidateSettingsFile.openNext(&root, O_READ);
+    #else
+      ok = candidateSettingsFile.openNext(sd.vwd(), O_READ);
+    #endif
   }
   return ok;
 }
@@ -2306,12 +2324,6 @@ void write2Screen(const char* Line1, const char* Line2) {
     LCD_print(Line2);
 }
 
-void clear_sBuffer() {
-  for (int i = 0; i < 30; i++) {
-    sBuffer[i] = 0;
-  }
-}
-
 void breakLong(unsigned long LongInt2Break) {
   //BrokenBytes is a global array for the output of long int break operations
   BrokenBytes[3] = (byte)(LongInt2Break >> 24);
@@ -2443,19 +2455,11 @@ void SerialWriteShort(word num) {
 }
 
 void LCD_home() {
-  #if (HARDWARE_VERSION == 3)
     lcd.home();
-  #else
-
-  #endif
 }
 
 void LCD_clear() {
-  #if (HARDWARE_VERSION == 3)
     lcd.clear();
-  #else
-    
-  #endif
 }
 
 template <typename T>
@@ -2465,26 +2469,17 @@ void LCD_print(const T &value) {
     lcd.print(value);
     lcd.render();
   #else
-    
+    lcd.print(value);
   #endif
 }
 
 template <typename T>
 void LCD_print_no_trim_no_render(const T &value) {
-  #if (HARDWARE_VERSION == 3)
-    lcd.print(value);
-  #else
-    
-  #endif
+  lcd.print(value);
 }
 
 void LCD_setCursor(uint8_t col, uint8_t row) {
-  #if (HARDWARE_VERSION == 3)
     lcd.setCursor(col, row);
-    //lcd.render();
-  #else
-    
-  #endif
 }
 
 void LCD_cursor() {
@@ -2492,7 +2487,7 @@ void LCD_cursor() {
     lcd.cursor();
     lcd.render();
   #else
-    
+    lcd.cursor();
   #endif
 }
 
@@ -2501,7 +2496,7 @@ void LCD_noCursor() {
     lcd.noCursor();
     lcd.render();
   #else
-    
+    lcd.noCursor();
   #endif
 }
 
@@ -2510,7 +2505,7 @@ void LCD_write(uint8_t byte) {
     LCD_print(byte);
     lcd.render();
   #else
-    
+     lcd.write(byte);
   #endif
 }
 
@@ -2530,4 +2525,12 @@ void trimString(char *str) {
   if (start != str) {
     memmove(str, start, strlen(start) + 1);
   }
+}
+
+void rewindDirectory() {
+  #if (HARDWARE_VERSION > 2)
+    root.rewindDirectory();
+  #else
+    sd.vwd()->rewind();
+  #endif
 }
