@@ -303,14 +303,7 @@ void setup() {
   // set up the LCD
   #if (HARDWARE_VERSION == 3)
     u8g2.begin();
-    // SplashScreen
-    u8g2.clearBuffer();
-    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
-    u8g2.sendBuffer();
-    delay(2000);
-    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
-    u8g2.sendBuffer();
-    delay(2000);
+    runSplashScreen();
     u8g2.setContrast(64); // Brightness of oLED display. Use 64 max (of 256) because:
                           // 1. Higher values can draw too much current from the USB supply. 2. To extend the lifetime of the display
   #endif
@@ -2533,4 +2526,33 @@ void rewindDirectory() {
   #else
     sd.vwd()->rewind();
   #endif
+}
+
+void runSplashScreen() {
+  // SplashScreen
+    u8g2.clearBuffer();
+    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
+    u8g2.sendBuffer();
+    // Twinkling stars
+    uint8_t StarPixelX[25] = {10, 3,  40, 22, 49, 17, 33, 9,  53, 25, 26,  40, 79, 108, 125, 98, 84, 120, 90, 103, 115, 128, 125, 95, 108};
+    uint8_t StarPixelY[25] = {3,  30, 9,  14, 1,  26, 22, 17, 11, 5,  19,  27, 7,  25,  16,  29, 12, 23,  3,  8,   4,   0,   32, 20, 16};
+
+    for (int i = 0; i < 300; i++) {
+      for (int j = 0; j < 25; j++) {
+        if (random(100) < 5) {
+          u8g2.setDrawColor(0);
+        } else {
+          u8g2.setDrawColor(1);
+        }
+        u8g2.drawPixel(StarPixelX[j], StarPixelY[j]);
+      }
+      u8g2.sendBuffer();
+      delay(5);
+    }
+    u8g2.setDrawColor(1);
+
+    u8g2.clearBuffer();
+    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
+    u8g2.sendBuffer();
+    delay(2000);
 }
