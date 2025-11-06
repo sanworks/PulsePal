@@ -53,12 +53,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdint.h>
 #include <SPI.h>
 #include <ctype.h>
+#include "ArCOM.h"
 
 #if (HARDWARE_VERSION == 2)
   #include <LiquidCrystal.h>
   #include "DueTimer.h"
 #else
-  #include <SD.h>
   #include <U8g2lib.h>
   #include "LiquidCrystal_U8G2.h"
   #include "GFXData.h"
@@ -78,6 +78,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TriggerLevel 0
 
 #if (HARDWARE_VERSION == 2)
+  ArCOM PPUSB(SerialUSB); // Initialize ArCOM USB serial wrapper
   // initialize Arduino LCD library with the numbers of the interface pins
   LiquidCrystal lcd(10, 9, 8, 7, 6, 5);
   byte TriggerLines[2] = {12,11}; // Trigger channels 1 and 2
@@ -90,7 +91,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte LDACPin=A2; // AD5724 Pin 10 (LDAC)
   byte SDChipSelect=14; // microSD CS Pin 
   byte dacMap[4] = {0,1,2,3}; // Mapping of DAC output pins to output BNC connectors from left to right
+  #define MAX_CUSTOM_PULSES 5000
 #else
+  ArCOM PPUSB(Serial); // Initialize ArCOM USB serial wrapper
   // initialize u8g2 graphics library with the numbers of the interface pins
   #define CS 17
   #define DC 37
@@ -111,6 +114,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   // Note: SDChipSelect not required for Pulse Pal v3
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
+  #define MAX_CUSTOM_PULSES 10000
 #endif
 
 // Variables for SPI bus
@@ -123,24 +127,24 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Parameters that define pulse trains currently loaded on the 4 output channels
 // For a visual description of these parameters, see https://sites.google.com/site/pulsepalwiki/parameter-guide
 // The following parameters are times in microseconds:
-unsigned long Phase1Duration[4] = {0}; // Pulse Duration in monophasic mode, first phase in biphasic mode
-unsigned long InterPhaseInterval[4] = {0}; // Interval between phases in biphasic mode (at resting voltage)
-unsigned long Phase2Duration[4] = {0}; // Second phase duration in biphasic mode
-unsigned long InterPulseInterval[4] = {0}; // Interval between pulses
-unsigned long BurstDuration[4] = {0}; // Duration of sequential bursts of pulses (0 if not using bursts)
-unsigned long BurstInterval[4] = {0}; // Interval between sequential bursts of pulses (0 if not using bursts)
-unsigned long PulseTrainDuration[4] = {0}; // Duration of pulse train
-unsigned long PulseTrainDelay[4] = {0}; // Delay between trigger and pulse train onset
+uint32_t Phase1Duration[4] = {0}; // Pulse Duration in monophasic mode, first phase in biphasic mode
+uint32_t InterPhaseInterval[4] = {0}; // Interval between phases in biphasic mode (at resting voltage)
+uint32_t Phase2Duration[4] = {0}; // Second phase duration in biphasic mode
+uint32_t InterPulseInterval[4] = {0}; // Interval between pulses
+uint32_t BurstDuration[4] = {0}; // Duration of sequential bursts of pulses (0 if not using bursts)
+uint32_t BurstInterval[4] = {0}; // Interval between sequential bursts of pulses (0 if not using bursts)
+uint32_t PulseTrainDuration[4] = {0}; // Duration of pulse train
+uint32_t PulseTrainDelay[4] = {0}; // Delay between trigger and pulse train onset
 // The following are volts in bits. 16 bits span -10V to +10V.
 uint16_t Phase1Voltage[4] = {0}; // The pulse voltage in monophasic mode, and phase 1 voltage in biphasic mode
 uint16_t Phase2Voltage[4] = {0}; // Phase 2 voltage in biphasic mode.
 uint16_t RestingVoltage[4] = {32768}; // Voltage the system returns to between pulses (32768 bits = 0V)
 // The following are single byte parameters
-int CustomTrainID[4] = {0}; // If 0, uses above params. If 1 or 2, pulse times and voltages are played back from CustomTrain1 or 2
-int CustomTrainTarget[4] = {0}; // If 0, custom times define start-times of pulses. If 1, custom times are start-times of bursts.
-int CustomTrainLoop[4] = {0}; // if 0, custom stim plays once. If 1, custom stim loops until PulseTrainDuration.
-byte TriggerAddress[2][4] = {0}; // This specifies which output channels get triggered by trigger channel 1 (row 1) or trigger channel 2 (row 2)
-byte TriggerMode[2] = {0}; // if 0, "Normal mode", low to high transitions on trigger channels start stimulation (but do not cancel it) 
+uint8_t CustomTrainID[4] = {0}; // If 0, uses above params. If 1 or 2, pulse times and voltages are played back from CustomTrain1 or 2
+uint8_t CustomTrainTarget[4] = {0}; // If 0, custom times define start-times of pulses. If 1, custom times are start-times of bursts.
+uint8_t CustomTrainLoop[4] = {0}; // if 0, custom stim plays once. If 1, custom stim loops until PulseTrainDuration.
+uint8_t TriggerAddress[2][4] = {0}; // This specifies which output channels get triggered by trigger channel 1 (row 1) or trigger channel 2 (row 2)
+uint8_t TriggerMode[2] = {0}; // if 0, "Normal mode", low to high transitions on trigger channels start stimulation (but do not cancel it) 
 //                            if 1, "Toggle mode", same as normal mode, but low-to-high transitions do cancel ongoing pulse trains
 //                            if 2, "Pulse Gated mode", low to high starts playback and high to low stops it.
 
@@ -164,8 +168,13 @@ unsigned long PulseTrainTimestamps[4] = {0};
 unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pulse-low timestamp for each channel
 unsigned long NextBurstTransitionTime[4] = {0}; // Stores next burst-on or burst-off timestamp for each channel
 unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is supposed to end
-unsigned long CustomPulseTimes[2][5001] = {0};
-uint16_t CustomVoltages[2][5001] = {0};
+#if (HARDWARE_VERSION == 2)
+  uint32_t CustomPulseTimes[2][MAX_CUSTOM_PULSES+1] = {0};
+  uint16_t CustomVoltages[2][MAX_CUSTOM_PULSES+1] = {0};
+#else
+  uint32_t CustomPulseTimes[2][MAX_CUSTOM_PULSES+1] = {0};
+  uint16_t CustomVoltages[2][MAX_CUSTOM_PULSES+1] = {0};
+#endif
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
 unsigned long LastLoopTime = 0;
 byte PulseStatus[4] = {0}; // This is 0 if not delivering a pulse, 1 if phase 1, 2 if inter phase interval, 3 if phase 2.
@@ -178,9 +187,9 @@ byte LineTriggerEvent[2] = {0}; // 0 if no line trigger event detected, 1 if low
 unsigned long InputLineDebounceTimestamp[2] = {0}; // Last time the line went from high to low
 boolean UsesBursts[4] = {0};
 unsigned long PulseDuration[4] = {0}; // Duration of a pulse (sum of 3 phases for biphasic pulse)
-boolean IsBiphasic[4] = {0};
+byte IsBiphasic[4] = {0};
 boolean IsCustomBurstTrain[4] = {0};
-boolean ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
+byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 byte StimulatingState = 0; // 1 if ANY channel is stimulating, 2 if this is the first cycle after the system was triggered. 
 byte LastStimulatingState = 0;
 boolean WasStimulating = 0; // true if any channel was stimulating on the previous loop. Used to force a DAC write after all channels end their stimulation, to return lines to 0
@@ -259,7 +268,7 @@ char tempText[16] = {0}; // Temporary buffer for holding a file name or other te
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
 
 // Screen saver variables
-boolean useScreenSaver = 0; // Disabled by default
+boolean useScreenSaver = false; // Disabled by default
 boolean SSactive = 0; // Bit indicating whether screen saver is currently active
 unsigned long SSdelay = 60000; // Idle cycles until screen saver is activated
 unsigned long SScount = 0; // Counter of idle cycles
@@ -436,46 +445,46 @@ void handler(void) {
     }
     LastStimulatingState = StimulatingState;
       
-  if (SerialUSB.available()) { // If bytes are available in the serial port buffer
-    CommandByte = SerialUSB.read(); // Read a byte
+  if (PPUSB.available()) { // If bytes are available in the serial port buffer
+    CommandByte = PPUSB.readByte(); // Read a byte
     if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
-      CommandByte = SerialReadByte(); // Read the command byte (an op code for the operation to execute)
+      CommandByte = PPUSB.readByte(); // Read the command byte (an op code for the operation to execute)
       switch (CommandByte) {
         case 72: { // Handshake
-          SerialUSB.write(75); // Send 'K' (as in ok)
-          SerialWriteLong(FIRMWARE_VERSION); // Send the firmware version as a 4 byte unsigned integer
+          PPUSB.writeByte(75); // Send 'K' (as in ok)
+          PPUSB.writeUint32(FIRMWARE_VERSION); // Send the firmware version as a 4 byte unsigned integer
           ConnectedToApp = 1;
         } break;
-        case 73: { // Program the module - total program (can be faster than item-wise, if many parameters have changed)
+        case 73: { // Program the module - legacy method for backwards compatability. See op 92 for the more efficient method used by the current Python and MATLAB classes
           for (int x = 0; x < 4; x++) { // Read timing parameters (4 byte integers)
-            Phase1Duration[x] = SerialReadLong();
-            InterPhaseInterval[x] = SerialReadLong();
-            Phase2Duration[x] = SerialReadLong();
-            InterPulseInterval[x] = SerialReadLong();
-            BurstDuration[x] = SerialReadLong();
-            BurstInterval[x] = SerialReadLong();
-            PulseTrainDuration[x] = SerialReadLong();
-            PulseTrainDelay[x] = SerialReadLong();
+            Phase1Duration[x] = PPUSB.readUint32();
+            InterPhaseInterval[x] = PPUSB.readUint32();
+            Phase2Duration[x] = PPUSB.readUint32();
+            InterPulseInterval[x] = PPUSB.readUint32();
+            BurstDuration[x] = PPUSB.readUint32();
+            BurstInterval[x] = PPUSB.readUint32();
+            PulseTrainDuration[x] = PPUSB.readUint32();
+            PulseTrainDelay[x] = PPUSB.readUint32();
           }
           for (int x = 0; x < 4; x++) { // Read voltage parameters (2 byte integers)
-            Phase1Voltage[x] = SerialReadShort();
-            Phase2Voltage[x] = SerialReadShort();
-            RestingVoltage[x] = SerialReadShort();
+            Phase1Voltage[x] = PPUSB.readUint16();
+            Phase2Voltage[x] = PPUSB.readUint16();
+            RestingVoltage[x] = PPUSB.readUint16();
           }
           for (int x = 0; x < 4; x++) { // Read single byte parameters
-            IsBiphasic[x] = SerialReadByte();
-            CustomTrainID[x] = SerialReadByte();
-            CustomTrainTarget[x] = SerialReadByte();
-            CustomTrainLoop[x] = SerialReadByte();
+            IsBiphasic[x] = PPUSB.readByte();
+            CustomTrainID[x] = PPUSB.readByte();
+            CustomTrainTarget[x] = PPUSB.readByte();
+            CustomTrainLoop[x] = PPUSB.readByte();
           }
          for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
            for (int y = 0; y < 4; y++) {
-             TriggerAddress[x][y] = SerialReadByte();
+             TriggerAddress[x][y] = PPUSB.readByte();
            }
          }
-         TriggerMode[0] = SerialReadByte(); // Read bytes that set interpretation of trigger channel voltage
-         TriggerMode[1] = SerialReadByte();
-         SerialUSB.write(1); // Send confirm byte
+         TriggerMode[0] = PPUSB.readByte(); // Read bytes that set interpretation of trigger channel voltage
+         TriggerMode[1] = PPUSB.readByte();
+         PPUSB.writeByte(1); // Send confirm byte
          for (int x = 0; x < 4; x++) {
            if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
            if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
@@ -491,29 +500,29 @@ void handler(void) {
          dacWrite();
         } break;
         
-        case 74: { // Program one parameter
-          inByte2 = SerialReadByte();
-          inByte3 = SerialReadByte(); // inByte3 = channel (1-4)
+        case 74: { // Program one parameter - legacy method for backwards compatability. See op 91 for the method used by the current Python and MATLAB classes
+          inByte2 = PPUSB.readByte();
+          inByte3 = PPUSB.readByte(); // inByte3 = channel (1-4)
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
           switch (inByte2) { 
-             case 1: {IsBiphasic[inByte3] = SerialReadByte();} break;
-             case 2: {Phase1Voltage[inByte3] = SerialReadShort();} break;
-             case 3: {Phase2Voltage[inByte3] = SerialReadShort();} break;
-             case 4: {Phase1Duration[inByte3] = SerialReadLong();} break;
-             case 5: {InterPhaseInterval[inByte3] = SerialReadLong();} break;
-             case 6: {Phase2Duration[inByte3] = SerialReadLong();} break;
-             case 7: {InterPulseInterval[inByte3] = SerialReadLong();} break;
-             case 8: {BurstDuration[inByte3] = SerialReadLong();} break;
-             case 9: {BurstInterval[inByte3] = SerialReadLong();} break;
-             case 10: {PulseTrainDuration[inByte3] = SerialReadLong();} break;
-             case 11: {PulseTrainDelay[inByte3] = SerialReadLong();} break;
-             case 12: {inByte4 = SerialReadByte(); TriggerAddress[0][inByte3] = inByte4;} break;
-             case 13: {inByte4 = SerialReadByte(); TriggerAddress[1][inByte3] = inByte4;} break;
-             case 14: {CustomTrainID[inByte3] = SerialReadByte();} break;
-             case 15: {CustomTrainTarget[inByte3] = SerialReadByte();} break;
-             case 16: {CustomTrainLoop[inByte3] = SerialReadByte();} break;
-             case 17: {RestingVoltage[inByte3] = SerialReadShort();} break;
-             case 128: {TriggerMode[inByte3] = SerialReadByte();} break;
+             case 1: {IsBiphasic[inByte3] = PPUSB.readByte();} break;
+             case 2: {Phase1Voltage[inByte3] = PPUSB.readUint16();} break;
+             case 3: {Phase2Voltage[inByte3] = PPUSB.readUint16();} break;
+             case 4: {Phase1Duration[inByte3] = PPUSB.readUint32();} break;
+             case 5: {InterPhaseInterval[inByte3] = PPUSB.readUint32();} break;
+             case 6: {Phase2Duration[inByte3] = PPUSB.readUint32();} break;
+             case 7: {InterPulseInterval[inByte3] = PPUSB.readUint32();} break;
+             case 8: {BurstDuration[inByte3] = PPUSB.readUint32();} break;
+             case 9: {BurstInterval[inByte3] = PPUSB.readUint32();} break;
+             case 10: {PulseTrainDuration[inByte3] = PPUSB.readUint32();} break;
+             case 11: {PulseTrainDelay[inByte3] = PPUSB.readUint32();} break;
+             case 12: {inByte4 = PPUSB.readByte(); TriggerAddress[0][inByte3] = inByte4;} break;
+             case 13: {inByte4 = PPUSB.readByte(); TriggerAddress[1][inByte3] = inByte4;} break;
+             case 14: {CustomTrainID[inByte3] = PPUSB.readByte();} break;
+             case 15: {CustomTrainTarget[inByte3] = PPUSB.readByte();} break;
+             case 16: {CustomTrainLoop[inByte3] = PPUSB.readByte();} break;
+             case 17: {RestingVoltage[inByte3] = PPUSB.readUint16();} break;
+             case 128: {TriggerMode[inByte3] = PPUSB.readByte();} break;
           }
           if (inByte2 < 14) {
             if ((BurstDuration[inByte3] == 0) || (BurstInterval[inByte3] == 0)) {UsesBursts[inByte3] = false;} else {UsesBursts[inByte3] = true;}
@@ -530,29 +539,29 @@ void handler(void) {
           } else {
             IsCustomBurstTrain[inByte3] = 0;
           }
-          SerialUSB.write(1); // Send confirm byte
+          PPUSB.writeByte(1); // Send confirm byte
         } break;
   
         case 75: { // Program custom pulse train 1
-          CustomTrainNpulses[0] = SerialReadLong();
+          CustomTrainNpulses[0] = PPUSB.readUint32();
           for (int x = 0; x < CustomTrainNpulses[0]; x++) {
-            CustomPulseTimes[0][x] = SerialReadLong();
+            CustomPulseTimes[0][x] = PPUSB.readUint32();
           }
           for (int x = 0; x < CustomTrainNpulses[0]; x++) {
-            CustomVoltages[0][x] = SerialReadShort();
+            CustomVoltages[0][x] = PPUSB.readUint16();
           }
-          SerialUSB.write(1); // Send confirm byte
+          PPUSB.writeByte(1); // Send confirm byte
         } break;
         
         case 76: { // Program custom pulse train 2
-          CustomTrainNpulses[1] = SerialReadLong();
+          CustomTrainNpulses[1] = PPUSB.readUint32();
           for (int x = 0; x < CustomTrainNpulses[1]; x++) {
-            CustomPulseTimes[1][x] = SerialReadLong();
+            CustomPulseTimes[1][x] = PPUSB.readUint32();
           }
           for (int x = 0; x < CustomTrainNpulses[1]; x++) {
-            CustomVoltages[1][x] = SerialReadShort();
+            CustomVoltages[1][x] = PPUSB.readUint16();
           }
-          SerialUSB.write(1); // Send confirm byte
+          PPUSB.writeByte(1); // Send confirm byte
         } break;      
         
         case 77: { // Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
@@ -583,7 +592,7 @@ void handler(void) {
         case 79: { // Write specific voltage to an output channel (not a pulse train) 
           byte myChannel = SerialReadByte();
           myChannel = myChannel - 1; // Convert for zero-indexing
-          uint16_t val = SerialReadShort();
+          uint16_t val = PPUSB.readUint16();
           dacValue.uint16[myChannel] = val;
           DACFlags[myChannel] = 1;
           dacWrite();
@@ -592,7 +601,7 @@ void handler(void) {
           } else {
             digitalWriteDirect(OutputLEDLines[myChannel], HIGH);
           }
-          SerialUSB.write(1); // Send confirm byte
+          PPUSB.writeByte(1); // Send confirm byte
         } break;
         case 80: { // Soft-abort ongoing stimulation without disconnecting from client
          for (int i = 0; i < 4; i++) {
@@ -626,7 +635,7 @@ void handler(void) {
             DACFlags[inByte2] = 1;
             dacWrite();
           }
-          SerialUSB.write(1);
+          PPUSB.writeByte(1);
         } break;
       case 85: { // Return the currently loaded parameter file from the microSD card
           settingsFile.rewind();
@@ -647,7 +656,7 @@ void handler(void) {
           pinMode(inByte2, INPUT);
           delayMicroseconds(10);
           LogicLevel = digitalRead(inByte2);
-          SerialUSB.write(LogicLevel);
+          PPUSB.writeByte(LogicLevel);
         } break; 
         case 89: { // Receive new CommanderString (displayed on top line of OLED, i.e. "MATLAB connected"
           for (int x = 0; x < 6; x++) {
@@ -660,14 +669,14 @@ void handler(void) {
         } break;
         case 90: { // Save, load or delete the current microSD settings file
           byte confirmBit = 1;
-          while (SerialUSB.available()==0){}
-          settingsOp = SerialUSB.read();
-          while (SerialUSB.available()==0){}
-          settingsFileNameLength = SerialUSB.read();
+          while (PPUSB.available()==0){}
+          settingsOp = PPUSB.readByte();
+          while (PPUSB.available()==0){}
+          settingsFileNameLength = PPUSB.readByte();
           currentSettingsFileName = "";
           for (int i = 0; i < settingsFileNameLength; i++) {
-            while (SerialUSB.available()==0){}
-            currentSettingsFileName = currentSettingsFileName + (char)SerialUSB.read();
+            while (PPUSB.available()==0){}
+            currentSettingsFileName = currentSettingsFileName + (char)PPUSB.readByte();
           }
           settingsFile.close();
           currentSettingsFileName.toCharArray(currentSettingsFileNameChar, settingsFileNameLength+1);
@@ -684,40 +693,117 @@ void handler(void) {
               settingsFile.open(currentSettingsFileNameChar, O_READ);
               confirmBit = 0;
             } else {
-              // Return parameters from file to update client
-                for (int x = 0; x < 4; x++) {
-                  SerialWriteLong(Phase1Duration[x]);
-                  SerialWriteLong(InterPhaseInterval[x]);
-                  SerialWriteLong(Phase2Duration[x]);
-                  SerialWriteLong(InterPulseInterval[x]);
-                  SerialWriteLong(BurstDuration[x]);
-                  SerialWriteLong(BurstInterval[x]);
-                  SerialWriteLong(PulseTrainDuration[x]);
-                  SerialWriteLong(PulseTrainDelay[x]);
-                } 
-                for (int x = 0; x < 4; x++) {
-                  SerialWriteShort(Phase1Voltage[x]);
-                  SerialWriteShort(Phase2Voltage[x]);
-                  SerialWriteShort(RestingVoltage[x]);
-                }
-                for (int x = 0; x < 4; x++) {
-                  SerialUSB.write(IsBiphasic[x]);
-                  SerialUSB.write(CustomTrainID[x]);
-                  SerialUSB.write(CustomTrainTarget[x]);
-                  SerialUSB.write(CustomTrainLoop[x]);
-                }
-               for (int x = 0; x < 2; x++) { // Read 8 trigger address bytes
-                 for (int y = 0; y < 4; y++) {
-                  SerialUSB.write(TriggerAddress[x][y]);
-                 }
-               }
-               SerialUSB.write(TriggerMode[0]);
-               SerialUSB.write(TriggerMode[1]);
-             }
+              sendCurrentParams();
+            }
           } else if (settingsOp == 3) { // Delete
             sd.remove(currentSettingsFileNameChar);
           }
           settingsFile.rewind();
+        } break;
+
+        case 91: { // Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 
+                   // Op 74, a per-parameter & per-channel method, is used by the legacy interface
+          inByte2 = PPUSB.readByte();
+          switch (inByte2) { 
+             case 1: {PPUSB.readByteArray(IsBiphasic, 4);} break;
+             case 2: {PPUSB.readUint16Array(Phase1Voltage, 4);} break;
+             case 3: {PPUSB.readUint16Array(Phase2Voltage, 4);} break;
+             case 4: {PPUSB.readUint32Array(Phase1Duration,4);} break;
+             case 5: {PPUSB.readUint32Array(InterPhaseInterval,4);} break;
+             case 6: {PPUSB.readUint32Array(Phase2Duration, 4);} break;
+             case 7: {PPUSB.readUint32Array(InterPulseInterval, 4);} break;
+             case 8: {PPUSB.readUint32Array(BurstDuration, 4);} break;
+             case 9: {PPUSB.readUint32Array(BurstInterval, 4);} break;
+             case 10: {PPUSB.readUint32Array(PulseTrainDuration, 4);} break;
+             case 11: {PPUSB.readUint32Array(PulseTrainDelay, 4);} break;
+             case 12: {inByte3 = PPUSB.readByte(); TriggerAddress[0][0] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[0][1] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[0][2] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[0][3] = inByte3;} break;
+             case 13: {inByte3 = PPUSB.readByte(); TriggerAddress[1][0] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[1][1] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[1][2] = inByte3;
+                       inByte3 = PPUSB.readByte(); TriggerAddress[1][3] = inByte3;} break;
+             case 14: {PPUSB.readByteArray(CustomTrainID, 4);} break;
+             case 15: {PPUSB.readByteArray(CustomTrainTarget, 4);} break;
+             case 16: {PPUSB.readByteArray(CustomTrainLoop, 4);} break;
+             case 17: {PPUSB.readUint16Array(RestingVoltage, 4);} break;
+             case 18: {PPUSB.readByteArray(ContinuousLoopMode, 4);} break;
+             case 128: {PPUSB.readByteArray(TriggerMode, 2);} break;
+          }
+          for (int iChan = 0; iChan < 4; iChan++) {
+            if (inByte2 < 14) {
+              if ((BurstDuration[iChan] == 0) || (BurstInterval[iChan] == 0)) {UsesBursts[iChan] = false;} else {UsesBursts[iChan] = true;}
+              if (CustomTrainTarget[iChan] == 1) {UsesBursts[iChan] = true;}
+              if ((CustomTrainID[iChan] > 0) && (CustomTrainTarget[iChan] == 0)) {UsesBursts[iChan] = false;}
+            }
+            if (inByte2 == 17) {
+              dacValue.uint16[iChan] = RestingVoltage[iChan];
+              DACFlags[iChan] = 1;
+            }
+            if (inByte2 == 18) {
+              if (ContinuousLoopMode[iChan]) {
+                SoftTriggerScheduled[iChan] = 1;
+              } else {
+                killChannel(iChan);
+              }
+            }
+            PulseDuration[iChan] = ComputePulseDuration(IsBiphasic[iChan], Phase1Duration[iChan], InterPhaseInterval[iChan], Phase2Duration[iChan]);
+            if ((CustomTrainID[iChan] > 0) && (CustomTrainTarget[iChan] == 1)) {
+              IsCustomBurstTrain[iChan] = 1;
+            } else {
+              IsCustomBurstTrain[iChan] = 0;
+            }
+          }
+          if (inByte2 == 17) { // If updating resting voltage
+              dacWrite();
+          }
+          PPUSB.writeByte(1); // Send confirm byte
+        } break;
+
+        case 92: {  // Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
+          PPUSB.readUint32Array(Phase1Duration, 4);
+          PPUSB.readUint32Array(InterPhaseInterval, 4);
+          PPUSB.readUint32Array(Phase2Duration, 4);
+          PPUSB.readUint32Array(InterPulseInterval, 4);
+          PPUSB.readUint32Array(BurstDuration, 4);
+          PPUSB.readUint32Array(BurstInterval, 4);
+          PPUSB.readUint32Array(PulseTrainDuration, 4);
+          PPUSB.readUint32Array(PulseTrainDelay, 4);
+          PPUSB.readUint16Array(Phase1Voltage, 4);
+          PPUSB.readUint16Array(Phase2Voltage, 4);
+          PPUSB.readUint16Array(RestingVoltage, 4);
+          PPUSB.readByteArray(IsBiphasic, 4);
+          PPUSB.readByteArray(CustomTrainID, 4);
+          PPUSB.readByteArray(CustomTrainTarget, 4);
+          PPUSB.readByteArray(CustomTrainLoop, 4);
+         for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
+           for (int y = 0; y < 4; y++) {
+             TriggerAddress[x][y] = PPUSB.readByte();
+           }
+         }
+         PPUSB.readByteArray(TriggerMode, 2);
+         PPUSB.writeByte(1); // Send confirm byte
+         for (int x = 0; x < 4; x++) {
+           if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
+           if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
+           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {UsesBursts[x] = false;}
+           PulseDuration[x] = ComputePulseDuration(IsBiphasic[x], Phase1Duration[x], InterPhaseInterval[x], Phase2Duration[x]);
+           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
+            IsCustomBurstTrain[x] = 1;
+           } else {
+            IsCustomBurstTrain[x] = 0;
+           }
+           dacValue.uint16[x] = RestingVoltage[x];
+         }
+         dacWrite();
+        } break;
+        case 93: {
+          sendCurrentParams();
+        } break;
+        case 94: { // Send hardware info
+          PPUSB.writeByte(HARDWARE_VERSION);
+          PPUSB.writeUint32(MAX_CUSTOM_PULSES);
         } break;
      }
     }
@@ -1052,33 +1138,6 @@ void handler(void) {
    }
 }
 // End hw timer callback
-
-
-unsigned long SerialReadLong() {
-   // Generic routine for getting a 4-byte long int over the serial port
-   unsigned long OutputLong = 0;
-          inByte = SerialReadByte();
-          inByte2 = SerialReadByte();
-          inByte3 = SerialReadByte();
-          inByte4 = SerialReadByte();
-          OutputLong =  makeUnsignedLong(inByte4, inByte3, inByte2, inByte);
-  return OutputLong;
-}
-
-uint16_t SerialReadShort() {
-   // Generic routine for getting a 2-byte unsigned int over the serial port
-   unsigned long MyOutput = 0;
-          inByte = SerialReadByte();
-          inByte2 = SerialReadByte();
-          MyOutput =  makeUnsignedShort(inByte2, inByte);
-  return MyOutput;
-}
-
-byte* Long2Bytes(long LongInt2Break) {
-  byte Output[4] = {0};
-  return Output;
-}
-
 
 void killChannel(byte outputChannel) {
   CustomPulseTimeIndex[outputChannel] = 0;
@@ -2230,14 +2289,14 @@ byte SerialReadByte(){
   byte ReturnByte = 0;
   if (SerialReadTimedout == 0) {
     SerialReadStartTime = millis();
-    while (SerialUSB.available() == 0) {
+    while (PPUSB.available() == 0) {
         SerialCurrentTime = millis();
         if ((SerialCurrentTime - SerialReadStartTime) > Timeout) {
           SerialReadTimedout = 1;
           return 0;
         }
     }
-    ReturnByte = SerialUSB.read();
+    ReturnByte = PPUSB.readByte();
     return ReturnByte;
   } else {
     return 0;
@@ -2435,18 +2494,6 @@ void Software_Reset() {
   while (true);  // Wait for reset
 }
 
-void SerialWriteLong(unsigned long num) {
-  SerialUSB.write((byte)num); 
-  SerialUSB.write((byte)(num >> 8)); 
-  SerialUSB.write((byte)(num >> 16)); 
-  SerialUSB.write((byte)(num >> 24));
-}
-
-void SerialWriteShort(word num) {
-  SerialUSB.write((byte)num); 
-  SerialUSB.write((byte)(num >> 8)); 
-}
-
 void LCD_home() {
     lcd.home();
 }
@@ -2555,4 +2602,28 @@ void runSplashScreen() {
     u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
     u8g2.sendBuffer();
     delay(2000);
+}
+
+void sendCurrentParams() {
+    PPUSB.writeUint32Array(Phase1Duration, 4);
+    PPUSB.writeUint32Array(InterPhaseInterval, 4);
+    PPUSB.writeUint32Array(Phase2Duration, 4);
+    PPUSB.writeUint32Array(InterPulseInterval, 4);
+    PPUSB.writeUint32Array(BurstDuration, 4);
+    PPUSB.writeUint32Array(BurstInterval, 4);
+    PPUSB.writeUint32Array(PulseTrainDuration, 4);
+    PPUSB.writeUint32Array(PulseTrainDelay, 4);
+    PPUSB.writeUint16Array(Phase1Voltage, 4);
+    PPUSB.writeUint16Array(Phase2Voltage, 4);
+    PPUSB.writeUint16Array(RestingVoltage, 4);
+    PPUSB.writeByteArray(IsBiphasic, 4);
+    PPUSB.writeByteArray(CustomTrainID, 4);
+    PPUSB.writeByteArray(CustomTrainTarget, 4);
+    PPUSB.writeByteArray(CustomTrainLoop, 4);
+     for (int x = 0; x < 2; x++) { // Read 8 trigger address bytes
+       for (int y = 0; y < 4; y++) {
+        PPUSB.writeByte(TriggerAddress[x][y]);
+       }
+     }
+     PPUSB.writeByteArray(TriggerMode, 2);
 }
