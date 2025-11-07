@@ -19,24 +19,26 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-// PULSE PAL Firmware 
+// PULSE PAL FIRMWARE for Hardware v2 and v3
 //
-// ** DEPENDENCIES YOU NEED TO INSTALL FIRST IF COMPILING FOR PULSE PAL v2 (Also see v3 Dependency Below)**
+// ** DEPENDENCIES YOU NEED TO INSTALL FIRST** 
 
+// IF COMPILING FOR PULSE PAL v2 (Also see v3 Dependency Below)
+// 1.
 // Pulse Pal v2 requires the sdFat library v1, developed by Bill Greiman. (Thanks Bill!!)
 // Download it from here: https://github.com/greiman/SdFat/releases/tag/1.1.4
 // and copy it to your /Arduino/libraries folder.
-
+// 2.
 // Pulse Pal v2 requires the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
 // Download it from here: https://github.com/ivanseidel/DueTimer
 // and copy it to your /Arduino/Libraries folder.
 // The DueTimer library is open source, and protected by the MIT License.
 
 
-// ** DEPENDENCY YOU NEED TO INSTALL FIRST IF COMPILING FOR PULSE PAL v3 (Also see v2 Dependency Above)**
+// IF COMPILING FOR PULSE PAL v3
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
-// Download it from here: https://github.com/olikraus/U8g2_Arduino
-// You can also install it from within Arduino IDE by searching for u8g2 in the Library manager. 
+// You can install it from within Arduino IDE by searching for u8g2 in the Library manager. 
+// You can also download it from here: https://github.com/olikraus/U8g2_Arduino
 
 #define FIRMWARE_VERSION 22
 
@@ -70,12 +72,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define makeUnsignedShort(msb, lsb) ((msb << 8) | (lsb))
 
 // Define other macros
-#define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = us
+#define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = μs
+                        // Limited by ~15μs analog read speed for joystick x/y and precision of the joystick UI (0.0000).
+                        // On HW3 this may be reduced in the future with the ADC library for fast analog reads + UI mods
 
-// Trigger line level configuration. This defines the logic level when the trigger is activated.
-// The optoisolator in Pulse Pal 2 is inverting, so its output is high by default, and becomes low 
-// when voltage is applied to the trigger channel. Set this to 1 if using a non-inverting isolator.
-#define TriggerLevel 0
+
+#define TriggerLevel 0  // Trigger line level configuration. This defines the logic level when the trigger is activated.
+                        // The optoisolator in Pulse Pal 2 is inverting, so its output is high by default, and becomes low 
+                        // when voltage is applied to the trigger channel. Set this to 1 if using a non-inverting isolator.
 
 #if (HARDWARE_VERSION == 2)
   ArCOM PPUSB(SerialUSB); // Initialize ArCOM USB serial wrapper
@@ -197,11 +201,10 @@ int nStimulatingChannels = 0; // number of actively stimulating channels
 boolean DACFlag = 0; // true if any DAC channel needs to be updated
 byte DefaultInputLevel = 0; // 0 for PulsePal 0.3, 1 for 0.2 and 0.1. Logic is inverted by optoisolator
 
-// SD variables
+// microSD and file management variables
 uint8_t buf[1];
 uint8_t buf2[2];
 uint8_t buf4[4];
-
 #if (HARDWARE_VERSION < 3)
   SdFat sd;
   SdFile settingsFile;
@@ -212,7 +215,6 @@ uint8_t buf4[4];
   FsFile settingsFile;
   FsFile candidateSettingsFile;
 #endif
-
 String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
 byte settingsFileNameLength = 0; // Set when a new file name is entered
 char currentSettingsFileNameChar[100]; // Filename must be converted from string to character array for use with sdFAT
@@ -267,25 +269,17 @@ byte fileNameOffset = 0; // Offset of centered string (for display on 16-char sc
 char tempText[16] = {0}; // Temporary buffer for holding a file name or other text
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
 
-// Screen saver variables
-boolean useScreenSaver = false; // Disabled by default
-boolean SSactive = 0; // Bit indicating whether screen saver is currently active
-unsigned long SSdelay = 60000; // Idle cycles until screen saver is activated
-unsigned long SScount = 0; // Counter of idle cycles
-
 // Other variables
 int ConnectedToApp = 0; // 0 if disconnected, 1 if connected
-byte CycleDuration = 50; // in microseconds, time between hardware cycles (each cycle = read trigger channels, update output channels)
-unsigned int CycleFrequency = 20000; // in Hz, same idea as CycleDuration
+unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_PERIOD
 void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
-unsigned long callbackStartTime = 0;
 volatile byte usbLoadTarget = 0;
 volatile boolean usbLoadFlag = 0;
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
-union {
+union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
     byte byteArray[8];
     uint16_t uint16[4];
 } dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
@@ -378,7 +372,7 @@ void setup() {
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;
   LastLoopTime = SystemTime; 
-
+  CycleFrequency = 1.0/(TIMER_PERIOD/1000000.0); // Given as decimals to force floating point arithmetic
   #if (HARDWARE_VERSION == 2)
     Timer3.attachInterrupt(handler);
     Timer3.start(TIMER_PERIOD); // Calls handler precisely every TIMER_PERIOD us
@@ -734,6 +728,7 @@ void loop() {
         } break;
         case 94: { // Send hardware info
           PPUSB.writeByte(HARDWARE_VERSION);
+          PPUSB.writeUint32(TIMER_PERIOD);
           PPUSB.writeUint32(MAX_CUSTOM_PULSES);
         } break;
      }
@@ -759,7 +754,7 @@ void loop() {
   }
 }
 
-void handler(void) {                   
+void handler(void) {                  
   if (StimulatingState == 0) {
       if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
         dacWrite(); // Update DAC to final voltages (should be resting voltage)
@@ -767,17 +762,6 @@ void handler(void) {
       }
       UpdateSettingsMenu(); // Check for joystick button click, handle if detected
       SystemTime = 0;
-      if (!inMenu) { // If at the thumb joystick menu top
-        if (useScreenSaver) { // Screensaver logic, if enabled
-          SScount++;
-          if (SScount > SSdelay) {
-            if (!SSactive) {
-              SSactive = 1;
-              LCD_clear();
-            }
-          }
-        }
-      }
    } else {
   //     if (StimulatingState == 2) {
   //        // Place to include custom code that executes on the first cycle of a pulse train
@@ -800,7 +784,7 @@ void handler(void) {
       }
     }
     LastStimulatingState = StimulatingState;
-      
+
     // Read values of trigger pins
     LineTriggerEvent[0] = 0; LineTriggerEvent[1] = 0;
     for (int x = 0; x < 2; x++) {
@@ -859,6 +843,7 @@ void handler(void) {
     if (StimulatingState != 2) {
      StimulatingState = 0; // null condition, will be overridden in loop if any channels are still stimulating.
     }
+    
     // Check clock and adjust line levels for new time as per programming
     for (int x = 0; x < 4; x++) {
       byte thisTrainID = CustomTrainID[x];
@@ -1359,7 +1344,7 @@ void UpdateSettingsMenu() {
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
                 dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
                   }
                  LastLoopTime = MicrosTime;
@@ -1375,7 +1360,7 @@ void UpdateSettingsMenu() {
                 MicrosTime = micros(); LastLoopTime = MicrosTime;
                 dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
                   }
                  LastLoopTime = MicrosTime;
@@ -1387,7 +1372,7 @@ void UpdateSettingsMenu() {
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
                 dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
                   }
                  LastLoopTime = MicrosTime;
@@ -1399,7 +1384,7 @@ void UpdateSettingsMenu() {
                 NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
                 dacWrite();
                 while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < CycleDuration) {  // Make sure loop runs once every 100us 
+                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
                     MicrosTime = micros();
                   }
                  LastLoopTime = MicrosTime;

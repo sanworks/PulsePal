@@ -21,6 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 classdef PulsePalDevice < handle
     properties
         Port % Serial port
+        info % Information about the connected device
         autoSync = 'on'; % If 'on', changing parameter fields automatically updates PulsePal device. Otherwise, use 'sync' method.
         isBiphasic % See parameter descriptions at: https://sites.google.com/site/pulsepalwiki/parameter-guide
         phase1Voltage
@@ -48,7 +49,8 @@ classdef PulsePalDevice < handle
         opMenuByte = 213; % Byte code to access op menu
         firmwareVersion % Actual firmware version of connected device
         hardwareVersion % With newer firmware, a hardware version is explicitly returned
-        cycleFrequency = 20000; % Update rate of Pulse Pal hardware timer
+        cyclePeriod  % Update period of Pulse Pal hardware timer. Units = us
+        cycleFrequency  % Update frequency of Pulse Pal hardware timer. Units = Hz
         autoSyncOn = true; % logical version of public property autoSync, to avoid strcmp
         maxCustomPulses % Maximum number of custom pulses supported
         rootPath = fileparts(which('PulsePalObject'));
@@ -100,9 +102,16 @@ classdef PulsePalDevice < handle
                         error(['Error: Pulse Pal with future firmware detected. Please update your MATLAB software or downgrade the firmware to v' num2str(obj.currentFirmwareVersion) '.']);
                     end
                 end
-                obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info
+                obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info 
                 obj.hardwareVersion = obj.Port.read(1, 'uint8');
+                obj.cyclePeriod = obj.Port.read(1, 'uint32');
+                obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
                 obj.maxCustomPulses = obj.Port.read(1, 'uint32');
+                obj.info = struct;
+                obj.info.hardwareVersion = obj.hardwareVersion;
+                obj.info.firmwareVersion = obj.firmwareVersion;
+                obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
+                obj.info.maxCustomPulses = obj.maxCustomPulses;
             else
                 disp('Error: Pulse Pal returned an unexpected handshake signature.')
             end
@@ -151,8 +160,8 @@ classdef PulsePalDevice < handle
         function sendCustomWaveform(obj, trainID, samplingPeriod, voltages)
             % Sends a custom waveform to the device. trainId = 1 or 2. samplingPeriod = sec. voltages = volts.
             nVoltages = length(voltages);
-            if rem(round(samplingPeriod*1000000), 100) > 0
-                error('Error: sampling period must be a multiple of 100 microseconds.');
+            if rem(round(samplingPeriod*1000000), obj.cyclePeriod*2) > 0
+                error(['Error: sampling period must be a multiple of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
             pulseTimes = 0:samplingPeriod:((nVoltages*samplingPeriod)-(1*samplingPeriod));
             sendCustomTrain(obj, trainID, pulseTimes, voltages);
@@ -571,8 +580,8 @@ classdef PulsePalDevice < handle
             if nPulses > obj.maxCustomPulses
                 error(['Error: Pulse Pal can only store ' num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
-            if sum(sum(rem(round(pulseTimes*1000000), 100))) > 0
-                error('Non-zero time values for Pulse Pal must be multiples of 100 microseconds.');
+            if sum(sum(rem(round(pulseTimes*1000000), obj.cyclePeriod*2))) > 0
+                error(['Non-zero time values for Pulse Pal must be multiples of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
             CandidateTimes = uint32(pulseTimes*obj.cycleFrequency);
             CandidateVoltages = voltages;
