@@ -1298,7 +1298,7 @@ void UpdateSettingsMenu() {
                       byte Ch = SelectedChannel-1;
                       TriggerAddress[1][Ch] = Bit2Write;
                       } break; // Follow input 2 (on/off)
-            case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 0);} break; // stimulus train duration
+            case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, N_CUSTOM_PULSE_TRAINS, 1, 0);} break; // stimulus train duration
             case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
             case 17: {
                       RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
