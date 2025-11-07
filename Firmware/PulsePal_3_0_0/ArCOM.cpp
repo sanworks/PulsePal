@@ -37,15 +37,13 @@ void ArCOM::writeChar(char char2Write) {
   ArCOMstream->write(char2Write);
 }
 void ArCOM::writeUint16(unsigned short int2Write) {
-   ArCOMstream->write((byte)int2Write);
-   ArCOMstream->write((byte)(int2Write >> 8));
+   typeBuffer.uint16 = int2Write;
+    ArCOMstream->write(typeBuffer.byteArray, 2);
 }
 
 void ArCOM::writeUint32(unsigned long int2Write) {
-    ArCOMstream->write((byte)int2Write);
-    ArCOMstream->write((byte)(int2Write >> 8));
-    ArCOMstream->write((byte)(int2Write >> 16));
-    ArCOMstream->write((byte)(int2Write >> 24));
+    typeBuffer.uint32 = int2Write;
+    ArCOMstream->write(typeBuffer.byteArray, 4);
 }
 byte ArCOM::readByte(){
   while (ArCOMstream->available() == 0) {}
@@ -60,22 +58,12 @@ char ArCOM::readChar(){
   return ArCOMstream->read();
 }
 unsigned short ArCOM::readUint16() {
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[0] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[1] = ArCOMstream->read();
+  ArCOMstream->readBytes(typeBuffer.byteArray, 2);
   return typeBuffer.uint16;
 }
 
 unsigned long ArCOM::readUint32() {
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[0] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[1] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[2] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[3] = ArCOMstream->read();
+  ArCOMstream->readBytes(typeBuffer.byteArray, 4);
   return typeBuffer.uint32;
 }
 
@@ -86,16 +74,12 @@ void ArCOM::writeInt8(int8_t int2Write) {
 
 void ArCOM::writeInt16(int16_t int2Write) {
   typeBuffer.int16 = int2Write;
-  ArCOMstream->write(typeBuffer.byteArray[0]);
-  ArCOMstream->write(typeBuffer.byteArray[1]);
+  ArCOMstream->write(typeBuffer.byteArray, 4);
 }
 
 void ArCOM::writeInt32(int32_t int2Write) {
   typeBuffer.int32 = int2Write;
-  ArCOMstream->write(typeBuffer.byteArray[0]);
-  ArCOMstream->write(typeBuffer.byteArray[1]);
-  ArCOMstream->write(typeBuffer.byteArray[2]);
-  ArCOMstream->write(typeBuffer.byteArray[3]);
+  ArCOMstream->write(typeBuffer.byteArray, 4);
 }
 
 int8_t ArCOM::readInt8() {
@@ -104,21 +88,11 @@ int8_t ArCOM::readInt8() {
   return typeBuffer.int8;
 }
 int16_t ArCOM::readInt16() {
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[0] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[1] = ArCOMstream->read();
+  ArCOMstream->readBytes(typeBuffer.byteArray, 2);
   return typeBuffer.int16;
 }
 int32_t ArCOM::readInt32() {
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[0] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[1] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[2] = ArCOMstream->read();
-  while (ArCOMstream->available() == 0) {}
-  typeBuffer.byteArray[3] = ArCOMstream->read();
+  ArCOMstream->readBytes(typeBuffer.byteArray, 4);
   return typeBuffer.int32;
 }
 void ArCOM::writeByteArray(byte numArray[], unsigned int nValues) {

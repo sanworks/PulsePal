@@ -84,8 +84,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte TriggerLines[2] = {12,11}; // Trigger channels 1 and 2
   byte InputLEDLines[2] = {13, A0}; // LEDs above trigger channels 1-2. An = Arduino Analog Channel n.
   byte OutputLEDLines[4] = {A1,A7,A11,A10}; // LEDs above output channels 1-4
-  int ClickerXLine = A8; // Analog line that reports the thumb joystick x axis
-  int ClickerYLine = A9; // Analog line that reports the thumb joystick y axis
+  byte ClickerXLine = A8; // Analog line that reports the thumb joystick x axis
+  byte ClickerYLine = A9; // Analog line that reports the thumb joystick y axis
   byte ClickerButtonLine = 15; // Digital line that reports the thumb joystick click state
   byte SyncPin=44; // AD5724 Pin 7 (Sync)
   byte LDACPin=A2; // AD5724 Pin 10 (LDAC)
@@ -106,8 +106,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
   byte InputLEDLines[2] = {1, 4}; // LEDs above trigger channels 1-2.
   byte OutputLEDLines[4] = {24,28,29,30}; // LEDs above output channels 1-4
-  int ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
-  int ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
+  byte ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
+  byte ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
   byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
   byte SyncPin=14; // AD5724 Pin 7 (Sync)
   byte LDACPin=39; // AD5724 Pin 10 (LDAC)
@@ -281,6 +281,8 @@ void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 unsigned long callbackStartTime = 0;
+volatile byte usbLoadTarget = 0;
+volatile boolean usbLoadFlag = 0;
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
 union {
@@ -386,66 +388,7 @@ void setup() {
 }
 
 void loop() {
-  // Todo: T4 must read long serial messages here (e.g. custom pulse trains?)
-}
-
-void handler(void) {                   
-  if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
-    #if (HARDWARE_VERSION == 2)
-      Timer3.stop();
-    #else
-      hardwareTimer.end();
-    #endif
-    HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
-    SerialReadTimedout = 0;
-    #if (HARDWARE_VERSION == 2)
-      Timer3.start();
-    #else
-      hardwareTimer.begin(handler, TIMER_PERIOD);
-    #endif
-  }
-  if (StimulatingState == 0) {
-      if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
-        dacWrite(); // Update DAC to final voltages (should be resting voltage)
-        DACFlag = 0;
-      }
-      UpdateSettingsMenu(); // Check for joystick button click, handle if detected
-      SystemTime = 0;
-      if (!inMenu) { // If at the thumb joystick menu top
-        if (useScreenSaver) { // Screensaver logic, if enabled
-          SScount++;
-          if (SScount > SSdelay) {
-            if (!SSactive) {
-              SSactive = 1;
-              LCD_clear();
-            }
-          }
-        }
-      }
-   } else {
-  //     if (StimulatingState == 2) {
-  //                // Place to include code that executes on the first cycle of a pulse train
-  //     }
-       StimulatingState = 1;
-       if (DACFlag == 1) { // A DAC update was requested
-         dacWrite(); // Update DAC
-         DACFlag = 0;
-       }
-       SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
-       ClickerButtonState = digitalReadDirect(ClickerButtonLine); // Read the joystick button
-       if (ClickerButtonState == 0){ // A button click (pulls line to ground, = logic 0) and ends ongoing stimulation on all channels.
-         AbortAllPulseTrains();
-       }
-    }
-    for (int i = 0; i<4; i++) {
-      if(SoftTriggerScheduled[i]) { // Soft triggers are "scheduled" to be handled on the next cycle, since the serial read took too much time.
-        SoftTriggered[i] = 1;
-        SoftTriggerScheduled[i] = 0;
-      }
-    }
-    LastStimulatingState = StimulatingState;
-      
-  if (PPUSB.available()) { // If bytes are available in the serial port buffer
+    if (PPUSB.available()) { // If bytes are available in the serial port buffer and a custom pulse train transfer is not ongoing
     CommandByte = PPUSB.readByte(); // Read a byte
     if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
       CommandByte = PPUSB.readByte(); // Read the command byte (an op code for the operation to execute)
@@ -543,25 +486,13 @@ void handler(void) {
         } break;
   
         case 75: { // Program custom pulse train 1
-          CustomTrainNpulses[0] = PPUSB.readUint32();
-          for (int x = 0; x < CustomTrainNpulses[0]; x++) {
-            CustomPulseTimes[0][x] = PPUSB.readUint32();
-          }
-          for (int x = 0; x < CustomTrainNpulses[0]; x++) {
-            CustomVoltages[0][x] = PPUSB.readUint16();
-          }
-          PPUSB.writeByte(1); // Send confirm byte
+          usbLoadTarget = 0;
+          usbLoadFlag = true;
         } break;
         
         case 76: { // Program custom pulse train 2
-          CustomTrainNpulses[1] = PPUSB.readUint32();
-          for (int x = 0; x < CustomTrainNpulses[1]; x++) {
-            CustomPulseTimes[1][x] = PPUSB.readUint32();
-          }
-          for (int x = 0; x < CustomTrainNpulses[1]; x++) {
-            CustomVoltages[1][x] = PPUSB.readUint16();
-          }
-          PPUSB.writeByte(1); // Send confirm byte
+          usbLoadTarget = 1;
+          usbLoadFlag = true;
         } break;      
         
         case 77: { // Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
@@ -808,7 +739,68 @@ void handler(void) {
      }
     }
   }
+  if (usbLoadFlag) {
+    loadCustomPulseTrain(usbLoadTarget);
+  }
+  usbLoadFlag = false;
+  if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
+    #if (HARDWARE_VERSION == 2)
+      Timer3.stop();
+    #else
+      hardwareTimer.end();
+    #endif
+    HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
+    SerialReadTimedout = 0;
+    #if (HARDWARE_VERSION == 2)
+      Timer3.start();
+    #else
+      hardwareTimer.begin(handler, TIMER_PERIOD);
+    #endif
+  }
+}
 
+void handler(void) {                   
+  if (StimulatingState == 0) {
+      if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
+        dacWrite(); // Update DAC to final voltages (should be resting voltage)
+        DACFlag = 0;
+      }
+      UpdateSettingsMenu(); // Check for joystick button click, handle if detected
+      SystemTime = 0;
+      if (!inMenu) { // If at the thumb joystick menu top
+        if (useScreenSaver) { // Screensaver logic, if enabled
+          SScount++;
+          if (SScount > SSdelay) {
+            if (!SSactive) {
+              SSactive = 1;
+              LCD_clear();
+            }
+          }
+        }
+      }
+   } else {
+  //     if (StimulatingState == 2) {
+  //        // Place to include custom code that executes on the first cycle of a pulse train
+  //     }
+       StimulatingState = 1;
+       if (DACFlag == 1) { // A DAC update was requested
+         dacWrite(); // Update DAC
+         DACFlag = 0;
+       }
+       SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
+       ClickerButtonState = digitalReadDirect(ClickerButtonLine); // Read the joystick button
+       if (ClickerButtonState == 0){ // A button click (pulls line to ground, = logic 0) and ends ongoing stimulation on all channels.
+         AbortAllPulseTrains();
+       }
+    }
+    for (int i = 0; i<4; i++) {
+      if(SoftTriggerScheduled[i]) { // Soft triggers are "scheduled" to be handled on the next cycle, since the serial read took too much time.
+        SoftTriggered[i] = 1;
+        SoftTriggerScheduled[i] = 0;
+      }
+    }
+    LastStimulatingState = StimulatingState;
+      
     // Read values of trigger pins
     LineTriggerEvent[0] = 0; LineTriggerEvent[1] = 0;
     for (int x = 0; x < 2; x++) {
@@ -2626,4 +2618,15 @@ void sendCurrentParams() {
        }
      }
      PPUSB.writeByteArray(TriggerMode, 2);
+}
+
+void loadCustomPulseTrain(byte trainID) {
+  CustomTrainNpulses[trainID] = PPUSB.readUint32();
+  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
+    CustomPulseTimes[trainID][x] = PPUSB.readUint32();
+  }
+  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
+    CustomVoltages[trainID][x] = PPUSB.readUint16();
+  }
+  PPUSB.writeByte(1); // Send confirm byte
 }
