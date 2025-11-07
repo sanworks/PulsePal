@@ -52,7 +52,8 @@ classdef PulsePalDevice < handle
         cyclePeriod  % Update period of Pulse Pal hardware timer. Units = us
         cycleFrequency  % Update frequency of Pulse Pal hardware timer. Units = Hz
         autoSyncOn = true; % logical version of public property autoSync, to avoid strcmp
-        maxCustomPulses % Maximum number of custom pulses supported
+        nCustomPulseTrains % Number of custom pulse trains supported
+        maxCustomPulses % Maximum number of custom pulses per pulse train supported
         rootPath = fileparts(which('PulsePalObject'));
         paramNames = {'isBiphasic' 'phase1Voltage' 'phase2Voltage' 'phase1Duration' 'interPhaseInterval' 'phase2Duration'...
             'interPulseInterval' 'burstDuration' 'interBurstInterval' 'pulseTrainDuration' 'pulseTrainDelay'...
@@ -106,12 +107,14 @@ classdef PulsePalDevice < handle
                 obj.hardwareVersion = obj.Port.read(1, 'uint8');
                 obj.cyclePeriod = obj.Port.read(1, 'uint32');
                 obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
+                obj.nCustomPulseTrains = obj.Port.read(1, 'uint8');
                 obj.maxCustomPulses = obj.Port.read(1, 'uint32');
                 obj.info = struct;
                 obj.info.hardwareVersion = obj.hardwareVersion;
                 obj.info.firmwareVersion = obj.firmwareVersion;
                 obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
-                obj.info.maxCustomPulses = obj.maxCustomPulses;
+                obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
+                obj.info.maxPulsesPerCustomTrain = obj.maxCustomPulses;
             else
                 disp('Error: Pulse Pal returned an unexpected handshake signature.')
             end
@@ -521,7 +524,7 @@ classdef PulsePalDevice < handle
                         case 13
                             range = [0 1];
                         case 14
-                            range = [0 2];
+                            range = [0 obj.nCustomPulseTrains];
                         case 15
                             range = [0 1];
                         case 16
@@ -605,16 +608,11 @@ classdef PulsePalDevice < handle
             end
             TimeOutput = CandidateTimes;
             VoltageOutput = obj.volts2Bits(voltages);
-            if ~((trainID == 1) || (trainID == 2))
-                error('The first argument must be the stimulus train ID (1 or 2)')
+            if ~ismember(trainID, 1:obj.nCustomPulseTrains)
+                error(['The custom pulse train ID must be an integer in range 1:' num2str(obj.nCustomPulseTrains)])
             end
 
-            if trainID == 1
-                OpCode = 75;
-            else
-                OpCode = 76;
-            end
-            obj.Port.write([obj.opMenuByte OpCode typecast(uint32([nPulses TimeOutput]), 'uint8') ...
+            obj.Port.write([obj.opMenuByte 95 trainID-1 typecast(uint32([nPulses TimeOutput]), 'uint8') ...
                             typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end

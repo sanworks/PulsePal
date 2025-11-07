@@ -95,6 +95,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte LDACPin=A2; // AD5724 Pin 10 (LDAC)
   byte SDChipSelect=14; // microSD CS Pin 
   byte dacMap[4] = {0,1,2,3}; // Mapping of DAC output pins to output BNC connectors from left to right
+  #define N_CUSTOM_PULSE_TRAINS 2
   #define MAX_CUSTOM_PULSES 5000
 #else
   ArCOM PPUSB(Serial); // Initialize ArCOM USB serial wrapper
@@ -118,6 +119,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   // Note: SDChipSelect not required for Pulse Pal v3
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
+  #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
 #endif
 
@@ -154,7 +156,7 @@ uint8_t TriggerMode[2] = {0}; // if 0, "Normal mode", low to high transitions on
 
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
-unsigned long CustomTrainNpulses[2] = {0}; // Stores the total number of pulses in the custom pulse train
+unsigned long CustomTrainNpulses[N_CUSTOM_PULSE_TRAINS] = {0}; // Stores the total number of pulses in the custom pulse train
 boolean SerialReadTimedout = 0; // Goes to 1 if a serial read timed out, causing all subsequent serial reads to skip until next main loop iteration.
 int SerialCurrentTime = 0; // Current time (millis) for serial read timeout
 int SerialReadStartTime = 0; // Time the serial read was started
@@ -173,11 +175,11 @@ unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pul
 unsigned long NextBurstTransitionTime[4] = {0}; // Stores next burst-on or burst-off timestamp for each channel
 unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is supposed to end
 #if (HARDWARE_VERSION == 2)
-  uint32_t CustomPulseTimes[2][MAX_CUSTOM_PULSES+1] = {0};
-  uint16_t CustomVoltages[2][MAX_CUSTOM_PULSES+1] = {0};
+  uint32_t CustomPulseTimes[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
+  uint16_t CustomVoltages[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
 #else
-  uint32_t CustomPulseTimes[2][MAX_CUSTOM_PULSES+1] = {0};
-  uint16_t CustomVoltages[2][MAX_CUSTOM_PULSES+1] = {0};
+  DMAMEM uint32_t CustomPulseTimes[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
+  DMAMEM uint16_t CustomVoltages[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
 #endif
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
 unsigned long LastLoopTime = 0;
@@ -479,12 +481,12 @@ void loop() {
           PPUSB.writeByte(1); // Send confirm byte
         } break;
   
-        case 75: { // Program custom pulse train 1
+        case 75: { // Legacy op to program custom pulse train 1. Current MATLAB and Python interfaces use op 95
           usbLoadTarget = 0;
           usbLoadFlag = true;
         } break;
         
-        case 76: { // Program custom pulse train 2
+        case 76: { // Legacy op to program custom pulse train 2 Current MATLAB and Python interfaces use op 95
           usbLoadTarget = 1;
           usbLoadFlag = true;
         } break;      
@@ -729,7 +731,12 @@ void loop() {
         case 94: { // Send hardware info
           PPUSB.writeByte(HARDWARE_VERSION);
           PPUSB.writeUint32(TIMER_PERIOD);
+          PPUSB.writeByte(N_CUSTOM_PULSE_TRAINS);
           PPUSB.writeUint32(MAX_CUSTOM_PULSES);
+        } break;
+        case 95: { // Load custom pulse train - Current method used by MATLAB and Python classes. See legacy methods 75 and 76 above.
+          usbLoadTarget = PPUSB.readByte();
+          usbLoadFlag = true;
         } break;
      }
     }
@@ -1174,12 +1181,6 @@ void UpdateSettingsMenu() {
     ClickerY = analogRead(ClickerYLine);
     ClickerButtonState = ReadDebouncedButton();
     if (ClickerButtonState == 1 && LastClickerButtonState == 0) {
-      if (SSactive) {
-        SSactive = 0;
-        SScount = 0;
-        write2Screen(CommanderString," Click for menu");
-        delayMicroseconds(100000);
-       } else {
         LastClickerButtonState = 1;
         switch(inMenu) {
           case 0: { // Menu top
@@ -1621,7 +1622,6 @@ void UpdateSettingsMenu() {
             NeedUpdate = 1;
           }
         } break;
-      }
      }
     }
     if (ClickerButtonState == 0 && LastClickerButtonState == 1) {
