@@ -91,24 +91,32 @@ classdef PulsePalDevice < handle
             if HandShakeOkByte == 75
                 obj.firmwareVersion = obj.Port.read(1, 'uint32');
                 if obj.firmwareVersion < 20
-                    obj.Port.close();
-                    error('Error: Pulse Pal 1 detected. You must use the legacy API. Add /PulsePal/MATLAB to the MATLAB path, and at the command prompt, type PulsePal(''Port'') where ''Port'' is your serial port string.');
+                    obj.Port = [];
+                    error('Error: Pulse Pal 1 detected. You must use the legacy interface. Add /PulsePal/MATLAB to the MATLAB path, and at the command prompt, type PulsePal(''Port'') where ''Port'' is your serial port string.');
                 else
-                    if obj.firmwareVersion < obj.currentFirmwareVersion
-                        obj.Port.close();
+                    if obj.firmwareVersion < 21
+                        obj.Port = [];
                         error('Error: Pulse Pal with old firmware detected. Please update your firmware. Update instructions are online at: https://sites.google.com/site/pulsepalwiki/updating-firmware');
                     end
                     if obj.firmwareVersion > obj.currentFirmwareVersion
-                        obj.Port.close();
+                        obj.Port = [];
                         error(['Error: Pulse Pal with future firmware detected. Please update your MATLAB software or downgrade the firmware to v' num2str(obj.currentFirmwareVersion) '.']);
                     end
                 end
-                obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info 
-                obj.hardwareVersion = obj.Port.read(1, 'uint8');
-                obj.cyclePeriod = obj.Port.read(1, 'uint32');
-                obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
-                obj.nCustomPulseTrains = obj.Port.read(1, 'uint8');
-                obj.maxCustomPulses = obj.Port.read(1, 'uint32');
+                if obj.firmwareVersion > 21
+                    obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info 
+                    obj.hardwareVersion = obj.Port.read(1, 'uint8');
+                    obj.cyclePeriod = obj.Port.read(1, 'uint32');
+                    obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
+                    obj.nCustomPulseTrains = obj.Port.read(1, 'uint8');
+                    obj.maxCustomPulses = obj.Port.read(1, 'uint32');
+                else
+                    obj.hardwareVersion = 2;
+                    obj.cyclePeriod = 50;
+                    obj.cycleFrequency = 20000;
+                    obj.nCustomPulseTrains = 2;
+                    obj.maxCustomPulses = 5000;
+                end
                 obj.info = struct;
                 obj.info.hardwareVersion = obj.hardwareVersion;
                 obj.info.firmwareVersion = obj.firmwareVersion;
@@ -141,6 +149,9 @@ classdef PulsePalDevice < handle
         end
 
         function syncToDevice(obj) % If autoSync is off, this will sync all parameters at once.
+            if obj.autoSyncOn
+                error('autoSync is set to ''on''. syncToDevice() may be used when autoSync is off.')
+            end
             obj.syncAllParams;
         end
 
@@ -538,12 +549,34 @@ classdef PulsePalDevice < handle
                     value2send = val;
             end
             if obj.autoSyncOn
+                Msg = [];
                 if sum(paramCode == [2 3 17]) > 0
-                    obj.Port.write([obj.opMenuByte 91 paramCode typecast(uint16(value2send), 'uint8')], 'uint8');
+                    if obj.firmwareVersion > 21
+                        obj.Port.write([obj.opMenuByte 91 paramCode typecast(uint16(value2send), 'uint8')], 'uint8');
+                    else
+                        for i = 1:4
+                            Msg = [Msg obj.opMenuByte 74 paramCode i typecast(uint16(value2send(i)), 'uint8')];
+                        end
+                        obj.Port.write(Msg, 'uint8');
+                    end
                 elseif sum(paramCode == [4 5 6 7 8 9 10 11]) > 0
-                    obj.Port.write([obj.opMenuByte 91 paramCode typecast(uint32(value2send), 'uint8')], 'uint8');
+                    if obj.firmwareVersion > 21
+                        obj.Port.write([obj.opMenuByte 91 paramCode typecast(uint32(value2send), 'uint8')], 'uint8');
+                    else
+                        for i = 1:4
+                            Msg = [Msg obj.opMenuByte 74 paramCode i typecast(uint32(value2send(i)), 'uint8')];
+                        end
+                        obj.Port.write(Msg, 'uint8');
+                    end
                 else
-                    obj.Port.write([obj.opMenuByte 91 paramCode value2send], 'uint8');
+                    if obj.firmwareVersion > 21
+                        obj.Port.write([obj.opMenuByte 91 paramCode value2send], 'uint8');
+                    else
+                        for i = 1:4
+                            Msg = [Msg obj.opMenuByte 74 paramCode i value2send(i)];
+                        end
+                        obj.Port.write(Msg, 'uint8');
+                    end
                 end
                 obj.confirmWrite;
             end
@@ -568,9 +601,16 @@ classdef PulsePalDevice < handle
             VoltageData = [obj.volts2Bits(obj.phase1Voltage); obj.volts2Bits(obj.phase2Voltage); obj.volts2Bits(obj.restingVoltage)];
             VoltageData = VoltageData';
             SingleByteOutputParams = [obj.isBiphasic; obj.customTrainID; obj.customTrainTarget; obj.customTrainLoop];
-            SingleByteOutputParams = SingleByteOutputParams';
+            opCode = 92;
+            if obj.firmwareVersion < 22 % Use op 73 for firmware v21
+                opCode = 73;
+                TimeData = TimeData';
+                VoltageData = VoltageData';
+            else
+                SingleByteOutputParams = SingleByteOutputParams';
+            end
             SingleByteParams = [SingleByteOutputParams(1:end) obj.linkTriggerChannel1 obj.linkTriggerChannel2 obj.triggerMode];
-            obj.Port.write([obj.opMenuByte 92 typecast(uint32(TimeData(1:end)), 'uint8') ...
+            obj.Port.write([obj.opMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
                             typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
             obj.confirmWrite;
         end
@@ -611,12 +651,24 @@ classdef PulsePalDevice < handle
             if ~ismember(trainID, 1:obj.nCustomPulseTrains)
                 error(['The custom pulse train ID must be an integer in range 1:' num2str(obj.nCustomPulseTrains)])
             end
-
-            obj.Port.write([obj.opMenuByte 95 trainID-1 typecast(uint32([nPulses TimeOutput]), 'uint8') ...
+            opCode = 95;
+            trainCode = trainID-1;
+            if obj.firmwareVersion < 22
+                if trainID == 1
+                    opCode = 75;
+                else
+                    opCode = 76;
+                end
+                trainCode = [];
+            end
+            obj.Port.write([obj.opMenuByte opCode trainCode typecast(uint32([nPulses TimeOutput]), 'uint8') ...
                             typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
         function importCurrentParamsFromPulsePal(obj)
+            if obj.firmwareVersion < 22
+                error(['importCurrentParamsFromPulsePal() requires firmware v22 or newer. Detected firmware is v' num2str(obj.firmwareVersion)])
+            end
             obj.Port.write([obj.opMenuByte 93], 'uint8');
             Msg = obj.Port.read(178, 'uint8');
             autoSyncState = obj.autoSync;

@@ -43,7 +43,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 
 // Validate setup macros
 #if (HARDWARE_VERSION < 2) || (HARDWARE_VERSION > 3)
@@ -2556,32 +2556,34 @@ void rewindDirectory() {
 }
 
 void runSplashScreen() {
-  // SplashScreen
-    u8g2.clearBuffer();
-    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
-    u8g2.sendBuffer();
-    // Twinkling stars
-    uint8_t StarPixelX[25] = {10, 3,  40, 22, 49, 17, 33, 9,  53, 25, 26,  40, 79, 108, 125, 98, 84, 120, 90, 103, 115, 128, 125, 95, 108};
-    uint8_t StarPixelY[25] = {3,  30, 9,  14, 1,  26, 22, 17, 11, 5,  19,  27, 7,  25,  16,  29, 12, 23,  3,  8,   4,   0,   32, 20, 16};
-
-    for (int i = 0; i < 300; i++) {
-      for (int j = 0; j < 25; j++) {
-        if (random(100) < 5) {
-          u8g2.setDrawColor(0);
-        } else {
-          u8g2.setDrawColor(1);
-        }
-        u8g2.drawPixel(StarPixelX[j], StarPixelY[j]);
-      }
+  #if (HARDWARE_VERSION == 3)
+    // SplashScreen
+      u8g2.clearBuffer();
+      u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
       u8g2.sendBuffer();
-      delay(5);
-    }
-    u8g2.setDrawColor(1);
+      // Twinkling stars
+      uint8_t StarPixelX[25] = {10, 3,  40, 22, 49, 17, 33, 9,  53, 25, 26,  40, 79, 108, 125, 98, 84, 120, 90, 103, 115, 128, 125, 95, 108};
+      uint8_t StarPixelY[25] = {3,  30, 9,  14, 1,  26, 22, 17, 11, 5,  19,  27, 7,  25,  16,  29, 12, 23,  3,  8,   4,   0,   32, 20, 16};
 
-    u8g2.clearBuffer();
-    u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
-    u8g2.sendBuffer();
-    delay(2000);
+      for (int i = 0; i < 300; i++) {
+        for (int j = 0; j < 25; j++) {
+          if (random(100) < 5) {
+            u8g2.setDrawColor(0);
+          } else {
+            u8g2.setDrawColor(1);
+          }
+          u8g2.drawPixel(StarPixelX[j], StarPixelY[j]);
+        }
+        u8g2.sendBuffer();
+        delay(5);
+      }
+      u8g2.setDrawColor(1);
+
+      u8g2.clearBuffer();
+      u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
+      u8g2.sendBuffer();
+      delay(2000);
+    #endif
 }
 
 void sendCurrentParams() {
