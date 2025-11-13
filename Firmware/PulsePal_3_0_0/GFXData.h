@@ -1,4 +1,23 @@
+/*
+----------------------------------------------------------------------------
 
+This file is part of the Pulse Pal Project
+Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, Rochester, NY, USA
+
+----------------------------------------------------------------------------
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3.
+
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+*/
 uint8_t GFX_logo_width = 128;
 uint8_t GFX_logo_height = 64;
 static char GFX_PPlogo[] = { // To get this, use Photoshop to make a 128 x 64 .bmp in "bitmap" mode. Then use https://www.freefileconvert.com to convert to .xbm. Open the .xbm in Atom and copy code.

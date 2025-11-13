@@ -67,10 +67,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   #define SD_CONFIG SdioConfig(FIFO_SDIO)
 #endif
 
-// Define macros for compressing sequential bytes read from the serial port into long and short ints
-#define makeUnsignedLong(msb, byte2, byte3, lsb) ((msb << 24) | (byte2 << 16) | (byte3 << 8) | (lsb))
-#define makeUnsignedShort(msb, lsb) ((msb << 8) | (lsb))
-
 // Define other macros
 #define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = μs
                         // Limited by ~15μs analog read speed for joystick x/y and precision of the joystick UI (0.0000).
@@ -271,6 +267,14 @@ byte fileNameOffset = 0; // Offset of centered string (for display on 16-char sc
 char tempText[16] = {0}; // Temporary buffer for holding a file name or other text
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
 
+// DAC variables
+boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
+byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
+union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
+    byte byteArray[8];
+    uint16_t uint16[4];
+} dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
+
 // Other variables
 int ConnectedToApp = 0; // 0 if disconnected, 1 if connected
 unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_PERIOD
@@ -279,12 +283,11 @@ boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (fo
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 volatile byte usbLoadTarget = 0;
 volatile boolean usbLoadFlag = 0;
-boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
-byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
 union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
-    byte byteArray[8];
-    uint16_t uint16[4];
-} dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
+    byte byteArray[4];
+    uint16_t uint16;
+    uint16_t uint32;
+} typeCast; // Union allows faster type conversion than a bit-shift macro
 
 void setup() {
   pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
@@ -2377,17 +2380,17 @@ void writeShort2SD() {
   settingsFile.write(BrokenBytes[0]);
   settingsFile.write(BrokenBytes[1]);
 }
-unsigned long readLongFromSD() {
-  unsigned long myLongInt = 0;
-  settingsFile.read(buf4, sizeof(buf4));
-  myLongInt = makeUnsignedLong(buf4[3], buf4[2], buf4[1], buf4[0]);
-  return myLongInt;
+uint32_t readLongFromSD() {
+  uint32_t output = 0;
+  settingsFile.read(typeCast.byteArray, 4);
+  output = typeCast.uint32;
+  return output;
 }
-word readShortFromSD() {
-  word myWord = 0;
-  settingsFile.read(buf2, sizeof(buf2));
-  myWord = makeUnsignedShort(buf2[1], buf2[0]);
-  return myWord;
+uint16_t readShortFromSD() {
+  uint16_t output = 0;
+  settingsFile.read(typeCast.byteArray, 2);
+  output = typeCast.uint16;
+  return output;
 }
 byte readByteFromSD() {
   byte myByte = 0;

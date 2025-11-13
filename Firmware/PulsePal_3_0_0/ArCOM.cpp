@@ -1,8 +1,8 @@
 /*
 ----------------------------------------------------------------------------
 
-This file is part of the Sanworks ArCOM repository
-Copyright (C) 2016 Sanworks LLC, Sound Beach, New York, USA
+This file is part of the Pulse Pal Project
+Copyright (C) 2025 Sanworks LLC, Rochester, New York, USA
 
 ----------------------------------------------------------------------------
 
