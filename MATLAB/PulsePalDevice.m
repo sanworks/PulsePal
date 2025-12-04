@@ -295,6 +295,10 @@ classdef PulsePalDevice < handle
             obj.autoSync = Parameters.autoSync;
         end
 
+        function gui(obj)
+            
+        end
+
         function set.phase1Voltage(obj, val)
             units = 'Volts'; paramCode = 2;
             obj.setOutputParam(paramCode, val, units);

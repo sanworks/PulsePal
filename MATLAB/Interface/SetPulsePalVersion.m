@@ -5,6 +5,7 @@ pause(.1);
 HandShakeOkByte = PulsePalSerialInterface('read', 1, 'uint8');
 if HandShakeOkByte == 75
     PulsePalSystem.FirmwareVersion = PulsePalSerialInterface('read', 1, 'uint32'); % Get firmware version
+    PulsePalSystem.HardwareVersion = 2;
     switch PulsePalSystem.FirmwareVersion
         case 2
             PulsePalSystem.CycleFrequency = round(20000); % Loops x 20k/sec
@@ -45,6 +46,15 @@ if HandShakeOkByte == 75
             PulsePalSystem.RegisterBits = 16;
     end
     PulsePalSystem.VoltageStep = 20/(2^PulsePalSystem.Bits);
+    if PulsePalSystem.FirmwareVersion > 21
+        PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 94], 'uint8'); % Request hardware info 
+        PulsePalSystem.HardwareVersion = PulsePalSerialInterface('read', 1, 'uint8');
+        cyclePeriod = PulsePalSerialInterface('read', 1, 'uint32');
+        PulsePalSystem.CycleFrequency = 1/(cyclePeriod/1000000);
+        PulsePalSystem.MinPulseDuration = ((1/PulsePalSystem.CycleFrequency)*1000000)*2;
+        nCustomPulseTrains = PulsePalSerialInterface('read', 1, 'uint8');
+        maxCustomPulses = PulsePalSerialInterface('read', 1, 'uint32');
+    end
 else
     disp('Error: Pulse Pal returned an incorrect handshake signature.')
 end

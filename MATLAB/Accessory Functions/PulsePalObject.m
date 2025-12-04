@@ -23,6 +23,7 @@ classdef PulsePalObject < handle
     properties
         GUIHandles
         Graphics
+        HardwareVersion
         FirmwareVersion
         OS
         MinPulseDuration

@@ -10,8 +10,8 @@ This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, version 3.
 
-This program is distributed  WITHOUT ANY WARRANTY and without even the 
-implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
@@ -20,14 +20,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 global PulsePalSystem;
 if PulsePalSystem.UsingOctave
-  PulsePalDisplay('   OCTAVE Link', '   Terminated.')
+    if PulsePalSystem.HardwareVersion == 2
+        PulsePalDisplay('   OCTAVE Link', '   Terminated.')
+    elseif PulsePalSystem.HardwareVersion == 3
+        PulsePalDisplay('OCTAVE Link', 'Terminated.')
+    end
 else
-  PulsePalDisplay('   MATLAB Link', '   Terminated.')
-  pause(1);
-  nBytesAvailable = PulsePalSerialInterface('bytesAvailable');
-  if nBytesAvailable > 0
-      PulsePalSerialInterface('read', nBytesAvailable, 'uint8');
-  end
+    if PulsePalSystem.HardwareVersion == 2
+        PulsePalDisplay('   MATLAB Link', '   Terminated.')
+    elseif PulsePalSystem.HardwareVersion == 3
+        PulsePalDisplay('MATLAB Link', 'Terminated.')
+    end
+    pause(1);
+    nBytesAvailable = PulsePalSerialInterface('bytesAvailable');
+    if nBytesAvailable > 0
+        PulsePalSerialInterface('read', nBytesAvailable, 'uint8');
+    end
 end
 PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 81], 'uint8');
 PulsePalSerialInterface('end');

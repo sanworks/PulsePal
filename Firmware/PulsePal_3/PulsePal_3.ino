@@ -43,7 +43,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 
 // Validate setup macros
 #if (HARDWARE_VERSION < 2) || (HARDWARE_VERSION > 3)
@@ -504,20 +504,23 @@ void loop() {
         } break;
         case 78: { // Display a custom message on the oLED screen
           LCD_clear();
-           LCD_home(); 
-           byte ByteCount = 0;
+          LCD_home(); 
+          byte ByteCount = 0;
           // read all the available characters
           inByte2 = SerialReadByte(); // Total length of message to follow (including newline)
           while (ByteCount < inByte2) {
               // display each character to the LCD
               inByte = SerialReadByte();
               if (inByte != 254) {
-                LCD_write(inByte);
+                lcd.write(inByte);
               } else {
                 LCD_setCursor(0, 1);
               }
               ByteCount++;
           }
+          #if (HARDWARE_VERSION == 3)
+            lcd.render();
+          #endif
         } break;
         case 79: { // Write specific voltage to an output channel (not a pulse train) 
           byte myChannel = SerialReadByte();
@@ -2517,15 +2520,6 @@ void LCD_noCursor() {
     lcd.render();
   #else
     lcd.noCursor();
-  #endif
-}
-
-void LCD_write(uint8_t byte) {
-  #if (HARDWARE_VERSION == 3)
-    LCD_print(byte);
-    lcd.render();
-  #else
-     lcd.write(byte);
   #endif
 }
 
