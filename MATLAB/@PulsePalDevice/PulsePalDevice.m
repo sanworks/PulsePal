@@ -55,6 +55,7 @@ classdef PulsePalDevice < handle
         nCustomPulseTrains % Number of custom pulse trains supported
         maxCustomPulses % Maximum number of custom pulses per pulse train supported
         rootPath = fileparts(which('PulsePalObject'));
+        ui % Struct to contain handles to UI elements
         paramNames = {'isBiphasic' 'phase1Voltage' 'phase2Voltage' 'phase1Duration' 'interPhaseInterval' 'phase2Duration'...
             'interPulseInterval' 'burstDuration' 'interBurstInterval' 'pulseTrainDuration' 'pulseTrainDelay'...
             'linkTriggerChannel1' 'linkTriggerChannel2' 'customTrainID' 'customTrainTarget' 'customTrainLoop' 'restingVoltage' 'playbackMode'};
@@ -295,10 +296,6 @@ classdef PulsePalDevice < handle
             obj.autoSync = Parameters.autoSync;
         end
 
-        function gui(obj)
-            
-        end
-
         function set.phase1Voltage(obj, val)
             units = 'Volts'; paramCode = 2;
             obj.setOutputParam(paramCode, val, units);
@@ -423,6 +420,16 @@ classdef PulsePalDevice < handle
             end
             obj.autoSync = val;
         end
+        
+        function delete(obj)
+            try
+                close(obj.ui.Figure)
+            catch
+                % Fail silently
+            end
+            obj.Port.write([obj.opMenuByte 81], 'uint8');
+            obj.Port = [];
+        end
     end
 
     methods (Access = private)
@@ -458,10 +465,6 @@ classdef PulsePalDevice < handle
                     end
                 end
             end
-        end
-
-        function delete(obj)
-            obj.Port.write([obj.opMenuByte 81], 'uint8');
         end
 
         function checkParamRange(obj, param, type, range, varargin)
