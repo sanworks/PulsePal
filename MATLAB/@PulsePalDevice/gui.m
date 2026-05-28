@@ -35,15 +35,16 @@ obj.ui.OutputChannelsPanel.Position = [13 251 700 164];
 
 % Create PulseTypeLabel
 obj.ui.PulseTypeLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.PulseTypeLabel.Position = [164 111 64 22];
+obj.ui.PulseTypeLabel.Position = [107 111 64 22];
 obj.ui.PulseTypeLabel.Text = 'Pulse Type';
 
 % Create DropDown_PulseType
 obj.ui.DropDown_PulseType = uidropdown(obj.ui.OutputChannelsPanel);
 obj.ui.DropDown_PulseType.Items = {'Monophasic', 'Biphasic'};
 obj.ui.DropDown_PulseType.Tooltip = {'Biphasic pulses add an interval at the resting voltage and then a second phase to each pulse'};
-obj.ui.DropDown_PulseType.Position = [145 84 102 22];
+obj.ui.DropDown_PulseType.Position = [87 84 100 22];
 obj.ui.DropDown_PulseType.Value = 'Monophasic';
+obj.ui.DropDown_PulseType.ValueChangedFcn = @(h,e)ui_SetPulseType(obj);
 
 % Create CustomTrainIDLabel_2
 obj.ui.CustomTrainIDLabel_2 = uilabel(obj.ui.OutputChannelsPanel);
@@ -53,12 +54,13 @@ obj.ui.CustomTrainIDLabel_2.Text = 'Custom Train ID';
 % Create DropDown_CustomTrainID
 obj.ui.DropDown_CustomTrainID = uidropdown(obj.ui.OutputChannelsPanel);
 obj.ui.DropDown_CustomTrainID.Items = {'0 (None)', '1', '2', '3', '4'};
-obj.ui.DropDown_CustomTrainID.Position = [461 84 82 22];
+obj.ui.DropDown_CustomTrainID.Position = [458 84 82 22];
 obj.ui.DropDown_CustomTrainID.Value = '0 (None)';
+obj.ui.DropDown_CustomTrainID.ValueChangedFcn = @(h,e)ui_SetCustomTrainID(obj);
 
 % Create CustomTrainofLabel
 obj.ui.CustomTrainofLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.CustomTrainofLabel.Position = [555 111 90 22];
+obj.ui.CustomTrainofLabel.Position = [558 111 90 22];
 obj.ui.CustomTrainofLabel.Text = 'Custom Train of';
 
 % Create DropDown_CustomTrainTarget
@@ -68,10 +70,11 @@ obj.ui.DropDown_CustomTrainTarget.Enable = 'off';
 obj.ui.DropDown_CustomTrainTarget.Tooltip = {'Custom train timestamps can indicate the onset of either each pulse, or each burst of pulses'};
 obj.ui.DropDown_CustomTrainTarget.Position = [560 84 82 22];
 obj.ui.DropDown_CustomTrainTarget.Value = 'Pulses';
+obj.ui.DropDown_CustomTrainTarget.ValueChangedFcn = @(h,e)ui_SetCustomTrainTarget(obj);
 
 % Create LoopLabel
 obj.ui.LoopLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.LoopLabel.Position = [657 111 32 22];
+obj.ui.LoopLabel.Position = [659 111 32 22];
 obj.ui.LoopLabel.Text = 'Loop';
 
 % Create CheckBox_CustomTrainLoop
@@ -80,29 +83,45 @@ obj.ui.CheckBox_CustomTrainLoop.Tooltip = {'If enabled, custom pulse train will 
 obj.ui.CheckBox_CustomTrainLoop.Enable = 'off';
 obj.ui.CheckBox_CustomTrainLoop.Text = '';
 obj.ui.CheckBox_CustomTrainLoop.Position = [665 84 17 22];
+obj.ui.CheckBox_CustomTrainLoop.ValueChangedFcn = @(h,e)ui_SetCustomTrainLoop(obj);
+
+% Create RestingVoltsLabel
+obj.ui.Phase1VoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
+obj.ui.Phase1VoltsLabel.Position = [207 111 83 22];
+obj.ui.Phase1VoltsLabel.Text = 'Resting (V)';
 
 % Create Phase1VoltsLabel
 obj.ui.Phase1VoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.Phase1VoltsLabel.Position = [262 111 83 22];
-obj.ui.Phase1VoltsLabel.Text = 'Phase1 (Volts)';
+obj.ui.Phase1VoltsLabel.Position = [290 111 83 22];
+obj.ui.Phase1VoltsLabel.Text = 'Phase1 (V)';
 
 % Create Phase2VoltsLabel
 obj.ui.Phase2VoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.Phase2VoltsLabel.Position = [362 111 83 22];
-obj.ui.Phase2VoltsLabel.Text = 'Phase2 (Volts)';
+obj.ui.Phase2VoltsLabel.Position = [373 111 83 22];
+obj.ui.Phase2VoltsLabel.Text = 'Phase2 (V)';
+
+% Create EditField_RestingVoltage
+obj.ui.EditField_RestingVoltage = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
+obj.ui.EditField_RestingVoltage.HorizontalAlignment = 'center';
+obj.ui.EditField_RestingVoltage.Enable = 'on';
+obj.ui.EditField_RestingVoltage.Tooltip = {'Voltage while not delivering a pulse (V)'};
+obj.ui.EditField_RestingVoltage.Position = [205 84 65 22];
+obj.ui.EditField_RestingVoltage.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'RestingVoltage');
 
 % Create EditField_Phase1Voltage
 obj.ui.EditField_Phase1Voltage = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_Phase1Voltage.HorizontalAlignment = 'center';
-obj.ui.EditField_Phase1Voltage.Tooltip = {'Voltage of the first phase of each pulse (s)'};
-obj.ui.EditField_Phase1Voltage.Position = [259 84 85 22];
+obj.ui.EditField_Phase1Voltage.Tooltip = {'Voltage of the first phase of each pulse (V)'};
+obj.ui.EditField_Phase1Voltage.Position = [288 84 65 22];
+obj.ui.EditField_Phase1Voltage.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'Phase1Voltage');
 
 % Create EditField_Phase2Voltage
 obj.ui.EditField_Phase2Voltage = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_Phase2Voltage.HorizontalAlignment = 'center';
 obj.ui.EditField_Phase2Voltage.Enable = 'off';
-obj.ui.EditField_Phase2Voltage.Tooltip = {'Voltage of the second phase of each pulse (s)'};
-obj.ui.EditField_Phase2Voltage.Position = [360 84 85 22];
+obj.ui.EditField_Phase2Voltage.Tooltip = {'Voltage of the second phase of each pulse (V)'};
+obj.ui.EditField_Phase2Voltage.Position = [371 84 65 22];
+obj.ui.EditField_Phase2Voltage.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'Phase2Voltage');
 
 % Create Phase1sLabel
 obj.ui.Phase1sLabel = uilabel(obj.ui.OutputChannelsPanel);
@@ -114,6 +133,7 @@ obj.ui.EditField_Phase1Duration = uieditfield(obj.ui.OutputChannelsPanel, 'numer
 obj.ui.EditField_Phase1Duration.HorizontalAlignment = 'center';
 obj.ui.EditField_Phase1Duration.Tooltip = {'Duration of the first phase of each pulse (s)'};
 obj.ui.EditField_Phase1Duration.Position = [14 20 72 22];
+obj.ui.EditField_Phase1Duration.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'Phase1Duration');
 
 % Create EditField_InterPhaseInterval
 obj.ui.EditField_InterPhaseInterval = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
@@ -121,6 +141,7 @@ obj.ui.EditField_InterPhaseInterval.HorizontalAlignment = 'center';
 obj.ui.EditField_InterPhaseInterval.Enable = 'off';
 obj.ui.EditField_InterPhaseInterval.Tooltip = {'Interval between pulse phases (s)'};
 obj.ui.EditField_InterPhaseInterval.Position = [101 20 72 22];
+obj.ui.EditField_InterPhaseInterval.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'InterPhaseInterval');
 
 % Create EditField_Phase2Duration
 obj.ui.EditField_Phase2Duration = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
@@ -128,64 +149,71 @@ obj.ui.EditField_Phase2Duration.HorizontalAlignment = 'center';
 obj.ui.EditField_Phase2Duration.Enable = 'off';
 obj.ui.EditField_Phase2Duration.Tooltip = {'Duration of the second phase of each pulse (s)'};
 obj.ui.EditField_Phase2Duration.Position = [188 20 72 22];
+obj.ui.EditField_Phase2Duration.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'Phase2Duration');
 
 % Create EditField_InterPulseInterval
 obj.ui.EditField_InterPulseInterval = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_InterPulseInterval.HorizontalAlignment = 'center';
 obj.ui.EditField_InterPulseInterval.Tooltip = {'Interval between pulse-end and the next pulse (s)'};
 obj.ui.EditField_InterPulseInterval.Position = [276 20 72 22];
+obj.ui.EditField_InterPulseInterval.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'InterPulseInterval');
 
 % Create EditField_BurstDuration
 obj.ui.EditField_BurstDuration = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_BurstDuration.HorizontalAlignment = 'center';
 obj.ui.EditField_BurstDuration.Tooltip = {'Duration of pulse bursts (0 = no bursts, units = seconds)'};
 obj.ui.EditField_BurstDuration.Position = [360 20 72 22];
+obj.ui.EditField_BurstDuration.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'BurstDuration');
 
 % Create EditField_InterBurstInterval
 obj.ui.EditField_InterBurstInterval = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_InterBurstInterval.HorizontalAlignment = 'center';
 obj.ui.EditField_InterBurstInterval.Tooltip = {'Interval betwen pulse bursts (s)'};
 obj.ui.EditField_InterBurstInterval.Position = [445 20 72 22];
+obj.ui.EditField_InterBurstInterval.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'InterBurstInterval');
 
 % Create EditField_PulseTrainDuration
 obj.ui.EditField_PulseTrainDuration = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_PulseTrainDuration.HorizontalAlignment = 'center';
 obj.ui.EditField_PulseTrainDuration.Tooltip = {'Duration of the pulse train (s)'};
 obj.ui.EditField_PulseTrainDuration.Position = [528 20 72 22];
+obj.ui.EditField_PulseTrainDuration.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'PulseTrainDuration');
 
 % Create EditField_PulseTrainDelay
 obj.ui.EditField_PulseTrainDelay = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_PulseTrainDelay.HorizontalAlignment = 'center';
 obj.ui.EditField_PulseTrainDelay.Tooltip = {'Delay from trigger to pulse train onset (s)'};
 obj.ui.EditField_PulseTrainDelay.Position = [613 20 72 22];
+obj.ui.EditField_PulseTrainDelay.ValueChangedFcn = @(h,e)ui_setNumericOutputParam(obj, 'PulseTrainDelay');
 
 % Create ChannelButtonGroup_OutputChan
 obj.ui.ChannelButtonGroup_OutputChan = uibuttongroup(obj.ui.OutputChannelsPanel);
 obj.ui.ChannelButtonGroup_OutputChan.Tooltip = {'Select an output channel to edit'};
 obj.ui.ChannelButtonGroup_OutputChan.BorderType = 'none';
 obj.ui.ChannelButtonGroup_OutputChan.Title = 'Channel';
-obj.ui.ChannelButtonGroup_OutputChan.Position = [12 83 123 48];
+obj.ui.ChannelButtonGroup_OutputChan.Position = [12 80 60 62];
+obj.ui.ChannelButtonGroup_OutputChan.SelectionChangedFcn = @(h,e)uiSelectOutputChannel(obj);
 
 % Create RadioButton_OutputCh1
 obj.ui.RadioButton_OutputCh1 = uiradiobutton(obj.ui.ChannelButtonGroup_OutputChan,'Interpreter','html');
 obj.ui.RadioButton_OutputCh1.Text = '1';
-obj.ui.RadioButton_OutputCh1.Position = [4 4 25 22];
+obj.ui.RadioButton_OutputCh1.Position = [4 20 25 22];
 obj.ui.RadioButton_OutputCh1.Value = true;
 
 % Create RadioButton_OutputCh2
 obj.ui.RadioButton_OutputCh2 = uiradiobutton(obj.ui.ChannelButtonGroup_OutputChan,'Interpreter','html');
 obj.ui.RadioButton_OutputCh2.Text = '2';
-obj.ui.RadioButton_OutputCh2.Position = [33 4 33 22];
+obj.ui.RadioButton_OutputCh2.Position = [33 20 33 22];
 
 % Create RadioButton_OutputCh3
 obj.ui.RadioButton_OutputCh3 = uiradiobutton(obj.ui.ChannelButtonGroup_OutputChan,'Interpreter','html');
 obj.ui.RadioButton_OutputCh3.Text = '3';
-obj.ui.RadioButton_OutputCh3.Position = [66 4 25 22];
+obj.ui.RadioButton_OutputCh3.Position = [4 0 25 22];
 
 % Create RadioButton_OutputCh4
 obj.ui.RadioButton_OutputCh4 = uiradiobutton(obj.ui.ChannelButtonGroup_OutputChan,'Interpreter','html');
 obj.ui.RadioButton_OutputCh4.Text = '4';
-obj.ui.RadioButton_OutputCh4.Position = [96 4 29 22];
+obj.ui.RadioButton_OutputCh4.Position = [33 0 29 22];
 
 % Create PhaseIntervalLabel
 obj.ui.PhaseIntervalLabel = uilabel(obj.ui.OutputChannelsPanel);
@@ -234,6 +262,7 @@ obj.ui.ChannelButtonGroup_TriggerChan.Tooltip = {'Select a trigger channel to ed
 obj.ui.ChannelButtonGroup_TriggerChan.BorderType = 'none';
 obj.ui.ChannelButtonGroup_TriggerChan.Title = 'Channel';
 obj.ui.ChannelButtonGroup_TriggerChan.Position = [10 5 60 48];
+obj.ui.ChannelButtonGroup_TriggerChan.SelectionChangedFcn = @(h,e)uiSelectTriggerChannel(obj);
 
 % Create RadioButton_TriggerCh1
 obj.ui.RadioButton_TriggerCh1 = uiradiobutton(obj.ui.ChannelButtonGroup_TriggerChan,'Interpreter','html');
@@ -262,30 +291,35 @@ obj.ui.DropDown_TriggerMode.Items = {'Normal', 'Toggle', 'Pulse Gated'};
 obj.ui.DropDown_TriggerMode.Tooltip = {'Normal: TTL during pulse train ignored. Toggle: TTL during pulse train stops train. Pulse Gated: Pulse train only runs while trigger is high'};
 obj.ui.DropDown_TriggerMode.Position = [96 8 100 22];
 obj.ui.DropDown_TriggerMode.Value = 'Normal';
+obj.ui.DropDown_TriggerMode.ValueChangedFcn = @(h,e)uiSelectTriggerMode(obj);
 
 % Create CheckBox_LinkToOutputCh1
 obj.ui.CheckBox_LinkToOutputCh1 = uicheckbox(obj.ui.TriggerChannelsPanel);
 obj.ui.CheckBox_LinkToOutputCh1.Tooltip = {'Link trigger channel to output channel 1'};
 obj.ui.CheckBox_LinkToOutputCh1.Text = 'Ch1';
 obj.ui.CheckBox_LinkToOutputCh1.Position = [223 9 44 22];
+obj.ui.CheckBox_LinkToOutputCh1.ValueChangedFcn = @(h,e)uiSetTriggerLink(obj, 1);
 
 % Create CheckBox_LinkToOutputCh2
 obj.ui.CheckBox_LinkToOutputCh2 = uicheckbox(obj.ui.TriggerChannelsPanel);
 obj.ui.CheckBox_LinkToOutputCh2.Tooltip = {'Link trigger channel to output channel 2'};
 obj.ui.CheckBox_LinkToOutputCh2.Text = 'Ch2';
 obj.ui.CheckBox_LinkToOutputCh2.Position = [283 9 44 22];
+obj.ui.CheckBox_LinkToOutputCh2.ValueChangedFcn = @(h,e)uiSetTriggerLink(obj, 2);
 
 % Create CheckBox_LinkToOutputCh3
 obj.ui.CheckBox_LinkToOutputCh3 = uicheckbox(obj.ui.TriggerChannelsPanel);
 obj.ui.CheckBox_LinkToOutputCh3.Tooltip = {'Link trigger channel to output channel 3'};
 obj.ui.CheckBox_LinkToOutputCh3.Text = 'Ch3';
 obj.ui.CheckBox_LinkToOutputCh3.Position = [340 9 44 22];
+obj.ui.CheckBox_LinkToOutputCh3.ValueChangedFcn = @(h,e)uiSetTriggerLink(obj, 3);
 
 % Create CheckBox_LinkToOutputCh4
 obj.ui.CheckBox_LinkToOutputCh4 = uicheckbox(obj.ui.TriggerChannelsPanel);
 obj.ui.CheckBox_LinkToOutputCh4.Tooltip = {'Link trigger channel to output channel 4'};
 obj.ui.CheckBox_LinkToOutputCh4.Text = 'Ch4';
 obj.ui.CheckBox_LinkToOutputCh4.Position = [397 9 44 22];
+obj.ui.CheckBox_LinkToOutputCh4.ValueChangedFcn = @(h,e)uiSetTriggerLink(obj, 4);
 
 % Create CustomPulseTrainsPanel
 obj.ui.CustomPulseTrainsPanel = uipanel(obj.ui.Figure);
@@ -293,7 +327,7 @@ obj.ui.CustomPulseTrainsPanel.Title = 'Custom Pulse Trains';
 obj.ui.CustomPulseTrainsPanel.FontWeight = 'bold';
 obj.ui.CustomPulseTrainsPanel.Position = [13 24 700 115];
 
-% Create ListBox_CustomTrainID
+% Create ListBox_CustomTrainID - Custom Train Editor
 obj.ui.ListBox_CustomTrainID = uilistbox(obj.ui.CustomPulseTrainsPanel);
 obj.ui.ListBox_CustomTrainID.Items = {'1', '2', '3', '4'};
 obj.ui.ListBox_CustomTrainID.Enable = 'off';
@@ -301,7 +335,7 @@ obj.ui.ListBox_CustomTrainID.Tooltip = {'Select the custom train to program'};
 obj.ui.ListBox_CustomTrainID.Position = [15 22 100 37];
 obj.ui.ListBox_CustomTrainID.Value = '1';
 
-% Create CustomTrainIDLabel
+% Create CustomTrainIDLabel - Custom Train Editor
 obj.ui.CustomTrainIDLabel = uilabel(obj.ui.CustomPulseTrainsPanel);
 obj.ui.CustomTrainIDLabel.Position = [15 64 92 22];
 obj.ui.CustomTrainIDLabel.Text = 'Custom Train ID';
@@ -332,7 +366,7 @@ obj.ui.VoltagesVLabel.Text = 'Voltages (V)';
 obj.ui.PulsePalProgramEditorLabel = uilabel(obj.ui.Figure);
 obj.ui.PulsePalProgramEditorLabel.FontSize = 24;
 obj.ui.PulsePalProgramEditorLabel.FontWeight = 'bold';
-obj.ui.PulsePalProgramEditorLabel.Position = [13 430 297 32];
+obj.ui.PulsePalProgramEditorLabel.Position = [13 432 297 32];
 obj.ui.PulsePalProgramEditorLabel.Text = 'Pulse Pal Program Editor';
 
 % Create FIREButton
@@ -340,6 +374,7 @@ obj.ui.FIREButton = uibutton(obj.ui.Figure, 'push');
 obj.ui.FIREButton.Tooltip = {'Trigger the selected output channels'};
 obj.ui.FIREButton.Position = [668 425 46 44];
 obj.ui.FIREButton.Text = 'FIRE';
+obj.ui.FIREButton.ButtonPushedFcn = @(h,e)uiTrigger(obj);
 
 % Create CheckBox_TriggerCh1
 obj.ui.CheckBox_TriggerCh1 = uicheckbox(obj.ui.Figure);
@@ -406,6 +441,166 @@ obj.ui.FirmwareLabel = uilabel(obj.ui.Figure);
 obj.ui.FirmwareLabel.Position = [133 2 78 22];
 obj.ui.FirmwareLabel.Text = ['Firmware: v' num2str(obj.info.firmwareVersion)];
 
+% Create local copy of gui parameters
+obj.ui.params = obj.defaultParams;
+
+% Push the local copy to the GUI
+setUIParams(obj);
+
 % Show the figure after all components are created
 obj.ui.Figure.Visible = 'on';
+end
+
+function setUIParams(obj)
+    params = obj.ui.params;
+    % Determine selected channels
+    outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    trigChanSelected = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+
+    % Set UI fields
+    obj.ui.DropDown_PulseType.ValueIndex = params.isBiphasic(outChanSelected)+1;
+    obj.ui.EditField_RestingVoltage.Value = params.restingVoltage(outChanSelected);
+    obj.ui.EditField_Phase1Voltage.Value = params.phase1Voltage(outChanSelected);
+    obj.ui.EditField_Phase2Voltage.Value = params.phase2Voltage(outChanSelected);
+    obj.ui.DropDown_CustomTrainID.ValueIndex = params.customTrainID(outChanSelected)+1;
+    obj.ui.DropDown_CustomTrainTarget.ValueIndex = params.customTrainTarget(outChanSelected)+1;
+    obj.ui.CheckBox_CustomTrainLoop.Value = params.customTrainLoop(outChanSelected);
+    obj.ui.EditField_Phase1Duration.Value = params.phase1Duration(outChanSelected);
+    obj.ui.EditField_InterPhaseInterval.Value = params.interPhaseInterval(outChanSelected);
+    obj.ui.EditField_Phase2Duration.Value = params.phase2Duration(outChanSelected);
+    obj.ui.EditField_InterPulseInterval.Value = params.interPulseInterval(outChanSelected);
+    obj.ui.EditField_BurstDuration.Value = params.burstDuration(outChanSelected);
+    obj.ui.EditField_InterBurstInterval.Value = params.interBurstInterval(outChanSelected);
+    obj.ui.EditField_PulseTrainDuration.Value = params.pulseTrainDuration(outChanSelected);
+    obj.ui.EditField_PulseTrainDelay.Value = params.pulseTrainDelay(outChanSelected);
+    obj.ui.DropDown_TriggerMode.ValueIndex = params.triggerMode(trigChanSelected)+1;
+    switch trigChanSelected
+        case 1
+            obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel1(1);
+            obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel1(2);
+            obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel1(3);
+            obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel1(4);
+        case 2
+            obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel2(1);
+            obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel2(2);
+            obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel2(3);
+            obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel2(4);
+    end
+    enableFields(obj);
+end
+
+function enableFields(obj)
+    params = obj.ui.params;
+    outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    obj.ui.EditField_Phase2Voltage.Enable = params.isBiphasic(outChanSelected);
+    obj.ui.EditField_InterPhaseInterval.Enable = params.isBiphasic(outChanSelected);
+    obj.ui.EditField_Phase2Duration.Enable = params.isBiphasic(outChanSelected);
+    usesCustomTrains = params.customTrainID(outChanSelected) > 0;
+    obj.ui.DropDown_CustomTrainTarget.Enable = usesCustomTrains;
+    obj.ui.CheckBox_CustomTrainLoop.Enable = usesCustomTrains;
+    obj.ui.ListBox_CustomTrainID.Enable = usesCustomTrains;
+    obj.ui.TextArea_CustomTrainTimestamps.Enable = usesCustomTrains;
+    obj.ui.TextArea_CustomTrainVoltages.Enable = usesCustomTrains;
+end
+
+function uiTrigger(obj)
+   triggerLogic = zeros(1,4);
+   triggerLogic(1) = obj.ui.CheckBox_TriggerCh1.Value;
+   triggerLogic(2) = obj.ui.CheckBox_TriggerCh2.Value;
+   triggerLogic(3) = obj.ui.CheckBox_TriggerCh3.Value;
+   triggerLogic(4) = obj.ui.CheckBox_TriggerCh4.Value;
+   chan2Trigger = find(triggerLogic);
+   if ~isempty(chan2Trigger)
+    obj.trigger(chan2Trigger);
+   end
+end
+
+function uiSelectOutputChannel(obj)
+    setUIParams(obj);
+end
+
+function uiSelectTriggerChannel(obj)
+    setUIParams(obj);
+end
+
+% ---- Parameter edit callback functions ----
+
+function ui_setNumericOutputParam(obj, ParamName)
+    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    switch ParamName
+        case 'RestingVoltage'
+            obj.ui.params.restingVoltage(chan) = obj.ui.EditField_RestingVoltage.Value;
+        case 'Phase1Voltage'
+            obj.ui.params.phase1Voltage(chan) = obj.ui.EditField_Phase1Voltage.Value;
+        case 'Phase2Voltage'
+            obj.ui.params.phase2Voltage(chan) = obj.ui.EditField_Phase2Voltage.Value;
+        case 'Phase1Duration'
+            obj.ui.params.phase1Duration(chan) = obj.ui.EditField_Phase1Duration.Value;
+        case 'InterPhaseInterval'
+            obj.ui.params.interPhaseInterval(chan) = obj.ui.EditField_InterPhaseInterval.Value;
+        case 'Phase2Duration'
+            obj.ui.params.phase2Duration(chan) = obj.ui.EditField_Phase2Duration.Value;
+        case 'InterPulseInterval'
+            obj.ui.params.interPulseInterval(chan) = obj.ui.EditField_InterPulseInterval.Value;
+        case 'BurstDuration'
+            obj.ui.params.burstDuration(chan) = obj.ui.EditField_BurstDuration.Value;
+        case 'InterBurstInterval'
+            obj.ui.params.interBurstInterval(chan) = obj.ui.EditField_InterBurstInterval.Value;
+        case 'PulseTrainDuration'
+            obj.ui.params.pulseTrainDuration(chan) = obj.ui.EditField_PulseTrainDuration.Value;
+        case 'PulseTrainDelay'
+            obj.ui.params.pulseTrainDelay(chan) = obj.ui.EditField_PulseTrainDelay.Value;
+    end
+end
+
+function ui_SetPulseType(obj)
+    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    newPulseType = obj.ui.DropDown_PulseType.ValueIndex;
+    obj.ui.params.isBiphasic(chan) = double(newPulseType == 2);
+    enableFields(obj);
+end
+
+function ui_SetCustomTrainID(obj)
+    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    newID = obj.ui.DropDown_CustomTrainID.ValueIndex;
+    obj.ui.params.customTrainID(chan) = newID-1;
+    enableFields(obj);
+end
+
+function ui_SetCustomTrainTarget(obj)
+    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    newTarget = obj.ui.DropDown_CustomTrainTarget.ValueIndex;
+    obj.ui.params.customTrainTarget(chan) = newTarget;
+end
+
+function ui_SetCustomTrainLoop(obj)
+    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+    loopEnabled = obj.ui.CheckBox_CustomTrainLoop.Value;
+    obj.ui.params.customTrainLoop(chan) = double(loopEnabled);
+end
+
+function uiSelectTriggerMode(obj)
+    chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+    newValue = obj.ui.DropDown_TriggerMode.ValueIndex;
+    obj.ui.params.triggerMode(chan) = newValue-1;
+end
+
+function uiSetTriggerLink(obj, index)
+    chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+    switch index
+        case 1
+            value = obj.ui.CheckBox_LinkToOutputCh1.Value;
+        case 2
+            value = obj.ui.CheckBox_LinkToOutputCh2.Value;
+        case 3
+            value = obj.ui.CheckBox_LinkToOutputCh3.Value;
+        case 4
+            value = obj.ui.CheckBox_LinkToOutputCh4.Value;
+    end
+    switch chan
+        case 1
+            obj.ui.params.linkTriggerChannel1(index) = value;
+        case 2
+            obj.ui.params.linkTriggerChannel2(index) = value;
+    end
 end

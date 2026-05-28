@@ -42,6 +42,7 @@ classdef PulsePalDevice < handle
         customTrainLoop
         playbackMode
         triggerMode
+        ui
     end
 
     properties (Access = private)
@@ -55,7 +56,7 @@ classdef PulsePalDevice < handle
         nCustomPulseTrains % Number of custom pulse trains supported
         maxCustomPulses % Maximum number of custom pulses per pulse train supported
         rootPath = fileparts(which('PulsePalObject'));
-        ui % Struct to contain handles to UI elements
+        %ui % Struct to contain handles to UI elements
         paramNames = {'isBiphasic' 'phase1Voltage' 'phase2Voltage' 'phase1Duration' 'interPhaseInterval' 'phase2Duration'...
             'interPulseInterval' 'burstDuration' 'interBurstInterval' 'pulseTrainDuration' 'pulseTrainDelay'...
             'linkTriggerChannel1' 'linkTriggerChannel2' 'customTrainID' 'customTrainTarget' 'customTrainLoop' 'restingVoltage' 'playbackMode'};
@@ -702,6 +703,30 @@ classdef PulsePalDevice < handle
             if autoSyncState
                 obj.autoSync = 'on';
             end
+        end
+    end
+    methods (Static, Access = private)
+        function params = defaultParams
+            params = struct;
+            params.isBiphasic = zeros(1,4);
+            params.restingVoltage = zeros(1,4);
+            params.phase1Voltage = ones(1,4)*5;
+            params.phase2Voltage = ones(1,4)*-5;
+            params.phase1Duration = ones(1,4)*0.001;
+            params.interPhaseInterval = ones(1,4)*0.001;
+            params.phase2Duration = ones(1,4)*0.001;
+            params.interPulseInterval = ones(1,4)*0.01;
+            params.burstDuration = zeros(1,4);
+            params.interBurstInterval = zeros(1,4);
+            params.pulseTrainDuration = ones(1,4);
+            params.pulseTrainDelay = zeros(1,4);
+            params.linkTriggerChannel1 = ones(1,4);
+            params.linkTriggerChannel2 = zeros(1,4);
+            params.customTrainID = uint8(zeros(1,4));
+            params.customTrainTarget = uint8(zeros(1,4));
+            params.customTrainLoop = zeros(1,4);
+            params.playbackMode = zeros(1,4);
+            params.triggerMode = uint8(zeros(1,2));
         end
     end
 end
