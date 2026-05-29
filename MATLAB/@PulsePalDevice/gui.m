@@ -11,6 +11,7 @@ obj.ui.Toolbar = uitoolbar(obj.ui.Figure);
 obj.ui.PushTool_RestoreParams = uipushtool(obj.ui.Toolbar);
 obj.ui.PushTool_RestoreParams.Tooltip = {'Restore Defaults'};
 obj.ui.PushTool_RestoreParams.Icon = fullfile(matlabroot,'toolbox','matlab','icons','file_new.png');
+obj.ui.PushTool_RestoreParams.ClickedCallback = @(h,e)restoreDefaults(obj);
 
 % Create PushTool_LoadProgram
 obj.ui.PushTool_LoadProgram = uipushtool(obj.ui.Toolbar);
@@ -647,4 +648,14 @@ function ui_SetCustomTrainView(obj)
     trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
     obj.ui.TextArea_CustomTrainTimestamps.Value = obj.ui.customTrain.timestamps{trainID};
     obj.ui.TextArea_CustomTrainVoltages.Value = obj.ui.customTrain.voltages{trainID};
+end
+
+function restoreDefaults(obj)
+    obj.ui.params = obj.defaultParams;
+    setUIParams(obj);
+    obj.ui.customTrain = struct;
+    obj.ui.customTrain.timestamps = repmat({''}, 1, 4);
+    obj.ui.customTrain.voltages = repmat({''}, 1, 4);
+    obj.ui.TextArea_CustomTrainTimestamps.Value = '';
+    obj.ui.TextArea_CustomTrainVoltages.Value = '';
 end
