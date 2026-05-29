@@ -334,6 +334,7 @@ obj.ui.ListBox_CustomTrainID.Enable = 'off';
 obj.ui.ListBox_CustomTrainID.Tooltip = {'Select the custom train to program'};
 obj.ui.ListBox_CustomTrainID.Position = [15 22 100 37];
 obj.ui.ListBox_CustomTrainID.Value = '1';
+obj.ui.ListBox_CustomTrainID.ValueChangedFcn = @(h,e)ui_SetCustomTrainView(obj);
 
 % Create CustomTrainIDLabel - Custom Train Editor
 obj.ui.CustomTrainIDLabel = uilabel(obj.ui.CustomPulseTrainsPanel);
@@ -343,8 +344,9 @@ obj.ui.CustomTrainIDLabel.Text = 'Custom Train ID';
 % Create TextArea_CustomTrainTimestamps
 obj.ui.TextArea_CustomTrainTimestamps = uitextarea(obj.ui.CustomPulseTrainsPanel);
 obj.ui.TextArea_CustomTrainTimestamps.Enable = 'off';
-obj.ui.TextArea_CustomTrainTimestamps.Tooltip = {'Enter the timestamp of each pulse in the custom pulse train (comma delimited, units = seconds)'};
+obj.ui.TextArea_CustomTrainTimestamps.Tooltip = {'Enter the onset time of each pulse in the custom pulse train (comma delimited, units = seconds)'};
 obj.ui.TextArea_CustomTrainTimestamps.Position = [133 13 271 47];
+obj.ui.TextArea_CustomTrainTimestamps.ValueChangedFcn = @(h,e)uiSetCustomTimestamps(obj);
 
 % Create TimestampssLabel
 obj.ui.TimestampssLabel = uilabel(obj.ui.CustomPulseTrainsPanel);
@@ -356,6 +358,7 @@ obj.ui.TextArea_CustomTrainVoltages = uitextarea(obj.ui.CustomPulseTrainsPanel);
 obj.ui.TextArea_CustomTrainVoltages.Enable = 'off';
 obj.ui.TextArea_CustomTrainVoltages.Tooltip = {'Enter the voltage of each pulse in the custom pulse train (comma delimited, units = volts)'};
 obj.ui.TextArea_CustomTrainVoltages.Position = [416 13 271 47];
+obj.ui.TextArea_CustomTrainVoltages.ValueChangedFcn = @(h,e)uiSetCustomVoltages(obj);
 
 % Create VoltagesVLabel
 obj.ui.VoltagesVLabel = uilabel(obj.ui.CustomPulseTrainsPanel);
@@ -443,6 +446,11 @@ obj.ui.FirmwareLabel.Text = ['Firmware: v' num2str(obj.info.firmwareVersion)];
 
 % Create local copy of gui parameters
 obj.ui.params = obj.defaultParams;
+
+% Initialize custom pulse trains
+obj.ui.customTrain = struct;
+obj.ui.customTrain.timestamps = repmat({''}, 1, 4);
+obj.ui.customTrain.voltages = repmat({''}, 1, 4);
 
 % Push the local copy to the GUI
 setUIParams(obj);
@@ -603,4 +611,40 @@ function uiSetTriggerLink(obj, index)
         case 2
             obj.ui.params.linkTriggerChannel2(index) = value;
     end
+end
+
+function uiSetCustomTimestamps(obj)
+    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+    timestamps = obj.ui.TextArea_CustomTrainTimestamps.Value;
+
+    % Validate format
+    timestampString = char(timestamps{1});
+    pattern = '^\s*(\d+(\.\d*)?|\.\d+)(\s*,\s*(\d+(\.\d*)?|\.\d+))*\s*$';
+    if isempty(regexp(timestampString, pattern, 'once'))
+        errordlg('Timestamps must be a comma-delimited list of pulse onset times, given in seconds.')
+    end
+
+    % Assign
+    obj.ui.customTrain.timestamps{trainID} = timestamps{1};
+end
+
+function uiSetCustomVoltages(obj)
+    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+    voltages = obj.ui.TextArea_CustomTrainVoltages.Value;
+
+    % Validate format
+    voltageString = char(voltages{1});
+    pattern = '^\s*[+-]?(\d+(\.\d*)?|\.\d+)(\s*,\s*[+-]?(\d+(\.\d*)?|\.\d+))*\s*$';
+    if isempty(regexp(voltageString, pattern, 'once'))
+        errordlg('Voltages must be a comma-delimited list of pulse voltages, given in volts.')
+    end
+
+    % Assign
+    obj.ui.customTrain.voltages{trainID} = voltages{1};
+end
+
+function ui_SetCustomTrainView(obj)
+    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+    obj.ui.TextArea_CustomTrainTimestamps.Value = obj.ui.customTrain.timestamps{trainID};
+    obj.ui.TextArea_CustomTrainVoltages.Value = obj.ui.customTrain.voltages{trainID};
 end
