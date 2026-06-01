@@ -26,7 +26,8 @@ obj.ui.PushTool_SaveProgram.Icon = fullfile(matlabroot,'toolbox','matlab','icons
 % Create PushTool_UploadProgram
 obj.ui.PushTool_UploadProgram = uipushtool(obj.ui.Toolbar);
 obj.ui.PushTool_UploadProgram.Tooltip = {'Load program to device'};
-obj.ui.PushTool_UploadProgram.Icon = fullfile(matlabroot,'toolbox','matlab','icons','linkproduct.png');
+obj.ui.PushTool_UploadProgram.Icon = fullfile(matlabroot,'toolbox','matlab','icons','boardicon.gif');
+obj.ui.PushTool_UploadProgram.ClickedCallback = @(h,e)uploadProgram(obj);
 
 % Create OutputChannelsPanel
 obj.ui.OutputChannelsPanel = uipanel(obj.ui.Figure);
@@ -658,4 +659,52 @@ function restoreDefaults(obj)
     obj.ui.customTrain.voltages = repmat({''}, 1, 4);
     obj.ui.TextArea_CustomTrainTimestamps.Value = '';
     obj.ui.TextArea_CustomTrainVoltages.Value = '';
+end
+
+function uploadProgram(obj)
+    % Sync paramaters from GUI to user fields
+    autoSyncState = obj.autoSync;
+    obj.autoSync = 'off';
+    obj.isBiphasic = obj.ui.params.isBiphasic;
+    obj.restingVoltage = obj.ui.params.restingVoltage;
+    obj.phase1Voltage = obj.ui.params.phase1Voltage;
+    obj.phase2Voltage = obj.ui.params.phase2Voltage;
+    obj.phase1Duration = obj.ui.params.phase1Duration;
+    obj.interPhaseInterval = obj.ui.params.interPhaseInterval;
+    obj.phase2Duration = obj.ui.params.phase2Duration;
+    obj.interPulseInterval = obj.ui.params.interPulseInterval;
+    obj.burstDuration = obj.ui.params.burstDuration;
+    obj.interBurstInterval = obj.ui.params.interBurstInterval;
+    obj.pulseTrainDuration = obj.ui.params.pulseTrainDuration;
+    obj.pulseTrainDelay = obj.ui.params.pulseTrainDelay;
+    obj.linkTriggerChannel1 = obj.ui.params.linkTriggerChannel1;
+    obj.linkTriggerChannel2 = obj.ui.params.linkTriggerChannel2;
+    obj.customTrainID = obj.ui.params.customTrainID;
+    obj.customTrainTarget = obj.ui.params.customTrainTarget;
+    obj.customTrainLoop = obj.ui.params.customTrainLoop;
+    obj.playbackMode = obj.ui.params.playbackMode;
+    obj.triggerMode = obj.ui.params.triggerMode;
+
+    % Sync parameters to device
+    obj.syncAllParams;
+    obj.autoSync = autoSyncState;
+
+    % Sync custom waveforms (if applicable)
+    for iTrain = 1:obj.info.nCustomPulseTrains
+        timestampString = obj.ui.customTrain.timestamps{iTrain};
+        voltageString = obj.ui.customTrain.voltages{iTrain};
+        if ~isempty(timestampString) || ~isempty(voltageString)
+            timestamps = str2double(split(timestampString, ','))';
+            voltages = str2double(split(voltageString, ','))';
+            nTimestamps = length(timestamps);
+            nVoltages = length(voltages);
+            if nTimestamps ~= nVoltages
+                errordlg(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
+                error(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
+            end
+            if nTimestamps > 0
+                obj.sendCustomTrain(iTrain, timestamps, voltages);
+            end
+        end
+    end
 end
