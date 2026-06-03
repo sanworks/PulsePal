@@ -244,57 +244,18 @@ classdef PulsePalDevice < handle
             if (~strcmp(filename(end-3:end), '.mat'))
                 error('The file to save must be a .mat file')
             end
-            Parameters = struct;
-            Parameters.autoSync = obj.autoSync;
-            Parameters.isBiphasic = obj.isBiphasic;
-            Parameters.phase1Voltage = obj.phase1Voltage;
-            Parameters.phase2Voltage = obj.phase2Voltage;
-            Parameters.restingVoltage = obj.restingVoltage;
-            Parameters.phase1Duration = obj.phase1Duration;
-            Parameters.interPhaseInterval = obj.interPhaseInterval;
-            Parameters.phase2Duration = obj.phase2Duration;
-            Parameters.interPulseInterval = obj.interPulseInterval;
-            Parameters.burstDuration = obj.burstDuration;
-            Parameters.interBurstInterval = obj.interBurstInterval;
-            Parameters.pulseTrainDuration = obj.pulseTrainDuration;
-            Parameters.pulseTrainDelay = obj.pulseTrainDelay;
-            Parameters.linkTriggerChannel1 = obj.linkTriggerChannel1;
-            Parameters.linkTriggerChannel2 = obj.linkTriggerChannel2;
-            Parameters.customTrainID = obj.customTrainID;
-            Parameters.customTrainTarget = obj.customTrainTarget;
-            Parameters.customTrainLoop = obj.customTrainLoop;
-            Parameters.playbackMode = obj.playbackMode;
-            Parameters.triggerMode = obj.triggerMode;
-            save(filename, 'Parameters');
+            params = obj.exportParams;
+            save(filename, 'params');
         end
 
         function loadParameters(obj, filename)
             % Loads parameters from a settings file previously saved with
             % the saveParameters method
             S = load(filename);
-            Parameters = S.Parameters;
-            obj.autoSync = 'off';
-            obj.isBiphasic = Parameters.isBiphasic;
-            obj.phase1Voltage = Parameters.phase1Voltage;
-            obj.phase2Voltage = Parameters.phase2Voltage;
-            obj.restingVoltage = Parameters.restingVoltage;
-            obj.phase1Duration = Parameters.phase1Duration;
-            obj.interPhaseInterval = Parameters.interPhaseInterval;
-            obj.phase2Duration = Parameters.phase2Duration;
-            obj.interPulseInterval = Parameters.interPulseInterval;
-            obj.burstDuration = Parameters.burstDuration;
-            obj.interBurstInterval = Parameters.interBurstInterval;
-            obj.pulseTrainDuration = Parameters.pulseTrainDuration;
-            obj.pulseTrainDelay = Parameters.pulseTrainDelay;
-            obj.linkTriggerChannel1 = Parameters.linkTriggerChannel1;
-            obj.linkTriggerChannel2 = Parameters.linkTriggerChannel2;
-            obj.customTrainID = Parameters.customTrainID;
-            obj.customTrainTarget = Parameters.customTrainTarget;
-            obj.customTrainLoop = Parameters.customTrainLoop;
-            obj.playbackMode = Parameters.playbackMode;
-            obj.triggerMode = Parameters.triggerMode;
+            params = S.params;
+            obj.importParams(params);
             obj.syncToDevice;
-            obj.autoSync = Parameters.autoSync;
+            obj.autoSync = params.autoSync;
         end
 
         function set.phase1Voltage(obj, val)
@@ -703,6 +664,53 @@ classdef PulsePalDevice < handle
             if autoSyncState
                 obj.autoSync = 'on';
             end
+        end
+        function params = exportParams(obj)
+            % Export the current parameters of the PulsePalDevice object to a struct
+            params = struct;
+            params.autoSync = obj.autoSync;
+            params.isBiphasic = obj.isBiphasic;
+            params.phase1Voltage = obj.phase1Voltage;
+            params.phase2Voltage = obj.phase2Voltage;
+            params.restingVoltage = obj.restingVoltage;
+            params.phase1Duration = obj.phase1Duration;
+            params.interPhaseInterval = obj.interPhaseInterval;
+            params.phase2Duration = obj.phase2Duration;
+            params.interPulseInterval = obj.interPulseInterval;
+            params.burstDuration = obj.burstDuration;
+            params.interBurstInterval = obj.interBurstInterval;
+            params.pulseTrainDuration = obj.pulseTrainDuration;
+            params.pulseTrainDelay = obj.pulseTrainDelay;
+            params.linkTriggerChannel1 = obj.linkTriggerChannel1;
+            params.linkTriggerChannel2 = obj.linkTriggerChannel2;
+            params.customTrainID = obj.customTrainID;
+            params.customTrainTarget = obj.customTrainTarget;
+            params.customTrainLoop = obj.customTrainLoop;
+            params.playbackMode = obj.playbackMode;
+            params.triggerMode = obj.triggerMode;
+        end
+
+        function importParams(obj, params)
+            % Import a struct of parameters to be the current parameters of the PulsePalDevice object
+            obj.isBiphasic = params.isBiphasic;
+            obj.phase1Voltage = params.phase1Voltage;
+            obj.phase2Voltage = params.phase2Voltage;
+            obj.restingVoltage = params.restingVoltage;
+            obj.phase1Duration = params.phase1Duration;
+            obj.interPhaseInterval = params.interPhaseInterval;
+            obj.phase2Duration = params.phase2Duration;
+            obj.interPulseInterval = params.interPulseInterval;
+            obj.burstDuration = params.burstDuration;
+            obj.interBurstInterval = params.interBurstInterval;
+            obj.pulseTrainDuration = params.pulseTrainDuration;
+            obj.pulseTrainDelay = params.pulseTrainDelay;
+            obj.linkTriggerChannel1 = params.linkTriggerChannel1;
+            obj.linkTriggerChannel2 = params.linkTriggerChannel2;
+            obj.customTrainID = params.customTrainID;
+            obj.customTrainTarget = params.customTrainTarget;
+            obj.customTrainLoop = params.customTrainLoop;
+            obj.playbackMode = params.playbackMode;
+            obj.triggerMode = params.triggerMode;
         end
     end
     methods (Static, Access = private)

@@ -15,13 +15,15 @@ obj.ui.PushTool_RestoreParams.ClickedCallback = @(h,e)restoreDefaults(obj);
 
 % Create PushTool_LoadProgram
 obj.ui.PushTool_LoadProgram = uipushtool(obj.ui.Toolbar);
-obj.ui.PushTool_LoadProgram.Tooltip = {'Load Program'};
+obj.ui.PushTool_LoadProgram.Tooltip = {'Open Program'};
 obj.ui.PushTool_LoadProgram.Icon = fullfile(matlabroot,'toolbox','matlab','icons','file_open.png');
+obj.ui.PushTool_LoadProgram.ClickedCallback = @(h,e)openProgram(obj);
 
 % Create PushTool_SaveProgram
 obj.ui.PushTool_SaveProgram = uipushtool(obj.ui.Toolbar);
 obj.ui.PushTool_SaveProgram.Tooltip = {'Save Program'};
 obj.ui.PushTool_SaveProgram.Icon = fullfile(matlabroot,'toolbox','matlab','icons','file_save.png');
+obj.ui.PushTool_SaveProgram.ClickedCallback = @(h,e)saveProgram(obj);
 
 % Create PushTool_UploadProgram
 obj.ui.PushTool_UploadProgram = uipushtool(obj.ui.Toolbar);
@@ -446,6 +448,12 @@ obj.ui.FirmwareLabel = uilabel(obj.ui.Figure);
 obj.ui.FirmwareLabel.Position = [133 2 78 22];
 obj.ui.FirmwareLabel.Text = ['Firmware: v' num2str(obj.info.firmwareVersion)];
 
+% Create StatusLabel
+obj.ui.StatusLabel = uilabel(obj.ui.Figure);
+obj.ui.StatusLabel.Position = [413 2 300 22];
+obj.ui.StatusLabel.HorizontalAlignment = 'right';
+obj.ui.StatusLabel.Text = 'Status: GUI Loaded';
+
 % Create local copy of gui parameters
 obj.ui.params = obj.defaultParams;
 
@@ -453,6 +461,9 @@ obj.ui.params = obj.defaultParams;
 obj.ui.customTrain = struct;
 obj.ui.customTrain.timestamps = repmat({''}, 1, 4);
 obj.ui.customTrain.voltages = repmat({''}, 1, 4);
+
+% Initialize other GUI variables
+obj.ui.lastProgramPath = '';
 
 % Push the local copy to the GUI
 setUIParams(obj);
@@ -462,249 +473,331 @@ obj.ui.Figure.Visible = 'on';
 end
 
 function setUIParams(obj)
-    params = obj.ui.params;
-    % Determine selected channels
-    outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    trigChanSelected = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+params = obj.ui.params;
+% Determine selected channels
+outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+trigChanSelected = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
 
-    % Set UI fields
-    obj.ui.DropDown_PulseType.ValueIndex = params.isBiphasic(outChanSelected)+1;
-    obj.ui.EditField_RestingVoltage.Value = params.restingVoltage(outChanSelected);
-    obj.ui.EditField_Phase1Voltage.Value = params.phase1Voltage(outChanSelected);
-    obj.ui.EditField_Phase2Voltage.Value = params.phase2Voltage(outChanSelected);
-    obj.ui.DropDown_CustomTrainID.ValueIndex = params.customTrainID(outChanSelected)+1;
-    obj.ui.DropDown_CustomTrainTarget.ValueIndex = params.customTrainTarget(outChanSelected)+1;
-    obj.ui.CheckBox_CustomTrainLoop.Value = params.customTrainLoop(outChanSelected);
-    obj.ui.EditField_Phase1Duration.Value = params.phase1Duration(outChanSelected);
-    obj.ui.EditField_InterPhaseInterval.Value = params.interPhaseInterval(outChanSelected);
-    obj.ui.EditField_Phase2Duration.Value = params.phase2Duration(outChanSelected);
-    obj.ui.EditField_InterPulseInterval.Value = params.interPulseInterval(outChanSelected);
-    obj.ui.EditField_BurstDuration.Value = params.burstDuration(outChanSelected);
-    obj.ui.EditField_InterBurstInterval.Value = params.interBurstInterval(outChanSelected);
-    obj.ui.EditField_PulseTrainDuration.Value = params.pulseTrainDuration(outChanSelected);
-    obj.ui.EditField_PulseTrainDelay.Value = params.pulseTrainDelay(outChanSelected);
-    obj.ui.DropDown_TriggerMode.ValueIndex = params.triggerMode(trigChanSelected)+1;
-    switch trigChanSelected
-        case 1
-            obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel1(1);
-            obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel1(2);
-            obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel1(3);
-            obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel1(4);
-        case 2
-            obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel2(1);
-            obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel2(2);
-            obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel2(3);
-            obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel2(4);
-    end
-    enableFields(obj);
+% Set UI fields
+obj.ui.DropDown_PulseType.ValueIndex = params.isBiphasic(outChanSelected)+1;
+obj.ui.EditField_RestingVoltage.Value = params.restingVoltage(outChanSelected);
+obj.ui.EditField_Phase1Voltage.Value = params.phase1Voltage(outChanSelected);
+obj.ui.EditField_Phase2Voltage.Value = params.phase2Voltage(outChanSelected);
+obj.ui.DropDown_CustomTrainID.ValueIndex = params.customTrainID(outChanSelected)+1;
+obj.ui.DropDown_CustomTrainTarget.ValueIndex = params.customTrainTarget(outChanSelected)+1;
+obj.ui.CheckBox_CustomTrainLoop.Value = params.customTrainLoop(outChanSelected);
+obj.ui.EditField_Phase1Duration.Value = params.phase1Duration(outChanSelected);
+obj.ui.EditField_InterPhaseInterval.Value = params.interPhaseInterval(outChanSelected);
+obj.ui.EditField_Phase2Duration.Value = params.phase2Duration(outChanSelected);
+obj.ui.EditField_InterPulseInterval.Value = params.interPulseInterval(outChanSelected);
+obj.ui.EditField_BurstDuration.Value = params.burstDuration(outChanSelected);
+obj.ui.EditField_InterBurstInterval.Value = params.interBurstInterval(outChanSelected);
+obj.ui.EditField_PulseTrainDuration.Value = params.pulseTrainDuration(outChanSelected);
+obj.ui.EditField_PulseTrainDelay.Value = params.pulseTrainDelay(outChanSelected);
+obj.ui.DropDown_TriggerMode.ValueIndex = params.triggerMode(trigChanSelected)+1;
+switch trigChanSelected
+    case 1
+        obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel1(1);
+        obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel1(2);
+        obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel1(3);
+        obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel1(4);
+    case 2
+        obj.ui.CheckBox_LinkToOutputCh1.Value = params.linkTriggerChannel2(1);
+        obj.ui.CheckBox_LinkToOutputCh2.Value = params.linkTriggerChannel2(2);
+        obj.ui.CheckBox_LinkToOutputCh3.Value = params.linkTriggerChannel2(3);
+        obj.ui.CheckBox_LinkToOutputCh4.Value = params.linkTriggerChannel2(4);
+end
+enableFields(obj);
 end
 
 function enableFields(obj)
-    params = obj.ui.params;
-    outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    obj.ui.EditField_Phase2Voltage.Enable = params.isBiphasic(outChanSelected);
-    obj.ui.EditField_InterPhaseInterval.Enable = params.isBiphasic(outChanSelected);
-    obj.ui.EditField_Phase2Duration.Enable = params.isBiphasic(outChanSelected);
-    usesCustomTrains = params.customTrainID(outChanSelected) > 0;
-    obj.ui.DropDown_CustomTrainTarget.Enable = usesCustomTrains;
-    obj.ui.CheckBox_CustomTrainLoop.Enable = usesCustomTrains;
-    obj.ui.ListBox_CustomTrainID.Enable = usesCustomTrains;
-    obj.ui.TextArea_CustomTrainTimestamps.Enable = usesCustomTrains;
-    obj.ui.TextArea_CustomTrainVoltages.Enable = usesCustomTrains;
+params = obj.ui.params;
+outChanSelected = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+obj.ui.EditField_Phase2Voltage.Enable = params.isBiphasic(outChanSelected);
+obj.ui.EditField_InterPhaseInterval.Enable = params.isBiphasic(outChanSelected);
+obj.ui.EditField_Phase2Duration.Enable = params.isBiphasic(outChanSelected);
+usesCustomTrains = params.customTrainID(outChanSelected) > 0;
+obj.ui.DropDown_CustomTrainTarget.Enable = usesCustomTrains;
+obj.ui.CheckBox_CustomTrainLoop.Enable = usesCustomTrains;
+obj.ui.ListBox_CustomTrainID.Enable = usesCustomTrains;
+obj.ui.TextArea_CustomTrainTimestamps.Enable = usesCustomTrains;
+obj.ui.TextArea_CustomTrainVoltages.Enable = usesCustomTrains;
 end
 
 function uiTrigger(obj)
-   triggerLogic = zeros(1,4);
-   triggerLogic(1) = obj.ui.CheckBox_TriggerCh1.Value;
-   triggerLogic(2) = obj.ui.CheckBox_TriggerCh2.Value;
-   triggerLogic(3) = obj.ui.CheckBox_TriggerCh3.Value;
-   triggerLogic(4) = obj.ui.CheckBox_TriggerCh4.Value;
-   chan2Trigger = find(triggerLogic);
-   if ~isempty(chan2Trigger)
+triggerLogic = zeros(1,4);
+triggerLogic(1) = obj.ui.CheckBox_TriggerCh1.Value;
+triggerLogic(2) = obj.ui.CheckBox_TriggerCh2.Value;
+triggerLogic(3) = obj.ui.CheckBox_TriggerCh3.Value;
+triggerLogic(4) = obj.ui.CheckBox_TriggerCh4.Value;
+chan2Trigger = find(triggerLogic);
+if ~isempty(chan2Trigger)
     obj.trigger(chan2Trigger);
-   end
+    obj.ui.StatusLabel.Text = 'Status: Output Channels Triggered';
+end
 end
 
 function uiSelectOutputChannel(obj)
-    setUIParams(obj);
+setUIParams(obj);
 end
 
 function uiSelectTriggerChannel(obj)
-    setUIParams(obj);
+setUIParams(obj);
 end
 
 % ---- Parameter edit callback functions ----
 
 function ui_setNumericOutputParam(obj, ParamName)
-    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    switch ParamName
-        case 'RestingVoltage'
-            obj.ui.params.restingVoltage(chan) = obj.ui.EditField_RestingVoltage.Value;
-        case 'Phase1Voltage'
-            obj.ui.params.phase1Voltage(chan) = obj.ui.EditField_Phase1Voltage.Value;
-        case 'Phase2Voltage'
-            obj.ui.params.phase2Voltage(chan) = obj.ui.EditField_Phase2Voltage.Value;
-        case 'Phase1Duration'
-            obj.ui.params.phase1Duration(chan) = obj.ui.EditField_Phase1Duration.Value;
-        case 'InterPhaseInterval'
-            obj.ui.params.interPhaseInterval(chan) = obj.ui.EditField_InterPhaseInterval.Value;
-        case 'Phase2Duration'
-            obj.ui.params.phase2Duration(chan) = obj.ui.EditField_Phase2Duration.Value;
-        case 'InterPulseInterval'
-            obj.ui.params.interPulseInterval(chan) = obj.ui.EditField_InterPulseInterval.Value;
-        case 'BurstDuration'
-            obj.ui.params.burstDuration(chan) = obj.ui.EditField_BurstDuration.Value;
-        case 'InterBurstInterval'
-            obj.ui.params.interBurstInterval(chan) = obj.ui.EditField_InterBurstInterval.Value;
-        case 'PulseTrainDuration'
-            obj.ui.params.pulseTrainDuration(chan) = obj.ui.EditField_PulseTrainDuration.Value;
-        case 'PulseTrainDelay'
-            obj.ui.params.pulseTrainDelay(chan) = obj.ui.EditField_PulseTrainDelay.Value;
-    end
+chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+switch ParamName
+    case 'RestingVoltage'
+        obj.ui.params.restingVoltage(chan) = obj.ui.EditField_RestingVoltage.Value;
+    case 'Phase1Voltage'
+        obj.ui.params.phase1Voltage(chan) = obj.ui.EditField_Phase1Voltage.Value;
+    case 'Phase2Voltage'
+        obj.ui.params.phase2Voltage(chan) = obj.ui.EditField_Phase2Voltage.Value;
+    case 'Phase1Duration'
+        obj.ui.params.phase1Duration(chan) = obj.ui.EditField_Phase1Duration.Value;
+    case 'InterPhaseInterval'
+        obj.ui.params.interPhaseInterval(chan) = obj.ui.EditField_InterPhaseInterval.Value;
+    case 'Phase2Duration'
+        obj.ui.params.phase2Duration(chan) = obj.ui.EditField_Phase2Duration.Value;
+    case 'InterPulseInterval'
+        obj.ui.params.interPulseInterval(chan) = obj.ui.EditField_InterPulseInterval.Value;
+    case 'BurstDuration'
+        obj.ui.params.burstDuration(chan) = obj.ui.EditField_BurstDuration.Value;
+    case 'InterBurstInterval'
+        obj.ui.params.interBurstInterval(chan) = obj.ui.EditField_InterBurstInterval.Value;
+    case 'PulseTrainDuration'
+        obj.ui.params.pulseTrainDuration(chan) = obj.ui.EditField_PulseTrainDuration.Value;
+    case 'PulseTrainDelay'
+        obj.ui.params.pulseTrainDelay(chan) = obj.ui.EditField_PulseTrainDelay.Value;
+end
 end
 
 function ui_SetPulseType(obj)
-    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    newPulseType = obj.ui.DropDown_PulseType.ValueIndex;
-    obj.ui.params.isBiphasic(chan) = double(newPulseType == 2);
-    enableFields(obj);
+chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+newPulseType = obj.ui.DropDown_PulseType.ValueIndex;
+obj.ui.params.isBiphasic(chan) = double(newPulseType == 2);
+enableFields(obj);
 end
 
 function ui_SetCustomTrainID(obj)
-    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    newID = obj.ui.DropDown_CustomTrainID.ValueIndex;
-    obj.ui.params.customTrainID(chan) = newID-1;
-    enableFields(obj);
+chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+newID = obj.ui.DropDown_CustomTrainID.ValueIndex;
+obj.ui.params.customTrainID(chan) = newID-1;
+enableFields(obj);
 end
 
 function ui_SetCustomTrainTarget(obj)
-    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    newTarget = obj.ui.DropDown_CustomTrainTarget.ValueIndex;
-    obj.ui.params.customTrainTarget(chan) = newTarget;
+chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+newTarget = obj.ui.DropDown_CustomTrainTarget.ValueIndex;
+obj.ui.params.customTrainTarget(chan) = newTarget;
 end
 
 function ui_SetCustomTrainLoop(obj)
-    chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-    loopEnabled = obj.ui.CheckBox_CustomTrainLoop.Value;
-    obj.ui.params.customTrainLoop(chan) = double(loopEnabled);
+chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
+loopEnabled = obj.ui.CheckBox_CustomTrainLoop.Value;
+obj.ui.params.customTrainLoop(chan) = double(loopEnabled);
 end
 
 function uiSelectTriggerMode(obj)
-    chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
-    newValue = obj.ui.DropDown_TriggerMode.ValueIndex;
-    obj.ui.params.triggerMode(chan) = newValue-1;
+chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+newValue = obj.ui.DropDown_TriggerMode.ValueIndex;
+obj.ui.params.triggerMode(chan) = newValue-1;
 end
 
 function uiSetTriggerLink(obj, index)
-    chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
-    switch index
-        case 1
-            value = obj.ui.CheckBox_LinkToOutputCh1.Value;
-        case 2
-            value = obj.ui.CheckBox_LinkToOutputCh2.Value;
-        case 3
-            value = obj.ui.CheckBox_LinkToOutputCh3.Value;
-        case 4
-            value = obj.ui.CheckBox_LinkToOutputCh4.Value;
-    end
-    switch chan
-        case 1
-            obj.ui.params.linkTriggerChannel1(index) = value;
-        case 2
-            obj.ui.params.linkTriggerChannel2(index) = value;
-    end
+chan = str2double(obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject.Text);
+switch index
+    case 1
+        value = obj.ui.CheckBox_LinkToOutputCh1.Value;
+    case 2
+        value = obj.ui.CheckBox_LinkToOutputCh2.Value;
+    case 3
+        value = obj.ui.CheckBox_LinkToOutputCh3.Value;
+    case 4
+        value = obj.ui.CheckBox_LinkToOutputCh4.Value;
+end
+switch chan
+    case 1
+        obj.ui.params.linkTriggerChannel1(index) = value;
+    case 2
+        obj.ui.params.linkTriggerChannel2(index) = value;
+end
 end
 
 function uiSetCustomTimestamps(obj)
-    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-    timestamps = obj.ui.TextArea_CustomTrainTimestamps.Value;
+trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+timestamps = obj.ui.TextArea_CustomTrainTimestamps.Value;
 
-    % Validate format
-    timestampString = char(timestamps{1});
-    pattern = '^\s*(\d+(\.\d*)?|\.\d+)(\s*,\s*(\d+(\.\d*)?|\.\d+))*\s*$';
-    if isempty(regexp(timestampString, pattern, 'once'))
-        errordlg('Timestamps must be a comma-delimited list of pulse onset times, given in seconds.')
-    end
+% Validate format
+timestampString = char(timestamps{1});
+pattern = '^\s*(\d+(\.\d*)?|\.\d+)(\s*,\s*(\d+(\.\d*)?|\.\d+))*\s*$';
+if isempty(regexp(timestampString, pattern, 'once'))
+    errordlg('Timestamps must be a comma-delimited list of pulse onset times, given in seconds.')
+end
 
-    % Assign
-    obj.ui.customTrain.timestamps{trainID} = timestamps{1};
+% Assign
+obj.ui.customTrain.timestamps{trainID} = timestamps{1};
 end
 
 function uiSetCustomVoltages(obj)
-    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-    voltages = obj.ui.TextArea_CustomTrainVoltages.Value;
+trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+voltages = obj.ui.TextArea_CustomTrainVoltages.Value;
 
-    % Validate format
-    voltageString = char(voltages{1});
-    pattern = '^\s*[+-]?(\d+(\.\d*)?|\.\d+)(\s*,\s*[+-]?(\d+(\.\d*)?|\.\d+))*\s*$';
-    if isempty(regexp(voltageString, pattern, 'once'))
-        errordlg('Voltages must be a comma-delimited list of pulse voltages, given in volts.')
-    end
+% Validate format
+voltageString = char(voltages{1});
+pattern = '^\s*[+-]?(\d+(\.\d*)?|\.\d+)(\s*,\s*[+-]?(\d+(\.\d*)?|\.\d+))*\s*$';
+if isempty(regexp(voltageString, pattern, 'once'))
+    errordlg('Voltages must be a comma-delimited list of pulse voltages, given in volts.')
+end
 
-    % Assign
-    obj.ui.customTrain.voltages{trainID} = voltages{1};
+% Assign
+obj.ui.customTrain.voltages{trainID} = voltages{1};
 end
 
 function ui_SetCustomTrainView(obj)
-    trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-    obj.ui.TextArea_CustomTrainTimestamps.Value = obj.ui.customTrain.timestamps{trainID};
-    obj.ui.TextArea_CustomTrainVoltages.Value = obj.ui.customTrain.voltages{trainID};
+trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
+obj.ui.TextArea_CustomTrainTimestamps.Value = obj.ui.customTrain.timestamps{trainID};
+obj.ui.TextArea_CustomTrainVoltages.Value = obj.ui.customTrain.voltages{trainID};
 end
 
 function restoreDefaults(obj)
-    obj.ui.params = obj.defaultParams;
-    setUIParams(obj);
-    obj.ui.customTrain = struct;
-    obj.ui.customTrain.timestamps = repmat({''}, 1, 4);
-    obj.ui.customTrain.voltages = repmat({''}, 1, 4);
-    obj.ui.TextArea_CustomTrainTimestamps.Value = '';
-    obj.ui.TextArea_CustomTrainVoltages.Value = '';
+resetGUISelections(obj);
+obj.ui.params = obj.defaultParams;
+setUIParams(obj);
+obj.ui.customTrain = struct;
+obj.ui.customTrain.timestamps = repmat({''}, 1, 4);
+obj.ui.customTrain.voltages = repmat({''}, 1, 4);
+obj.ui.TextArea_CustomTrainTimestamps.Value = '';
+obj.ui.TextArea_CustomTrainVoltages.Value = '';
+obj.ui.StatusLabel.Text = 'Status: Default Program Restored';
 end
 
 function uploadProgram(obj)
-    % Sync paramaters from GUI to user fields
-    autoSyncState = obj.autoSync;
-    obj.autoSync = 'off';
-    obj.isBiphasic = obj.ui.params.isBiphasic;
-    obj.restingVoltage = obj.ui.params.restingVoltage;
-    obj.phase1Voltage = obj.ui.params.phase1Voltage;
-    obj.phase2Voltage = obj.ui.params.phase2Voltage;
-    obj.phase1Duration = obj.ui.params.phase1Duration;
-    obj.interPhaseInterval = obj.ui.params.interPhaseInterval;
-    obj.phase2Duration = obj.ui.params.phase2Duration;
-    obj.interPulseInterval = obj.ui.params.interPulseInterval;
-    obj.burstDuration = obj.ui.params.burstDuration;
-    obj.interBurstInterval = obj.ui.params.interBurstInterval;
-    obj.pulseTrainDuration = obj.ui.params.pulseTrainDuration;
-    obj.pulseTrainDelay = obj.ui.params.pulseTrainDelay;
-    obj.linkTriggerChannel1 = obj.ui.params.linkTriggerChannel1;
-    obj.linkTriggerChannel2 = obj.ui.params.linkTriggerChannel2;
-    obj.customTrainID = obj.ui.params.customTrainID;
-    obj.customTrainTarget = obj.ui.params.customTrainTarget;
-    obj.customTrainLoop = obj.ui.params.customTrainLoop;
-    obj.playbackMode = obj.ui.params.playbackMode;
-    obj.triggerMode = obj.ui.params.triggerMode;
+% Sync paramaters from GUI to user fields
+autoSyncState = obj.autoSync;
+obj.autoSync = 'off';
+obj.importParams(obj.ui.params);
+obj.syncAllParams;
+obj.autoSync = autoSyncState;
 
-    % Sync parameters to device
-    obj.syncAllParams;
-    obj.autoSync = autoSyncState;
-
-    % Sync custom waveforms (if applicable)
-    for iTrain = 1:obj.info.nCustomPulseTrains
-        timestampString = obj.ui.customTrain.timestamps{iTrain};
-        voltageString = obj.ui.customTrain.voltages{iTrain};
-        if ~isempty(timestampString) || ~isempty(voltageString)
-            timestamps = str2double(split(timestampString, ','))';
-            voltages = str2double(split(voltageString, ','))';
-            nTimestamps = length(timestamps);
-            nVoltages = length(voltages);
-            if nTimestamps ~= nVoltages
-                errordlg(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
-                error(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
-            end
-            if nTimestamps > 0
-                obj.sendCustomTrain(iTrain, timestamps, voltages);
-            end
+% Sync custom waveforms (if applicable)
+for iTrain = 1:obj.info.nCustomPulseTrains
+    timestampString = obj.ui.customTrain.timestamps{iTrain};
+    voltageString = obj.ui.customTrain.voltages{iTrain};
+    if ~isempty(timestampString) || ~isempty(voltageString)
+        timestamps = str2double(split(timestampString, ','))';
+        voltages = str2double(split(voltageString, ','))';
+        nTimestamps = length(timestamps);
+        nVoltages = length(voltages);
+        if nTimestamps ~= nVoltages
+            errordlg(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
+            error(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
+        end
+        if nTimestamps > 0
+            obj.sendCustomTrain(iTrain, timestamps, voltages);
         end
     end
+end
+    obj.ui.StatusLabel.Text = 'Status: Program Loaded to Device';
+end
+
+function saveProgram(obj)
+program = struct;
+program.params = obj.ui.params;
+program.customTrainTimestamps = cell(1,4);
+program.customTrainVoltages = cell(1,4);
+for iTrain = 1:4
+    program.customTrainTimestamps{iTrain} = str2double(split(obj.ui.customTrain.timestamps{iTrain}, ','))';
+    program.customTrainVoltages{iTrain} = str2double(split(obj.ui.customTrain.voltages{iTrain}, ','))';
+end
+program.deviceInfo = obj.info;
+if isempty(obj.ui.lastProgramPath)
+    [file,path] = uiputfile('PulsePalProgram.mat','Save program');
+else
+    [file,path] = uiputfile('PulsePalProgram.mat','Save program', obj.ui.lastProgramPath);
+end
+if ischar(file) && ischar(path)
+    obj.ui.lastProgramPath = path;
+    savepath = fullfile(path, file);
+    save(savepath, 'program');
+    obj.ui.StatusLabel.Text = 'Status: Program Saved';
+end
+end
+
+function openProgram(obj)
+if isempty(obj.ui.lastProgramPath)
+    [file,path] = uigetfile('*.mat','Open program');
+else
+    [file,path] = uigetfile('*.mat','Open program', obj.ui.lastProgramPath);
+end
+if ischar(file) && ischar(path)
+    obj.ui.lastProgramPath = path;
+    newProgram = load(fullfile(path, file));
+    isValidProgram = false;
+    if isfield(newProgram, 'program') % Saved from PulsePalDevice object
+        resetGUISelections(obj);
+        program = newProgram.program;
+        customTimestamps = cell(1,4);
+        customVoltages = cell(1,4);
+        for iTrain = 1:4 % Convert custom train timestamps and voltages to string
+            thisTimestamp = program.customTrainTimestamps{iTrain};
+            if isnan(thisTimestamp)
+                customTimestamps{iTrain} = '';
+            else
+                customTimestamps{iTrain} = char(strjoin(string(thisTimestamp), ', '));
+            end
+            thisVoltage = program.customTrainVoltages{iTrain};
+            if isnan(thisVoltage)
+                customVoltages{iTrain} = '';
+            else
+                customVoltages{iTrain} = char(strjoin(string(thisVoltage), ', '));
+            end
+        end
+        obj.ui.customTrain.timestamps = customTimestamps;
+        obj.ui.customTrain.voltages = customVoltages;
+        ui_SetCustomTrainView(obj);
+        isValidProgram = true;
+    elseif isfield(newProgram, 'ParameterMatrix') % Saved from legacy PulsePalGUI
+        resetGUISelections(obj);
+        program = struct;
+        program.params = struct;
+        matrix = newProgram.ParameterMatrix;
+        program.params.isBiphasic = cell2mat(matrix(2,2:5));
+        program.params.phase1Voltage = cell2mat(matrix(3,2:5));
+        program.params.phase2Voltage = cell2mat(matrix(4,2:5));
+        program.params.restingVoltage = cell2mat(matrix(18,2:5));
+        program.params.phase1Duration = cell2mat(matrix(5,2:5));
+        program.params.interPhaseInterval = cell2mat(matrix(6,2:5));
+        program.params.phase2Duration = cell2mat(matrix(7,2:5));
+        program.params.interPulseInterval = cell2mat(matrix(8,2:5));
+        program.params.burstDuration = cell2mat(matrix(9,2:5));
+        program.params.interBurstInterval = cell2mat(matrix(10,2:5));
+        program.params.pulseTrainDuration = cell2mat(matrix(11,2:5));
+        program.params.pulseTrainDelay = cell2mat(matrix(12,2:5));
+        program.params.linkTriggerChannel1 = cell2mat(matrix(13,2:5));
+        program.params.linkTriggerChannel2 = cell2mat(matrix(14,2:5));
+        program.params.customTrainID = cell2mat(matrix(15,2:5));
+        program.params.customTrainTarget = cell2mat(matrix(16,2:5));
+        program.params.customTrainLoop = cell2mat(matrix(17,2:5));
+        program.params.triggerMode = cell2mat(matrix(2,8:9));
+        program.params.playbackMode = zeros(1,4);
+        isValidProgram = true;
+    end
+    if ~isValidProgram
+        errordlg(['Failed to open file: ' file ': unknown data format.'])
+        error(['Failed to open file: ' file ': unknown data format.'])
+    end
+    obj.ui.params = program.params;
+    setUIParams(obj);
+    obj.ui.StatusLabel.Text = 'Status: Program Opened';
+end
+end
+
+function resetGUISelections(obj)
+obj.ui.ChannelButtonGroup_OutputChan.SelectedObject = obj.ui.RadioButton_OutputCh1;
+obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject = obj.ui.RadioButton_TriggerCh1;
+obj.ui.ListBox_CustomTrainID.Value = '1';
 end
