@@ -65,10 +65,10 @@ classdef PulsePalDevice < handle
     methods
         function obj = PulsePalDevice(varargin) % Constructor method, executed when creating the object
             % Check for minimum MATLAB version
-            MinVer = '9.7';
-            MinVerName = 'R2019b';
+            MinVer = '9.9';
+            MinVerName = 'R2020b';
             if verLessThan('matlab', MinVer)
-                error(['PulsePalObject requires MATLAB ' MinVerName ' or newer.'...
+                error(['PulsePalDevice requires MATLAB ' MinVerName ' or newer.'...
                     char(10) 'If you must use previous MATLAB versions, please consider using the legacy interface.'])
             end
             if nargin > 0
@@ -106,7 +106,7 @@ classdef PulsePalDevice < handle
                     end
                 end
                 if obj.firmwareVersion > 21
-                    obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info 
+                    obj.Port.write([obj.opMenuByte 94], 'uint8'); % Request hardware info
                     obj.hardwareVersion = obj.Port.read(1, 'uint8');
                     obj.cyclePeriod = obj.Port.read(1, 'uint32');
                     obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
@@ -382,7 +382,7 @@ classdef PulsePalDevice < handle
             end
             obj.autoSync = val;
         end
-        
+
         function delete(obj)
             try
                 close(obj.ui.Figure)
@@ -580,7 +580,7 @@ classdef PulsePalDevice < handle
             end
             SingleByteParams = [SingleByteOutputParams(1:end) obj.linkTriggerChannel1 obj.linkTriggerChannel2 obj.triggerMode];
             obj.Port.write([obj.opMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
-                            typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
+                typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
             obj.confirmWrite;
         end
 
@@ -631,7 +631,7 @@ classdef PulsePalDevice < handle
                 trainCode = [];
             end
             obj.Port.write([obj.opMenuByte opCode trainCode typecast(uint32([nPulses TimeOutput]), 'uint8') ...
-                            typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
+                typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
         function importCurrentParamsFromPulsePal(obj)
@@ -712,6 +712,12 @@ classdef PulsePalDevice < handle
             obj.playbackMode = params.playbackMode;
             obj.triggerMode = params.triggerMode;
         end
+        function fh = makeCallback(obj, fun, varargin)
+            cObj = PulsePalDevice.getCallbackObject(obj);
+            extraArgs = varargin;
+            fh = @(~,~)PulsePalDevice.dispatchCallback( ...
+                cObj, fun, extraArgs{:});
+        end
     end
     methods (Static, Access = private)
         function params = defaultParams
@@ -735,6 +741,40 @@ classdef PulsePalDevice < handle
             params.customTrainLoop = zeros(1,4);
             params.playbackMode = zeros(1,4);
             params.triggerMode = uint8(zeros(1,2));
+        end
+
+        function cObj = getCallbackObject(obj)
+            if PulsePalDevice.supportsWeakReference()
+                cObj = matlab.lang.WeakReference(obj);
+            else
+                cObj = obj;
+            end
+        end
+
+        function tf = supportsWeakReference()
+            tf = exist('matlab.lang.WeakReference', 'class') == 8;
+        end
+
+        function obj = resolveCallbackObject(cObj)
+            if isa(cObj, 'matlab.lang.WeakReference')
+                obj = cObj.Handle;
+            else
+                obj = cObj;
+            end
+
+            if isempty(obj) || ~isvalid(obj)
+                obj = [];
+            end
+        end
+
+        function dispatchCallback(cObj, fun, varargin)
+            obj = PulsePalDevice.resolveCallbackObject(cObj);
+
+            if isempty(obj)
+                return
+            end
+
+            fun(obj, varargin{:});
         end
     end
 end
