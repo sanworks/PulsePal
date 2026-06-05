@@ -194,7 +194,27 @@ classdef PulsePalDevice < handle
             % Sets a fixed output channel voltage. Channel = 1-4. Voltage = volts (-10 to +10)
             obj.checkParamRange(voltage, 'Volts', [-10 10], 17);
             voltageBits = obj.volts2Bits(voltage);
-            obj.Port.write([obj.OpMenuByte 79 channel], 'uint8', voltageBits, 'uint16');
+            obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
+            obj.confirmWrite;
+        end
+
+        function setZeroCodeCalibration(obj, channel, voltageOffset)
+            if obj.firmwareVersion > 21
+                % Sets a calibration to correct for DAC zero code error on a single channel.
+                % Calibration is stored to EEPROM and loaded on all future boots.
+                if ~ismember(channel, [1 2 3 4])
+                    error('channel must be 1, 2, 3 or 4')
+                end
+                if voltageOffset < -0.1 || voltageOffset > 0.1
+                    error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
+                end
+                voltageBits = voltageOffset*(1/(20/65536));
+                obj.Port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
+                obj.confirmWrite;
+                disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
+            else
+                error(['Zero code calibration requires firmware v22 or newer. Detected firmware is: v' num2str(obj.firmwareVersion)])
+            end
         end
 
         function sendCustomPulseTrain(obj, trainID, pulseTimes, voltages)

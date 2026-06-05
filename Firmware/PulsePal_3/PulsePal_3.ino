@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, Rochester, NY, USA
+Copyright (C) 2026 Sanworks LLC, Rochester, NY, USA
 
 ----------------------------------------------------------------------------
 
@@ -56,6 +56,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <SPI.h>
 #include <ctype.h>
 #include "ArCOM.h"
+#include <EEPROM.h>
 
 #if (HARDWARE_VERSION == 2)
   #include <LiquidCrystal.h>
@@ -270,6 +271,7 @@ boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be up
 // DAC variables
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
+int16_t ZeroCodeCalibration[4] = {0}; // Calibration for zero-code error of the DAC
 union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
     byte byteArray[8];
     uint16_t uint16[4];
@@ -296,6 +298,7 @@ void setup() {
   SPI.beginTransaction(DACSettings);
   digitalWriteDirect(LDACPin, LOW);
   digitalWriteDirect(SyncPin, HIGH);
+  EEPROM.get(0, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
   ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
@@ -523,13 +526,12 @@ void loop() {
           #endif
         } break;
         case 79: { // Write specific voltage to an output channel (not a pulse train) 
-          byte myChannel = SerialReadByte();
-          myChannel = myChannel - 1; // Convert for zero-indexing
+          uint8_t myChannel = SerialReadByte() - 1; // Convert for zero-indexing
           uint16_t val = PPUSB.readUint16();
           dacValue.uint16[myChannel] = val;
           DACFlags[myChannel] = 1;
           dacWrite();
-          if (dacValue.uint16[myChannel] == RestingVoltage[myChannel]) {
+          if (val == RestingVoltage[myChannel]) {
             digitalWriteDirect(OutputLEDLines[myChannel], LOW);
           } else {
             digitalWriteDirect(OutputLEDLines[myChannel], HIGH);
@@ -743,6 +745,15 @@ void loop() {
         case 95: { // Load custom pulse train - Current method used by MATLAB and Python classes. See legacy methods 75 and 76 above.
           usbLoadTarget = PPUSB.readByte();
           usbLoadFlag = true;
+        } break;
+        case 96: { // Set Calibration to offset DAC Zero Code Error on a single channel
+          inByte = PPUSB.readByte();
+          ZeroCodeCalibration[inByte] = PPUSB.readUint16();
+          PPUSB.writeByte(1); // Send confirm byte
+          EEPROM.put(0, ZeroCodeCalibration);
+          dacValue.uint16[inByte] = RestingVoltage[inByte];
+          DACFlags[inByte] = 1;
+          dacWrite();
         } break;
      }
     }
@@ -1141,8 +1152,9 @@ void killChannel(byte outputChannel) {
 
 void dacWrite() {
   digitalWriteDirect(LDACPin,HIGH);
-  for (int i = 0; i<4; i++) {
+  for (int i = 0; i < 4; i++) {
     if (DACFlags[i]) {
+      dacValue.uint16[i] = clampU16(dacValue.uint16[i], ZeroCodeCalibration[i]);
       digitalWriteDirect(SyncPin,LOW);
       dacBuffer[0] = dacMap[i];
       dacBuffer[1] = dacValue.byteArray[1+(i*2)];
@@ -1152,7 +1164,25 @@ void dacWrite() {
       DACFlags[i] = 0;
     }
   }
+  #if (HARDWARE_VERSION > 2)
+    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+  #endif
   digitalWriteDirect(LDACPin,LOW);
+}
+
+static inline uint16_t clampU16(uint16_t value, int16_t offset)
+{
+    int32_t corrected = (int32_t)value + offset;
+
+    if (corrected < 0) {
+        return 0;
+    }
+
+    if (corrected > UINT16_MAX) {
+        return UINT16_MAX;
+    }
+
+    return (uint16_t)corrected;
 }
 
 void ProgramDAC(byte Data1, byte Data2, byte Data3) {
