@@ -410,8 +410,12 @@ classdef PulsePalDevice < handle
             %   Attempts to close the GUI, requests device disconnection/cleanup, and
             %   releases the serialport handle. Errors during cleanup are ignored.
             try
-                close(obj.ui.Figure)
                 obj.Port.write([obj.OpMenuByte 81], 'uint8');
+            catch
+                % Fail silently
+            end
+            try
+                close(obj.ui.Figure)
             catch
                 % Fail silently
             end
