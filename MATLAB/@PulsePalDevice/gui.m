@@ -1,3 +1,23 @@
+%{
+----------------------------------------------------------------------------
+
+This file is part of the Sanworks Pulse Pal repository
+Copyright (C) 2026 Sanworks LLC, Rochester, New York, USA
+
+----------------------------------------------------------------------------
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3.
+
+This program is distributed  WITHOUT ANY WARRANTY and without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+%}
+
 function gui(obj)
 % Check for existing GUI
 if isfield(obj.ui, 'Figure')
@@ -98,9 +118,9 @@ obj.ui.CheckBox_CustomTrainLoop.Position = [665 84 17 22];
 obj.ui.CheckBox_CustomTrainLoop.ValueChangedFcn = obj.makeCallback(@ui_SetCustomTrainLoop);
 
 % Create RestingVoltsLabel
-obj.ui.Phase1VoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
-obj.ui.Phase1VoltsLabel.Position = [207 111 83 22];
-obj.ui.Phase1VoltsLabel.Text = 'Resting (V)';
+obj.ui.RestingVoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
+obj.ui.RestingVoltsLabel.Position = [207 111 83 22];
+obj.ui.RestingVoltsLabel.Text = 'Resting (V)';
 
 % Create Phase1VoltsLabel
 obj.ui.Phase1VoltsLabel = uilabel(obj.ui.OutputChannelsPanel);
@@ -342,7 +362,7 @@ obj.ui.CustomPulseTrainsPanel.Position = [13 24 700 115];
 
 % Create ListBox_CustomTrainID - Custom Train Editor
 obj.ui.ListBox_CustomTrainID = uilistbox(obj.ui.CustomPulseTrainsPanel);
-obj.ui.ListBox_CustomTrainID.Items = {'1', '2', '3', '4'};
+obj.ui.ListBox_CustomTrainID.Items = arrayfun(@num2str, 1:obj.info.nCustomPulseTrains, 'UniformOutput', false);
 obj.ui.ListBox_CustomTrainID.Enable = 'off';
 obj.ui.ListBox_CustomTrainID.Tooltip = {'Select the custom train to program'};
 obj.ui.ListBox_CustomTrainID.Position = [15 22 100 37];
@@ -623,7 +643,7 @@ function ui_SetCustomTrainTarget(obj)
 chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
 newTarget = find(strcmp(obj.ui.DropDown_CustomTrainTarget.Items, ...
                    obj.ui.DropDown_CustomTrainTarget.Value), 1);
-obj.ui.params.customTrainTarget(chan) = newTarget;
+obj.ui.params.customTrainTarget(chan) = newTarget-1;
 end
 
 function ui_SetCustomTrainLoop(obj)
@@ -710,7 +730,7 @@ end
 function uploadProgram(obj)
 % Sync paramaters from GUI to user fields
 autoSyncState = obj.autoSync;
-obj.autoSync = 'off';
+obj.autoSync = false;
 obj.importParams(obj.ui.params);
 obj.syncAllParams;
 obj.autoSync = autoSyncState;
