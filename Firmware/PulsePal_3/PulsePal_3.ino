@@ -78,6 +78,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                         // The optoisolator in Pulse Pal 2 is inverting, so its output is high by default, and becomes low 
                         // when voltage is applied to the trigger channel. Set this to 1 if using a non-inverting isolator.
 
+#define STRINGIFY(x) #x // This and the following line enable conversion of macros to strings (e.g. for displaying firmware version)
+#define TOSTRING(x) STRINGIFY(x)
+
 #if (HARDWARE_VERSION == 2)
   ArCOM PPUSB(SerialUSB); // Initialize ArCOM USB serial wrapper
   // initialize Arduino LCD library with the numbers of the interface pins
@@ -255,6 +258,7 @@ int SelectedStimMode = 1; // Manual trigger from joystick menu. 1 = Single train
 int lastDebounceTime = 0; // to debounce the joystick button
 boolean lastButtonState = 0; // last logic state of joystick button
 boolean ChoiceMade = 0; // determines whether user has chosen a value from a list
+boolean viewingInfo = false; // True if viewing system info
 unsigned int UserValue = 0; // The current value displayed on a list of values (written to LCD when choosing parameters)
 #if (HARDWARE_VERSION == 2)
   char CommanderString[16] = " PULSE PAL v2.0"; // Displayed at the menu top when disconnected from software
@@ -1301,12 +1305,21 @@ void UpdateSettingsMenu() {
                   write2Screen("!Error reading", "SD Card!");
                 }
               } break;
-              case 10: { // Reset
+              case 10: { // Info
+                if (!viewingInfo) {
+                  write2Screen("Hardware v" TOSTRING(HARDWARE_VERSION), "Firmware v" TOSTRING(FIRMWARE_VERSION));
+                  viewingInfo = true;
+                } else {
+                  write2Screen("Device Info","<Click to view>");
+                  viewingInfo = false;
+                }
+              } break;
+              case 11: { // Reset
               write2Screen(" "," ");
               delayMicroseconds(1000000);
                 Software_Reset();
               } break;
-              case 11: {
+              case 12: {
                 inMenu = 0;
                 write2Screen(CommanderString," Click for menu");
               } break;
@@ -1690,7 +1703,7 @@ void UpdateSettingsMenu() {
         if (myFilePos > 0) {myFilePos = myFilePos - 1;}
       }
       if (SelectedInputAction == 0) {SelectedInputAction = 3;}
-      if (SelectedChannel == 0) {SelectedChannel = 11;}
+      if (SelectedChannel == 0) {SelectedChannel = 12;}
       if (SelectedAction == 0) {SelectedAction = 18;}
       if (SelectedStimMode == 0) {SelectedStimMode = 4;}
     }
@@ -1711,7 +1724,7 @@ void UpdateSettingsMenu() {
         myFilePos++;
       }
       if (SelectedInputAction == 4) {SelectedInputAction = 1;}
-      if (SelectedChannel == 12) {SelectedChannel = 1;}
+      if (SelectedChannel == 13) {SelectedChannel = 1;}
       if (SelectedAction == 19) {SelectedAction = 1;}
       if (SelectedStimMode == 5) {SelectedStimMode = 1;}
     }
@@ -1858,8 +1871,9 @@ void RefreshChannelMenu(int ThisChannel) {
         case 7: {write2Screen(" SAVE SETTINGS  ","< Select File >");} break;
         case 8: {write2Screen(" LOAD SETTINGS  ","< Select File >");} break;
         case 9: {write2Screen(" ERASE SETTINGS ","< Select File >");} break;
-        case 10: {write2Screen("    -RESET-       ","<Click to reset>");} break;
-        case 11: {write2Screen("<Click to exit>"," ");} break;
+        case 10: {write2Screen("  Device Info  ","<Click to view>");} break;
+        case 11: {write2Screen("    -RESET-       ","<Click to reset>");} break;
+        case 12: {write2Screen("<Click to exit>"," ");} break;
   }
 }
 void RefreshActionMenu(int ThisAction) {
