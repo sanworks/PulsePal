@@ -305,6 +305,37 @@ classdef PulsePalDevice < handle
             obj.autoSync = params.autoSync;
         end
 
+        function formatMicroSD(obj)
+            if obj.hardwareVersion < 3
+                error('formatMicroSD() requires hardware v3 or newer.')
+            end
+            disp('*** Pulse Pal microSD Formatter ***')
+            disp('This will format Pulse Pal''s microSD card,')
+            disp('erase all settings files on the device')
+            disp('and reset all parameters to defaults.')
+            reply = input('Do you want to continue (y/n) > ', 's');
+            if lower(reply) == 'y'
+                success = false;
+                obj.Port.write([obj.OpMenuByte 97], 'uint8');
+                tic;
+                msg = [];
+                flagsFound = false;
+                while toc < 30 && flagsFound == false
+                    if obj.Port.NumBytesAvailable > 0
+                        msg = [msg obj.Port.read(obj.Port.NumBytesAvailable, 'uint8')];
+                    end
+                    if sum(msg == '!') > 0
+                        flagsFound = true;
+                    end
+                    pause(.01);
+                end
+                disp(char(msg(1:end-2)));
+                obj.setDefaultParams();
+            else
+                disp('Choice confirmed - microSD Card NOT formatted.')
+            end
+        end
+
         function set.phase1Voltage(obj, val)
             units = 'Volts'; paramCode = 2;
             obj.setOutputParam(paramCode, val, units);

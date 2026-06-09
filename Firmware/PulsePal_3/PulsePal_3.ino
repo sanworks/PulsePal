@@ -213,6 +213,7 @@ uint8_t buf4[4];
   FsFile root;
   FsFile settingsFile;
   FsFile candidateSettingsFile;
+  uint8_t mountOK = 0;
 #endif
 String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
 byte settingsFileNameLength = 0; // Set when a new file name is entered
@@ -361,8 +362,7 @@ void setup() {
   }
   #if (HARDWARE_VERSION > 2)
     if (!root.open("/Pulse_Pal")) {
-      write2Screen("Startup Failed:"," SD Card ERROR");
-      sd.initErrorHalt();
+      write2Screen("Startup Error:"," Need SD Format");
     }
   #endif
   currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
@@ -755,6 +755,16 @@ void loop() {
           DACFlags[inByte] = 1;
           dacWrite();
         } break;
+        case 97: { // Format microSD card
+          mountOK = formatCard();
+          PPUSB.writeByte(mountOK);
+          if (!mountOK) {
+            write2Screen("SD CARD ERROR"," Click for menu");
+          }
+          currentSettingsFileName = "default.pps";
+          currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+          LoadDefaultParameters();
+        }
      }
     }
   }
@@ -2644,3 +2654,34 @@ void loadCustomPulseTrain(byte trainID) {
   }
   PPUSB.writeByte(1); // Send confirm byte
 }
+
+#if (HARDWARE_VERSION == 3)
+  bool formatCard() {
+    if (candidateSettingsFile) {
+      candidateSettingsFile.close();
+    }
+    Serial.println("STATUS: Starting Format...");
+    FatFormatter formatter;
+    // The formatter needs a 512-byte temporary workspace (cache)
+    uint8_t cache[512];
+
+    if (!formatter.format(sd.card(), cache, &Serial)) {
+      Serial.println("ERROR: Format failed!");
+      return false;
+    }
+    if (!sd.begin(SdioConfig(FIFO_SDIO))) {
+      Serial.println("ERROR: Card re-init failed!");
+      return false;
+    }
+    sd.mkdir("Pulse_Pal");
+    sd.chdir("Pulse_Pal");
+    if (!root.open("/Pulse_Pal")) {
+      Serial.println("ERROR: Card re-init failed!");
+      return false;
+    }
+    currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+    settingsFile.open(currentSettingsFileNameChar, O_READ);
+    Serial.println("SUCCESS: Card format complete!");
+    return true;
+  }
+#endif
