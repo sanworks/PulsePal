@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, Rochester, NY, USA
+Copyright (C) 2026 Sanworks LLC, Rochester, NY, USA
 
 ----------------------------------------------------------------------------
 

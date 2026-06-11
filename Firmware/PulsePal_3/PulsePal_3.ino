@@ -273,6 +273,7 @@ char centeredText[16] = {0}; // Global for returning centered text to display on
 byte fileNameOffset = 0; // Offset of centered string (for display on 16-char screen)
 char tempText[16] = {0}; // Temporary buffer for holding a file name or other text
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
+uint32_t PulseTrainDuration_ExamplePulse[4] = {0};
 
 // DAC variables
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
@@ -397,6 +398,9 @@ void setup() {
 }
 
 void loop() {
+    if (StimulatingState == 0) {
+      UpdateSettingsMenu();
+    }
     if (PPUSB.available()) { // If bytes are available in the serial port buffer and a custom pulse train transfer is not ongoing
     CommandByte = PPUSB.readByte(); // Read a byte
     if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
@@ -805,7 +809,6 @@ void handler(void) {
         dacWrite(); // Update DAC to final voltages (should be resting voltage)
         DACFlag = 0;
       }
-      UpdateSettingsMenu(); // Check for joystick button click, handle if detected
       SystemTime = 0;
    } else {
   //     if (StimulatingState == 2) {
@@ -1155,6 +1158,10 @@ void handler(void) {
                 killChannel(x);
             }
           }
+          if (PulseTrainDuration_ExamplePulse[x] > 0) {
+            PulseTrainDuration[x] = PulseTrainDuration_ExamplePulse[x];
+            PulseTrainDuration_ExamplePulse[x] = 0;
+          }
         }
      }
    }
@@ -1393,81 +1400,22 @@ void UpdateSettingsMenu() {
                ClickerButtonState = ReadDebouncedButton();
               }
               write2Screen("< Single Train >"," ");
-              PreStimulusStatus[SelectedChannel-1] = 1;
-              BurstStatus[SelectedChannel-1] = 1;
-              if (StimulatingState == 0) {ResetSystemTime(); StimulatingState = 2;}
-              MicrosTime = micros();
-              PrePulseTrainTimestamps[SelectedChannel-1] = SystemTime;  
+              SoftTriggerScheduled[SelectedChannel-1] = 1;
             } break;
             case 2: { // Single example pulse. Timing for the example pulse is done with micros() instead of the HW timer.
               write2Screen("< Single Pulse >","      ZAP!");
               delayMicroseconds(100000);
               write2Screen("< Single Pulse >"," ");
-              SystemTime = 0;
-              if (IsBiphasic[SelectedChannel-1] == 0) {
-                dacValue.uint16[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
-                MicrosTime = micros(); LastLoopTime = MicrosTime;
-                dacWrite();
-                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
-                    MicrosTime = micros();
-                  }
-                 LastLoopTime = MicrosTime;
-                 SystemTime++; 
-                }
-                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                dacWrite();
-              } else {
-                dacValue.uint16[SelectedChannel-1] = Phase1Voltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase1Duration[SelectedChannel-1];
-                MicrosTime = micros(); LastLoopTime = MicrosTime;
-                dacWrite();
-                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
-                    MicrosTime = micros();
-                  }
-                 LastLoopTime = MicrosTime;
-                 SystemTime++; 
-                }
-                if (InterPhaseInterval[SelectedChannel-1] > 0) {
-                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + InterPhaseInterval[SelectedChannel-1];
-                dacWrite();
-                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
-                    MicrosTime = micros();
-                  }
-                 LastLoopTime = MicrosTime;
-                 SystemTime++; 
-                }
-                }
-                dacValue.uint16[SelectedChannel-1] = Phase2Voltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                NextPulseTransitionTime[SelectedChannel-1] = SystemTime + Phase2Duration[SelectedChannel-1];
-                dacWrite();
-                while (NextPulseTransitionTime[SelectedChannel-1] > SystemTime) {
-                  while ((MicrosTime-LastLoopTime) < TIMER_PERIOD) {  // Make sure loop runs once every 100us 
-                    MicrosTime = micros();
-                  }
-                 LastLoopTime = MicrosTime;
-                 SystemTime++; 
-                }
-                dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                DACFlags[SelectedChannel-1] = 1;
-                dacWrite();
-              }
+              PulseTrainDuration_ExamplePulse[SelectedChannel-1] = PulseTrainDuration[SelectedChannel-1];
+              PulseTrainDuration[SelectedChannel-1] = Phase1Duration[SelectedChannel-1] + InterPhaseInterval[SelectedChannel-1] + Phase2Duration[SelectedChannel-1];
+              SoftTriggerScheduled[SelectedChannel-1] = 1;
             } break;
             case 3: {
               if (ContinuousLoopMode[SelectedChannel-1] == false) {
                  write2Screen("<  Continuous  >","      On");
+                 delayMicroseconds(200000); // Debounce
                  ContinuousLoopMode[SelectedChannel-1] = true;
                  SoftTriggerScheduled[SelectedChannel-1] = 1;
-                 delayMicroseconds(200000); // Debounce
              } else {
                  write2Screen("<  Continuous  >","      Off");
                  ContinuousLoopMode[SelectedChannel-1] = false;
@@ -1499,11 +1447,7 @@ void UpdateSettingsMenu() {
               write2Screen("< Trigger Now >"," ");
               for (int x = 0; x < 4; x++) {
                 if (TriggerAddress[SelectedChannel-1][x] == 1) {
-                  PreStimulusStatus[x] = 1;
-                  BurstStatus[x] = 1;
-                  if (StimulatingState == 0) {StimulatingState = 2; ResetSystemTime();}
-                  MicrosTime = micros();
-                  PrePulseTrainTimestamps[x] = SystemTime;
+                  SoftTriggerScheduled[x] = 1;
                 }
               }
             } break;
@@ -2098,13 +2042,24 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
        case 4: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Pulses/Bursts
        case 5: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for trigger mode
        }
-     CursorToggleTimer = 0; 
-     CursorOn = 0;
-     CursorToggleThreshold = 20000;
-     if (HARDWARE_VERSION == 3) {
-      CursorToggleThreshold = 10000;
-     }
-     delayMicroseconds(75000); // Acts as a debounce so user has released pushbutton before reading for an entry
+      CursorToggleTimer = 0;
+      CursorOn = 1;   // Cursor starts visible
+      CursorToggleThreshold = 20000;
+
+      if (HARDWARE_VERSION == 3) {
+        CursorToggleThreshold = 10000;
+      }
+
+      // Show cursor immediately on entry
+      if (Digits[0] < 0 || isNegativeZero) {
+        LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
+      } else {
+        LCD_setCursor(ValidCursorPositions[CursorPos], 1);
+      }
+
+      LCD_cursor();
+
+      delayMicroseconds(75000);
      while (ChoiceMade == 0) {
        CursorToggleTimer++;
        if (CursorToggleTimer == CursorToggleThreshold) {
@@ -2192,9 +2147,20 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
           #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
+            LCD_setCursor(0, 1); 
+            LCD_print_no_trim_no_render("                ");
           #endif
-          LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
+          LCD_setCursor(0, 1); 
+          LCD_print(FormatNumberForDisplay(UserValue, Units));
+          // Restore cursor to the active editable digit immediately.
+          if (Digits[0] < 0 || isNegativeZero) {
+            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
+          } else {
+            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
+          }
+
+          LCD_cursor();
+          CursorOn = 1;
        }
       else if (ClickerY > ClickerMaxThreshold) {
          switch(Units) {
@@ -2252,9 +2218,21 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
           ScrollSpeedDelay = 200000;
           LCD_noCursor();
           #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
+            LCD_setCursor(0, 1); 
+            LCD_print_no_trim_no_render("                ");
           #endif
-          LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
+          LCD_setCursor(0, 1); 
+          LCD_print(FormatNumberForDisplay(UserValue, Units));
+          // Restore cursor to the active editable digit immediately.
+          if (Digits[0] < 0 || isNegativeZero) {
+            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
+          } else {
+            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
+          }
+          LCD_cursor();
+          CursorOn = 1;
+
+
        } else {
          ScrollSpeedDelay = 0;
        }
@@ -2285,7 +2263,8 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
      delayMicroseconds(ScrollSpeedDelay);  
      }
      LCD_noCursor();
-     LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
+     LCD_setCursor(0, 1); 
+     LCD_print_no_trim_no_render("                ");
      if (Units == 5) {
        inMenu = 4;
      } else {
@@ -2382,8 +2361,8 @@ void AbortAllPulseTrains() {
       killChannel(x);
     }
     dacWrite();
-    write2Screen("   PULSE TRAIN","     ABORTED");
-    delayMicroseconds(1000000);
+    write2Screen("   PULSE TRAIN","   TERMINATED");
+    delayMicroseconds(1500000);
     if (inMenu == 0) {
       write2Screen(CommanderString," Click for menu");
     } else {

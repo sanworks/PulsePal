@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2025 Joshua I. Sanders, Sanworks LLC, Rochester, NY, USA
+Copyright (C) 2026 Sanworks LLC, Rochester, NY, USA
 
 ----------------------------------------------------------------------------
 
@@ -85,9 +85,17 @@ size_t LiquidCrystal_U8G2::write(uint8_t c) {
 void LiquidCrystal_U8G2::noDisplay() { _display_on = false; _u8g2.setPowerSave(1); }
 void LiquidCrystal_U8G2::display() { _display_on = true; _u8g2.setPowerSave(0); }
 void LiquidCrystal_U8G2::noCursor() { _show_cursor = false; }
-void LiquidCrystal_U8G2::cursor() { _show_cursor = true; }
+void LiquidCrystal_U8G2::cursor() { 
+  _show_cursor = true; 
+  _blink_state = true;          // start visible
+  _blink_last_time = millis();  // restart blink timer
+}
 void LiquidCrystal_U8G2::noBlink() { _show_blink = false; }
-void LiquidCrystal_U8G2::blink() { _show_blink = true; }
+void LiquidCrystal_U8G2::blink() { 
+  _show_blink = true; 
+  _blink_state = true;          // start visible
+  _blink_last_time = millis();  // restart blink timer
+  }
 void LiquidCrystal_U8G2::scrollDisplayLeft() {
   for (int r = 0; r < _rows; ++r) { char c = _text_buffer[r][0]; memmove(&_text_buffer[r][0], &_text_buffer[r][1], _cols - 1); _text_buffer[r][_cols - 1] = c; }
   render();
