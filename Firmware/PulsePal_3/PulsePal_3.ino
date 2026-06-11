@@ -56,7 +56,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <SPI.h>
 #include <ctype.h>
 #include "ArCOM.h"
-#include <EEPROM.h>
+
 
 #if (HARDWARE_VERSION == 2)
   #include <LiquidCrystal.h>
@@ -65,6 +65,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   #include <U8g2lib.h>
   #include "LiquidCrystal_U8G2.h"
   #include "GFXData.h"
+  #include <EEPROM.h>
   #define SD_CONFIG SdioConfig(FIFO_SDIO)
 #endif
 
@@ -303,7 +304,9 @@ void setup() {
   SPI.beginTransaction(DACSettings);
   digitalWriteDirect(LDACPin, LOW);
   digitalWriteDirect(SyncPin, HIGH);
-  EEPROM.get(0, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
+  #if (HARDWARE_VERSION > 2)
+    EEPROM.get(0, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
+  #endif
   ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
@@ -754,20 +757,24 @@ void loop() {
           inByte = PPUSB.readByte();
           ZeroCodeCalibration[inByte] = PPUSB.readUint16();
           PPUSB.writeByte(1); // Send confirm byte
-          EEPROM.put(0, ZeroCodeCalibration);
+          #if (HARDWARE_VERSION > 2)
+            EEPROM.put(0, ZeroCodeCalibration);
+          #endif
           dacValue.uint16[inByte] = RestingVoltage[inByte];
           DACFlags[inByte] = 1;
           dacWrite();
         } break;
         case 97: { // Format microSD card
-          mountOK = formatCard();
-          PPUSB.writeByte(mountOK);
-          if (!mountOK) {
-            write2Screen("SD CARD ERROR"," Click for menu");
-          }
-          currentSettingsFileName = "default.pps";
-          currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
-          LoadDefaultParameters();
+          #if (HARDWARE_VERSION > 2)
+            mountOK = formatCard();
+            PPUSB.writeByte(mountOK);
+            if (!mountOK) {
+              write2Screen("SD CARD ERROR"," Click for menu");
+            }
+            currentSettingsFileName = "default.pps";
+            currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+            LoadDefaultParameters();
+          #endif
         }
      }
     }

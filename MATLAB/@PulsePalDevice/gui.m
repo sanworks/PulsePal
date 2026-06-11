@@ -483,7 +483,6 @@ obj.ui.StatusLabel = uilabel(obj.ui.Figure);
 obj.ui.StatusLabel.Position = [413 2 300 22];
 obj.ui.StatusLabel.HorizontalAlignment = 'right';
 obj.ui.StatusLabel.FontWeight = 'bold';
-obj.ui.StatusLabel.FontColor = [0 0 0];
 obj.ui.StatusLabel.Text = 'Status: GUI Loaded';
 
 

@@ -8,9 +8,8 @@ Pulse Pal is an open source instrument, released into the public domain under th
 IMPORTANT: This license means that you can build and modify the device for your own use and even release derivative works commercially, but all derivative versions of the software and hardware MUST remain open source under the GNU public license v3.
 
 This repository contains:
--Firmware (written in Arduino / LeafLabs Maple)
+-Firmware (written in Arduino)
 -Software APIs in MATLAB, Python and C++
--Drivers (for Windows - none needed for MAC or Linux)
 -Design files for the circuit board
 -Design files for the enclosure
 

@@ -1,9 +1,16 @@
-This is the Matlab API for Pulse Pal
+***MATLAB Interface for Pulse Pal***
+
+There are two interfaces in this folder:
+1. @PulsePalDevice, a modern object-oriented interface
+2. /Legacy/, the original interface.
+
+For new projects, the modern interface is strongly recommended.
 
 To get started:
-1. Add this folder ('MATLAB') to the MATLAB path. Subfolders not necessary.
-2. Run 'PulsePal'. 
+If using the modern interface
+1. Add this folder ('MATLAB') to the MATLAB path.
+2. Run P = PulsePalDevice('COM3'); % Replace COM3 with the correct USB serial port name
 
-
-If you are on Windows XP, or if you have trouble starting Pulse Pal, determine which serial port Pulse Pal is on and initialize as:
-PulsePal('mySerialPort') where mySerialPort is a string (e.g. COM3 on windows, /dev/TTYACM0 on linux). 
+If using the Legacy interface
+2. Add /Legacy/ to the MATLAB path. Subfolders are not necessary.
+3. Run 'PulsePal'
