@@ -295,7 +295,7 @@ volatile boolean usbLoadFlag = 0;
 union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
     byte byteArray[4];
     uint16_t uint16;
-    uint16_t uint32;
+    uint32_t uint32;
 } typeCast; // Union allows faster type conversion than a bit-shift macro
 
 void setup() {
@@ -1517,7 +1517,7 @@ void UpdateSettingsMenu() {
               for (int i = 5; i<16; i++) {
                 candidateSettingsFileChar[i] = 32;
               }
-              
+              LCD_noCursor();
               LCD_setCursor(0, 1); LCD_print("                ");
               delayMicroseconds(100000);
               write2Screen("<Click to save >", candidateSettingsFileChar);
