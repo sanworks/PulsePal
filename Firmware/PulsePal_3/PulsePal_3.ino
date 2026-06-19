@@ -222,7 +222,7 @@ uint8_t buf4[4];
 String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
 byte settingsFileNameLength = 0; // Set when a new file name is entered
 char currentSettingsFileNameChar[100]; // Filename must be converted from string to character array for use with sdFAT
-char candidateSettingsFileChar[16];
+char candidateSettingsFileChar[17];
 byte settingsOp = 0; // Reports whether to load an existing settings file, or create/overwrite, or delete
 byte validProgram = 0; // Reports whether the program just loaded from the SD card is valid 
 uint16_t myFilePos = 2; // Index of current file position in folder. 0 and 1 are . and ..
@@ -269,9 +269,9 @@ unsigned int UserValue = 0; // The current value displayed on a list of values (
   char DefaultCommanderString[16] = " PULSE PAL v3.0"; // The CommanderString can be overwritten. This stores the original.
 #endif
 char ClientStringSuffix[11] = " Connected"; // Displayed after 6-character client ID string (as in, "MATLAB Connected")
-char centeredText[16] = {0}; // Global for returning centered text to display on a 16-char screen line
+char centeredText[17] = {0}; // Global for returning centered text to display on a 16-char screen line
 byte fileNameOffset = 0; // Offset of centered string (for display on 16-char screen)
-char tempText[16] = {0}; // Temporary buffer for holding a file name or other text
+char tempText[17] = {0}; // Temporary buffer for holding a file name or other text
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
 uint32_t PulseTrainDuration_ExamplePulse[4] = {0};
 
