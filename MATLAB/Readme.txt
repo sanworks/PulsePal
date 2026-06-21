@@ -1,6 +1,6 @@
-***MATLAB Interface for Pulse Pal***
+***MATLAB Control Interface for Pulse Pal***
 
-There are two interfaces in this folder:
+There are two control interfaces in this folder:
 1. @PulsePalDevice, a modern object-oriented interface
 2. /Legacy/, the original interface.
 
@@ -14,3 +14,7 @@ If using the modern interface
 If using the Legacy interface
 2. Add /Legacy/ to the MATLAB path. Subfolders are not necessary.
 3. Run 'PulsePal'
+
+***MATLAB Firmware Load Tool for Pulse Pal***
+
+To load firmware to the device, add the 'Firmware' folder to the MATLAB path and run: LoadPulsePalFirmware;
