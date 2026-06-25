@@ -43,7 +43,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 
 // Validate setup macros
 #if (HARDWARE_VERSION < 2) || (HARDWARE_VERSION > 3)
@@ -410,6 +410,7 @@ void loop() {
           PPUSB.writeByte(75); // Send 'K' (as in ok)
           PPUSB.writeUint32(FIRMWARE_VERSION); // Send the firmware version as a 4 byte unsigned integer
           ConnectedToApp = 1;
+          inMenu = 0;
         } break;
         case 73: { // Program the module - legacy method for backwards compatability. See op 92 for the more efficient method used by the current Python and MATLAB classes
           for (int x = 0; x < 4; x++) { // Read timing parameters (4 byte integers)
