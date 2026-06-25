@@ -66,7 +66,7 @@ P.set_output_param('phase1_duration', 2, pulseWidth)  # Set correct pulse width 
 
 # Soft-triggering output channels
 
-P.trigger_output_channels(1, 1, 0, 1)  # Soft-trigger channels 1, 2 and 4
+P.trigger_outputs([1,2,4])  # Soft-trigger channels 1, 2 and 4
 
 # Soft-abort ongoing pulse trains
 time.sleep(3)  # Allow pulse trains to play for a while

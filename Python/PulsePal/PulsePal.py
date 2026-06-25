@@ -22,6 +22,7 @@ from decimal import Decimal
 import math
 import numbers
 import struct
+import time
 
 import numpy as np
 import serial
@@ -304,6 +305,54 @@ class PulsePalDevice:
             self._sync_all_params_legacy()
         self._read_ack("sync_to_device()")
 
+    def sync_from_device(self):
+        """Import all parameters currently stored on a firmware-v22+ device."""
+        self._require_firmware(22, "sync_from_device()")
+        self._write_serial((self.OP_MENU_BYTE, 93), "uint8")
+        for attr_name in (
+                "phase1_duration",
+                "inter_phase_interval",
+                "phase2_duration",
+                "inter_pulse_interval",
+                "burst_duration",
+                "inter_burst_interval",
+                "pulse_train_duration",
+                "pulse_train_delay",
+        ):
+            setattr(
+                self,
+                attr_name,
+                [float("nan")]
+                + [self._cycles_to_seconds(x) for x in self._read_serial(4, "uint32")],
+            )
+
+        for attr_name in (
+                "phase1_voltage",
+                "phase2_voltage",
+                "resting_voltage",
+        ):
+            setattr(
+                self,
+                attr_name,
+                [float("nan")]
+                + [self._bits_to_volts(x) for x in self._read_serial(4, "uint16")],
+            )
+
+        for attr_name in (
+                "is_biphasic",
+                "custom_train_id",
+                "custom_train_target",
+                "custom_train_loop",
+                "link_trigger_channel1",
+                "link_trigger_channel2",
+        ):
+            setattr(
+                self,
+                attr_name,
+                [float("nan")] + self._read_serial(4, "uint8"),
+            )
+        self.trigger_mode = [float("nan")] + self._read_serial(2, "uint8")
+
     def send_custom_pulse_train(
         self,
         custom_train_id,
@@ -403,32 +452,147 @@ class PulsePalDevice:
             "uint8",
         )
 
-    def trigger_output_channels(
+    def trigger_outputs(
         self,
-        channel1,
-        channel2,
-        channel3,
-        channel4,
+        channel1=None,
+        channel2=None,
+        channel3=None,
+        channel4=None,
     ):
         """Trigger output channels on the PulsePal device.
 
+        This method accepts three input schemes:
+        1. Four logicals representing the state of channels 1 to 4.
+           (e.g., `trigger_output_channels(1, 0, 1, 0)`)
+        2. A single integer specifying a single channel to trigger.
+           (e.g., `trigger_output_channels(3)`)
+        3. A list of integers specifying multiple channels to trigger.
+           (e.g., `trigger_output_channels([1, 4])`)
+
         Args:
-            channel1: ``1`` to trigger channel 1, otherwise ``0``.
+            channel1: Logical for channel 1, OR a single int channel ID, OR a list of channel IDs.
             channel2: ``1`` to trigger channel 2, otherwise ``0``.
             channel3: ``1`` to trigger channel 3, otherwise ``0``.
             channel4: ``1`` to trigger channel 4, otherwise ``0``.
         """
-        trigger_byte = (
-            (1 * channel1)
-            + (2 * channel2)
-            + (4 * channel3)
-            + (8 * channel4)
-        )
+        trigger_byte = 0
+
+        # Options 2 & 3: Only one argument was provided
+        if channel2 is None and channel3 is None and channel4 is None:
+            # Option 2: Single integer
+            if isinstance(channel1, int):
+                channels_to_trigger = [channel1]
+            # Option 3: List/Tuple of integers
+            elif isinstance(channel1, (list, tuple, set)):
+                channels_to_trigger = channel1
+            else:
+                channels_to_trigger = []
+
+            # Use bitwise shifts to calculate the trigger byte (ch1=bit0, ch2=bit1, etc.)
+            for ch in channels_to_trigger:
+                if 1 <= ch <= 4:
+                    trigger_byte |= (1 << (ch - 1))
+
+        # Option 1: Original input scheme (logicals for each channel)
+        else:
+            # Fallback to 0 if an argument was omitted via kwargs
+            c1 = channel1 if channel1 is not None else 0
+            c2 = channel2 if channel2 is not None else 0
+            c3 = channel3 if channel3 is not None else 0
+            c4 = channel4 if channel4 is not None else 0
+
+            trigger_byte = (
+                (1 * c1)
+                + (2 * c2)
+                + (4 * c3)
+                + (8 * c4)
+            )
+
         self._write_serial((self.OP_MENU_BYTE, 77, trigger_byte), "uint8")
+
+    def sd_settings(self, settings_file_name, op):
+        """Save, load, or delete settings on the device's MicroSD card.
+
+        Args:
+            settings_file_name: Settings filename including extension.
+            op: ``"save"``, ``"load"``, or ``"delete"``.
+        """
+        if ".pps" not in settings_file_name:
+            raise PulsePalError("Error: The file name must have a valid .pps extension.")
+        op_byte_by_name = {"save": 1, "load": 2, "delete": 3}
+        try:
+            op_byte = op_byte_by_name[str(op).lower()]
+        except KeyError as exc:
+            raise PulsePalError("File op must be: 'save', 'load' or 'delete'.") from exc
+
+        filename_bytes = settings_file_name.encode("ascii")
+        if len(filename_bytes) > 15:
+            raise PulsePalError("settings_file_name is too long.")
+        self._write_serial(
+            (self.OP_MENU_BYTE, 90, op_byte, len(filename_bytes)),
+            "uint8",
+            list(filename_bytes),
+            "uint8",
+        )
+        if op_byte == 2:
+            time.sleep(0.1)
+            self.sync_from_device()
 
     def stop(self):
         """Stop all pulse trains currently being output by PulsePal."""
         self._write_serial((self.OP_MENU_BYTE, 80), "uint8")
+
+    def format_microsd(self, timeout=30):
+        """Format the device MicroSD card on hardware v3 or newer.
+
+        This erases settings files stored on the device and resets parameters
+        to defaults. The user is prompted interactively before formatting.
+
+        Args:
+            timeout: Seconds to wait for the device's completion message.
+
+        Returns:
+            None
+        """
+        if self.hardware_version < 3:
+            raise PulsePalError("format_microsd() requires hardware v3 or newer.")
+
+        print("*** Pulse Pal microSD Formatter ***")
+        print("This will format Pulse Pal's microSD card,")
+        print("erase all settings files on the device")
+        print("and reset all parameters to defaults.")
+
+        reply = input("Do you want to continue (y/n)")
+
+        if reply.strip().lower() != "y":
+            print("Choice confirmed - microSD Card NOT formatted.")
+            return ""
+
+        self._write_serial((self.OP_MENU_BYTE, 97), "uint8")
+
+        start = time.time()
+        message = bytearray()
+
+        while time.time() - start < timeout:
+            n_waiting = self.bytes_available()
+            if n_waiting:
+                message.extend(self.port.read(n_waiting))
+                if ord("!") in message:
+                    break
+            time.sleep(0.01)
+        raw_message = bytes(message)
+        flag_index = raw_message.find(b"!")
+        if flag_index >= 0:
+            displayed_message = raw_message[:flag_index]
+        else:
+            displayed_message = raw_message
+
+        text = displayed_message.decode("ascii", errors="replace").rstrip()
+        if text:
+            print(text)
+
+        self.set_default_params()
+        return None
 
     def close(self, send_disconnect=True):
         """Close the serial connection to PulsePal."""
@@ -597,21 +761,42 @@ class PulsePalDevice:
 
     def _volts_to_bits(self, value):
         """Convert -10 V to +10 V to the corresponding DAC bit value."""
-        normalized_voltage = self._to_decimal(value) + 10
-        normalized_range = self._to_decimal(20)
-        bit_value = (
-            normalized_voltage
-            / normalized_range
-            * self._dac_bit_max
-        )
-        return int(math.ceil(bit_value))
+        normalized = (float(value) + 10) / 20
+        bit_max = int(self._dac_bit_max)
+        return int(min(max(round(normalized * bit_max), 0), bit_max))
+
+    def _bits_to_volts(self, value):
+        """Convert a DAC code to volts, snapping clean values within 1 LSB."""
+        bit_max = int(self._dac_bit_max)
+        raw_volts = (float(value) / bit_max * 20) - 10
+
+        # Calculate the voltage of 1 bit
+        lsb_volts = 20.0 / bit_max
+
+        # Find the nearest clean 3-decimal number (e.g. 5.000, 4.255)
+        clean_volts = round(raw_volts, 3)
+
+        # If the raw voltage is within 1 bit of the clean voltage, snap to it
+        if abs(raw_volts - clean_volts) <= lsb_volts:
+            return clean_volts
+
+        # Otherwise, return the standard 4-decimal reading
+        return round(raw_volts, 4)
 
     def _seconds_to_cycles(self, value):
         """Convert seconds to the corresponding refresh-cycle count."""
-        return int(
-            self._to_decimal(value)
-            * self._to_decimal(self.cycle_frequency)
-        )
+        return int(round(float(value) * float(self.cycle_frequency)))
+
+    def _cycles_to_seconds(self, value):
+        """Convert hardware timer cycle counts to seconds."""
+        return float(value) / float(self.cycle_frequency)
+
+    def _require_firmware(self, minimum_version, context):
+        if self.firmware_version is None or self.firmware_version < minimum_version:
+            raise PulsePalError(
+                f"{context} requires firmware v{minimum_version} or newer. "
+                f"Detected firmware is v{self.firmware_version}."
+            )
 
     def _sync_all_params(self):
 
