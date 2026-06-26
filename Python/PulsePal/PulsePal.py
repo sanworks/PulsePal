@@ -19,7 +19,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 from decimal import Decimal
-import math
+from dataclasses import dataclass
 import numbers
 import struct
 import time
@@ -31,20 +31,30 @@ import serial
 class PulsePalError(Exception):
     """Raised when PulsePal communication or configuration fails."""
 
+@dataclass
+class DeviceInfo:
+    output_parameter_names: list = None
+    trigger_parameter_names: list = None
+    firmware_version: int = None
+    hardware_version: int = None
+    max_custom_pulses: int = None
+    n_custom_pulse_trains: int = None
+    cycle_frequency: float = None
+    cycle_period_us: float = None
+
 
 class PulsePalDevice:
     """Interface to PulsePal device"""
 
-    CURRENT_FIRMWARE_VERSION = 22
-    OLDEST_FIRMWARE_SUPPORTED = 21
+    _CURRENT_FIRMWARE_VERSION = 22
 
-    OP_MENU_BYTE = 213
-    HANDSHAKE_OPCODE = 72
-    HANDSHAKE_RESPONSE = 75
-    DAC_BITMAX = 65535
+    _OP_MENU_BYTE = 213
+    _HANDSHAKE_OPCODE = 72
+    _HANDSHAKE_RESPONSE = 75
+    _DAC_BITMAX = 65535
+    _OLDEST_FIRMWARE_SUPPORTED = 21
 
-
-    OUTPUT_PARAMETER_NAMES = (
+    _OUTPUT_PARAMETER_NAMES = (
         "is_biphasic",
         "phase1_voltage",
         "phase2_voltage",
@@ -63,7 +73,7 @@ class PulsePalDevice:
         "custom_train_loop",
         "resting_voltage",
     )
-    TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
+    _TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
 
     _OUTPUT_PARAMETER_ATTRS = {
         1: "is_biphasic",
@@ -117,6 +127,7 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If connection initialization fails.
         """
+        self.info = DeviceInfo()
         self.port = serial.Serial(
             port_name,
             baud_rate,
@@ -125,61 +136,61 @@ class PulsePalDevice:
         )
         self._closed = False
         self._dac_bit_max = self._to_decimal(0)
-        self.firmware_version = None
-        self.hardware_version = None
-        self.output_parameter_names = list(self.OUTPUT_PARAMETER_NAMES)
-        self.trigger_parameter_names = list(self.TRIGGER_PARAMETER_NAMES)
+        self.info.firmware_version = None
+        self.info.hardware_version = None
+        self.info.output_parameter_names = list(self._OUTPUT_PARAMETER_NAMES)
+        self.info.trigger_parameter_names = list(self._TRIGGER_PARAMETER_NAMES)
 
         self._write_serial(
-            (self.OP_MENU_BYTE, self.HANDSHAKE_OPCODE),
+            (self._OP_MENU_BYTE, self._HANDSHAKE_OPCODE),
             "uint8",
         )
         handshake = self._read_serial(1, "uint8")
-        if handshake != self.HANDSHAKE_RESPONSE:
+        if handshake != self._HANDSHAKE_RESPONSE:
             self.close(send_disconnect=False)
             raise PulsePalError(
                 "Error: incorrect handshake returned. Expected "
-                f"{self.HANDSHAKE_RESPONSE}, received {handshake}."
+                f"{self._HANDSHAKE_RESPONSE}, received {handshake}."
             )
 
         firmware_version = self._read_serial(1, "uint32")
-        if firmware_version < self.OLDEST_FIRMWARE_SUPPORTED:
+        if firmware_version < self._OLDEST_FIRMWARE_SUPPORTED:
             raise PulsePalError(
                 "Error: Old firmware detected, v"
-                f"{firmware_version}. v{self.OLDEST_FIRMWARE_SUPPORTED} or newer is required."
+                f"{firmware_version}. v{self._OLDEST_FIRMWARE_SUPPORTED} or newer is required."
             )
-        if firmware_version > self.CURRENT_FIRMWARE_VERSION:
+        if firmware_version > self._CURRENT_FIRMWARE_VERSION:
             raise PulsePalError(
                 "Error: Future firmware detected, v"
                 f"{firmware_version}. Please update PulsePal.py or downgrade firmware to v"
-                f"{self.CURRENT_FIRMWARE_VERSION}."
+                f"{self._CURRENT_FIRMWARE_VERSION}."
             )
-        if firmware_version < self.CURRENT_FIRMWARE_VERSION:
+        if firmware_version < self._CURRENT_FIRMWARE_VERSION:
             print(
                 "Old firmware detected, v"
                 f"{firmware_version}. This firmware is supported. Update to v"
-                f"{self.CURRENT_FIRMWARE_VERSION} is available."
+                f"{self._CURRENT_FIRMWARE_VERSION} is available."
             )
-        self._dac_bit_max = self._to_decimal(self.DAC_BITMAX)
-        self.firmware_version = firmware_version
+        self._dac_bit_max = self._to_decimal(self._DAC_BITMAX)
+        self.info.firmware_version = firmware_version
 
-        if self.firmware_version > 21:
-            self._write_serial((self.OP_MENU_BYTE, 94), "uint8")
-            self.hardware_version = self._read_serial(1, "uint8")
-            self.cycle_period_us = self._read_serial(1, "uint32")
-            self.cycle_frequency = 1 / (self.cycle_period_us / 1000000)
-            self.n_custom_pulse_trains = self._read_serial(1, "uint8")
-            self.max_custom_pulses = self._read_serial(1, "uint32")
+        if self.info.firmware_version > 21:
+            self._write_serial((self._OP_MENU_BYTE, 94), "uint8")
+            self.info.hardware_version = self._read_serial(1, "uint8")
+            self.info.cycle_period_us = self._read_serial(1, "uint32")
+            self.info.cycle_frequency = 1 / (self.info.cycle_period_us / 1000000)
+            self.info.n_custom_pulse_trains = self._read_serial(1, "uint8")
+            self.info.max_custom_pulses = self._read_serial(1, "uint32")
         else:
-            self.hardware_version = 2
-            self.cycle_period_us = 50
-            self.cycle_frequency = 20000
-            self.n_custom_pulse_trains = 2
-            self.max_custom_pulses = 5000
+            self.info.hardware_version = 2
+            self.info.cycle_period_us = 50
+            self.info.cycle_frequency = 20000
+            self.info.n_custom_pulse_trains = 2
+            self.info.max_custom_pulses = 5000
 
         # Client name op + "PYTHON" in ASCII.
         self._write_serial(
-            (self.OP_MENU_BYTE, 89, 80, 89, 84, 72, 79, 78),
+            (self._OP_MENU_BYTE, 89, 80, 89, 84, 72, 79, 78),
             "uint8",
         )
 
@@ -220,7 +231,7 @@ class PulsePalDevice:
         """
         voltage_bits = self._volts_to_bits(voltage)
         self._write_serial(
-            (self.OP_MENU_BYTE, 79, channel),
+            (self._OP_MENU_BYTE, 79, channel),
             "uint8",
             voltage_bits,
             "uint16",
@@ -246,21 +257,21 @@ class PulsePalDevice:
         if param_code in (2, 3, 17):
             value = self._volts_to_bits(value)
             self._write_serial(
-                (self.OP_MENU_BYTE, 74, param_code, channel),
+                (self._OP_MENU_BYTE, 74, param_code, channel),
                 "uint8",
                 value,
                 "uint16",
             )
         elif 4 <= param_code <= 11:
             self._write_serial(
-                (self.OP_MENU_BYTE, 74, param_code, channel),
+                (self._OP_MENU_BYTE, 74, param_code, channel),
                 "uint8",
                 self._seconds_to_cycles(value),
                 "uint32",
             )
         else:
             self._write_serial(
-                (self.OP_MENU_BYTE, 74, param_code, channel, value),
+                (self._OP_MENU_BYTE, 74, param_code, channel, value),
                 "uint8",
             )
 
@@ -282,7 +293,7 @@ class PulsePalDevice:
         param_code = self._get_trigger_param_code(param_name)
 
         self._write_serial(
-            (self.OP_MENU_BYTE, 74, param_code, channel, value),
+            (self._OP_MENU_BYTE, 74, param_code, channel, value),
             "uint8",
         )
         self._read_ack("program_trigger_channel_param()")
@@ -299,7 +310,7 @@ class PulsePalDevice:
 
         """_sync_all_params() for firmware v22+ uses the newer packed sync opcode (92)
         _sync_all_params_legacy() uses the less efficient legacy packed sync opcode (73)."""
-        if self.firmware_version > 21:
+        if self.info.firmware_version > 21:
             self._sync_all_params()
         else:
             self._sync_all_params_legacy()
@@ -308,7 +319,7 @@ class PulsePalDevice:
     def sync_from_device(self):
         """Import all parameters currently stored on a firmware-v22+ device."""
         self._require_firmware(22, "sync_from_device()")
-        self._write_serial((self.OP_MENU_BYTE, 93), "uint8")
+        self._write_serial((self._OP_MENU_BYTE, 93), "uint8")
         for attr_name in (
                 "phase1_duration",
                 "inter_phase_interval",
@@ -388,7 +399,7 @@ class PulsePalDevice:
 
         op_code = int(custom_train_id) + 74
         self._write_serial(
-            (self.OP_MENU_BYTE, op_code),
+            (self._OP_MENU_BYTE, op_code),
             "uint8",
             n_pulses,
             "uint32",
@@ -429,7 +440,7 @@ class PulsePalDevice:
 
         op_code = int(custom_train_id) + 74
         self._write_serial(
-            (self.OP_MENU_BYTE, op_code),
+            (self._OP_MENU_BYTE, op_code),
             "uint8",
             n_pulses,
             "uint32",
@@ -448,11 +459,11 @@ class PulsePalDevice:
             state: ``1`` for continuous loop, ``0`` for normal mode.
         """
         self._write_serial(
-            (self.OP_MENU_BYTE, 82, channel, state),
+            (self._OP_MENU_BYTE, 82, channel, state),
             "uint8",
         )
 
-    def trigger_outputs(
+    def trigger(
         self,
         channel1=None,
         channel2=None,
@@ -462,12 +473,12 @@ class PulsePalDevice:
         """Trigger output channels on the PulsePal device.
 
         This method accepts three input schemes:
-        1. Four logicals representing the state of channels 1 to 4.
-           (e.g., `trigger_output_channels(1, 0, 1, 0)`)
+        1. Four logicals representing whether to trigger channels 1 to 4.
+           (e.g., `trigger(1, 0, 1, 0)`)
         2. A single integer specifying a single channel to trigger.
-           (e.g., `trigger_output_channels(3)`)
+           (e.g., `trigger(3)`)
         3. A list of integers specifying multiple channels to trigger.
-           (e.g., `trigger_output_channels([1, 4])`)
+           (e.g., `trigger([1, 4])`)
 
         Args:
             channel1: Logical for channel 1, OR a single int channel ID, OR a list of channel IDs.
@@ -508,7 +519,7 @@ class PulsePalDevice:
                 + (8 * c4)
             )
 
-        self._write_serial((self.OP_MENU_BYTE, 77, trigger_byte), "uint8")
+        self._write_serial((self._OP_MENU_BYTE, 77, trigger_byte), "uint8")
 
     def sd_settings(self, settings_file_name, op):
         """Save, load, or delete settings on the device's MicroSD card.
@@ -529,7 +540,7 @@ class PulsePalDevice:
         if len(filename_bytes) > 15:
             raise PulsePalError("settings_file_name is too long.")
         self._write_serial(
-            (self.OP_MENU_BYTE, 90, op_byte, len(filename_bytes)),
+            (self._OP_MENU_BYTE, 90, op_byte, len(filename_bytes)),
             "uint8",
             list(filename_bytes),
             "uint8",
@@ -540,7 +551,7 @@ class PulsePalDevice:
 
     def stop(self):
         """Stop all pulse trains currently being output by PulsePal."""
-        self._write_serial((self.OP_MENU_BYTE, 80), "uint8")
+        self._write_serial((self._OP_MENU_BYTE, 80), "uint8")
 
     def format_microsd(self, timeout=30):
         """Format the device MicroSD card on hardware v3 or newer.
@@ -554,7 +565,7 @@ class PulsePalDevice:
         Returns:
             None
         """
-        if self.hardware_version < 3:
+        if self.info.hardware_version < 3:
             raise PulsePalError("format_microsd() requires hardware v3 or newer.")
 
         print("*** Pulse Pal microSD Formatter ***")
@@ -568,7 +579,7 @@ class PulsePalDevice:
             print("Choice confirmed - microSD Card NOT formatted.")
             return ""
 
-        self._write_serial((self.OP_MENU_BYTE, 97), "uint8")
+        self._write_serial((self._OP_MENU_BYTE, 97), "uint8")
 
         start = time.time()
         message = bytearray()
@@ -601,7 +612,7 @@ class PulsePalDevice:
 
         try:
             if send_disconnect and self.port and self.port.is_open:
-                self._write_serial((self.OP_MENU_BYTE, 81), "uint8")
+                self._write_serial((self._OP_MENU_BYTE, 81), "uint8")
         finally:
             if self.port and self.port.is_open:
                 self.port.close()
@@ -614,7 +625,7 @@ class PulsePalDevice:
     def _get_output_param_code(self, param_name):
         if isinstance(param_name, str):
             try:
-                return self.output_parameter_names.index(param_name) + 1
+                return self.info.output_parameter_names.index(param_name) + 1
             except ValueError as exc:
                 raise PulsePalError(
                     f"Unknown output parameter: {param_name}."
@@ -624,7 +635,7 @@ class PulsePalDevice:
     def _get_trigger_param_code(self, param_name):
         if isinstance(param_name, str):
             try:
-                return self.trigger_parameter_names.index(param_name) + 128
+                return self.info.trigger_parameter_names.index(param_name) + 128
             except ValueError as exc:
                 raise PulsePalError(
                     f"Unknown trigger parameter: {param_name}."
@@ -785,17 +796,17 @@ class PulsePalDevice:
 
     def _seconds_to_cycles(self, value):
         """Convert seconds to the corresponding refresh-cycle count."""
-        return int(round(float(value) * float(self.cycle_frequency)))
+        return int(round(float(value) * float(self.info.cycle_frequency)))
 
     def _cycles_to_seconds(self, value):
         """Convert hardware timer cycle counts to seconds."""
-        return float(value) / float(self.cycle_frequency)
+        return float(value) / float(self.info.cycle_frequency)
 
     def _require_firmware(self, minimum_version, context):
-        if self.firmware_version is None or self.firmware_version < minimum_version:
+        if self.info.firmware_version is None or self.info.firmware_version < minimum_version:
             raise PulsePalError(
                 f"{context} requires firmware v{minimum_version} or newer. "
-                f"Detected firmware is v{self.firmware_version}."
+                f"Detected firmware is v{self.info.firmware_version}."
             )
 
     def _sync_all_params(self):
@@ -842,7 +853,7 @@ class PulsePalDevice:
         single_byte_values.extend(int(value) for value in self.trigger_mode[1:3])
 
         self._write_serial(
-            (self.OP_MENU_BYTE, 92),
+            (self._OP_MENU_BYTE, 92),
             "uint8",
             time_values,
             "uint32",
@@ -901,7 +912,7 @@ class PulsePalDevice:
             position += 1
 
         self._write_serial(
-            (self.OP_MENU_BYTE, 73),
+            (self._OP_MENU_BYTE, 73),
             "uint8",
             program_values_32,
             "uint32",

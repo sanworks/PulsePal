@@ -28,9 +28,9 @@ import math
 import time
 
 # Initializing PulsePal
-P = PulsePalDevice('COM13')  # Create a new instance of a PulsePal object (set this to your USB serial port)
-print("Hardware Version: " + str(P.hardware_version))  # Print hardware version to the console
-print("Firmware Version: " + str(P.firmware_version))  # Print firmware version to the console
+P = PulsePalDevice('COM14')  # Create a new instance of a PulsePal object (set this to your USB serial port)
+print("Hardware Version: " + str(P.info.hardware_version))  # Print hardware version to the console
+print("Firmware Version: " + str(P.info.firmware_version))  # Print firmware version to the console
 
 # Examples of programming individual output channel parameters
 P.set_output_param('is_biphasic', 1, 1)  # Program output channel 1 to use biphasic pulses
@@ -66,7 +66,7 @@ P.set_output_param('phase1_duration', 2, pulseWidth)  # Set correct pulse width 
 
 # Soft-triggering output channels
 
-P.trigger_outputs([1,2,4])  # Soft-trigger channels 1, 2 and 4
+P.trigger([1,2,4])  # Trigger channels 1, 2 and 4
 
 # Soft-abort ongoing pulse trains
 time.sleep(3)  # Allow pulse trains to play for a while
