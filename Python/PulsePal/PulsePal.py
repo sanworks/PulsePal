@@ -238,6 +238,31 @@ class PulsePalDevice:
         )
         self._read_ack("set_fixed_voltage()")
 
+    def set_calibration(self, channel, voltage_offset):
+        """Set a voltage offset on each channel. The offset is
+           stored in the device's EEPROM and loaded on boot.
+
+            Args:
+                channel: A Pulse Pal output channel (1, 2, 3 or 4)
+                voltage_offset: The voltage offset in range [-0.1, 0.1]. Units = volts
+        """
+        if self.info.hardware_version < 3:
+            raise PulsePalError("set_calibration() requires hardware v3 or newer.")
+        if channel not in (1, 2, 3, 4):
+            raise ValueError("channel must be 1, 2, 3 or 4")
+        if voltage_offset < -0.1 or voltage_offset > 0.1:
+            raise ValueError(
+                "voltage_offset for zero code calibration must be in range [-0.1, 0.1]"
+            )
+        voltage_bits = voltage_offset*(1/(20/65536))
+        self._write_serial(
+            (self._OP_MENU_BYTE, 96, channel-1),
+            "uint8",
+            voltage_bits,
+            "int16",
+        )
+        self._read_ack("set_calibration()")
+
     def set_output_param(self, param_name, channel, value):
         """Program a parameter for an output channel.
 
@@ -930,10 +955,19 @@ class PulsePalDevice:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self._write_serial((self._OP_MENU_BYTE, 81),"uint8")
+        except:
+            pass
         self.close()
         return False
 
     def __del__(self):
+        try:
+            self._write_serial((self._OP_MENU_BYTE, 81),"uint8")
+        except:
+            pass
+
         try:
             self.close()
         except Exception:

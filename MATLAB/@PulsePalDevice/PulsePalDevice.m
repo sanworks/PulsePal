@@ -198,7 +198,7 @@ classdef PulsePalDevice < handle
             obj.confirmWrite;
         end
 
-        function setZeroCodeCalibration(obj, channel, voltageOffset)
+        function setCalibration(obj, channel, voltageOffset)
             if obj.firmwareVersion > 21
                 % Sets a calibration to correct for DAC zero code error on a single channel.
                 % Calibration is stored to EEPROM and loaded on all future boots.
