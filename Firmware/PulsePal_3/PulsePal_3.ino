@@ -39,15 +39,25 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
 // You can install it from within Arduino IDE by searching for u8g2 in the Library manager. 
 // You can also download it from here: https://github.com/olikraus/U8g2_Arduino
+//
+// !!! To work on Teensy, a mod to u8g2/u8x8lib.cpp is required !!!
+// In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
 
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+
+#define PIN_MAP_VERSION 0 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+ 
+                          // PIN_MAP_VERSION Does not affect hardware v2.X.
 
 // Validate setup macros
 #if (HARDWARE_VERSION < 2) || (HARDWARE_VERSION > 3)
 #error Error! HARDWARE_VERSION must be either 2 or 3
+#endif
+
+#if (PIN_MAP_VERSION < 0) || (PIN_MAP_VERSION > 1)
+#error Error! PIN_MAP_VERSION must be either 0 or 1
 #endif
 
 #include "SdFat.h"
@@ -101,24 +111,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #else
   ArCOM PPUSB(Serial); // Initialize ArCOM USB serial wrapper
   // initialize u8g2 graphics library with the numbers of the interface pins
+
+  // --- Pin map, to define connections of IC pins ---
   #define CS 17
   #define DC 37
   #define RST 16
+  byte TriggerLines[2] = {2,3}; // Trigger channels 1 and 2
+  byte InputLEDLines[2] = {1, 4}; // LEDs above trigger channels 1-2.
+  byte ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
+  byte ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
+  byte pcbVersionMap[5] = {18,19,20,21,22}; // Teensy pins that are grounded to encode the PCB minor version in binary
+  byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
+  
+  #if (PIN_MAP_VERSION == 0) // PP3 PCB v 3.0.4 and older
+    byte OutputLEDLines[4] = {24,28,29,30}; // LEDs above output channels 1-4
+    byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
+    byte SyncPin=14; // AD5724 Pin 7 (Sync)
+    byte LDACPin=39; // AD5724 Pin 10 (LDAC)
+  #elif (PIN_MAP_VERSION == 1) // PP3 PCB v 3.0.5 and newer
+    byte OutputLEDLines[4] = {24,32,33,35}; // LEDs above output channels 1-4
+    byte ClickerButtonLine = 36; // Digital line that reports the thumb joystick click state
+    byte SyncPin=34; // AD5724 Pin 7 (Sync)
+    byte LDACPin=28; // AD5724 Pin 10 (LDAC)
+  #endif
+
+  // Note: SDChipSelect not required for Pulse Pal v3
   // NOTE! To work on Teensy, this requires a mod to u8g2/u8x8lib.cpp! 
   // In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
   U8G2_SSD1322_NHD_128X64_F_2ND_4W_HW_SPI u8g2(U8G2_R0, CS, DC, RST);
   LiquidCrystal_U8G2 lcd(u8g2);
-  byte TriggerLines[2] = {2,3}; // Trigger channels 1 and 2
-
-  byte InputLEDLines[2] = {1, 4}; // LEDs above trigger channels 1-2.
-  byte OutputLEDLines[4] = {24,28,29,30}; // LEDs above output channels 1-4
-  byte ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
-  byte ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
-  byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
-  byte SyncPin=14; // AD5724 Pin 7 (Sync)
-  byte LDACPin=39; // AD5724 Pin 10 (LDAC)
-  byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
-  // Note: SDChipSelect not required for Pulse Pal v3
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
   #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
@@ -326,8 +347,8 @@ void setup() {
   #if (HARDWARE_VERSION == 3)
     u8g2.begin();
     runSplashScreen();
-    u8g2.setContrast(64); // Brightness of oLED display. Use 64 max (of 256) because:
-                          // 1. Higher values can draw too much current from the USB supply. 2. To extend the lifetime of the display
+    u8g2.setContrast(128); // Brightness of oLED display. Use 128 max (of 256) because:
+                          // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
   #endif
   lcd.begin(16, 2);
   lcd.clear();
@@ -639,13 +660,12 @@ void loop() {
               currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
               settingsFile.open(currentSettingsFileNameChar, O_READ);
               confirmBit = 0;
-            } else {
-              sendCurrentParams();
             }
           } else if (settingsOp == 3) { // Delete
             sd.remove(currentSettingsFileNameChar);
           }
           settingsFile.rewind();
+          PPUSB.writeByte(1); // Send confirm byte
         } break;
 
         case 91: { // Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 

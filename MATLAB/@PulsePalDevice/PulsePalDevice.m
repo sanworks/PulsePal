@@ -165,6 +165,9 @@ classdef PulsePalDevice < handle
                 if nargin > 1
                     channels = [channels cell2mat(varargin)];
                 end
+                if ~all(ismember(channels, [1 2 3 4]))
+                    error('All channels must be valid Pulse Pal output channel indexes: 1,2,3 or 4')
+                end
                 ChannelsBinary = zeros(1,4);
                 ChannelsBinary(channels) = 1;
                 TriggerAddress = sum(ChannelsBinary .* [1 2 4 8]);
@@ -177,25 +180,25 @@ classdef PulsePalDevice < handle
             obj.Port.write([obj.OpMenuByte 80], 'uint8');
         end
 
-        function syncToDevice(obj)
+        function confirmed = syncToDevice(obj)
             % If autoSync is off, this will sync all parameters at once.
             if obj.autoSync
                 error('autoSync is set to ''true''. syncToDevice() may be used when autoSync is off.')
             end
-            obj.syncAllParams;
+            confirmed = obj.syncAllParams;
         end
 
-        function syncFromDevice(obj)
-            % Read all parameters from device to the object.
-            obj.importCurrentParamsFromPulsePal;
+        function confirmed = syncFromDevice(obj)
+            % Write all parameters from physical device to the properties of PulsePalDevice.
+            confirmed = obj.importCurrentParamsFromPulsePal;
         end
 
-        function setVoltage(obj, channel, voltage)
+        function confirmed = setVoltage(obj, channel, voltage)
             % Sets a fixed output channel voltage. Channel = 1-4. Voltage = volts (-10 to +10)
             obj.checkParamRange(voltage, 'Volts', [-10 10], 17);
             voltageBits = obj.volts2Bits(voltage);
             obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
-            obj.confirmWrite;
+            confirmed = obj.confirmWrite;
         end
 
         function setCalibration(obj, channel, voltageOffset)
@@ -259,7 +262,7 @@ classdef PulsePalDevice < handle
             obj.autoSync = autoSyncState;
         end
 
-        function sdSettings(obj, settingsFileName, op)
+        function confirmed = sdSettings(obj, settingsFileName, op)
             % Saves, loads or deletes settings. settingsFileName = full
             % path to settings file, incl. extension. op = 'save',
             % 'load', or 'delete'
@@ -280,6 +283,10 @@ classdef PulsePalDevice < handle
             SettingsNameLength = length(settingsFileName);
             Message = [obj.OpMenuByte 90 OpByte SettingsNameLength settingsFileName];
             obj.Port.write(Message, 'uint8');
+            confirmed = 1;
+            if obj.firmwareVersion > 21
+                confirmed = obj.confirmWrite();
+            end
             if OpByte == 2
                 pause(.1);
                 obj.importCurrentParamsFromPulsePal;
@@ -526,11 +533,11 @@ classdef PulsePalDevice < handle
             % Convert serialized hardware timer counts to seconds.
             seconds = double(typecast(uint8(Bytes), 'uint32'))/obj.cycleFrequency;
         end
-        function confirmWrite(obj)
+        function confirmed = confirmWrite(obj)
             % Verify that the device acknowledged a write command.
             confirmed = obj.Port.read(1, 'uint8');
             if confirmed ~= 1
-                error('Error: Pulse Pal did not confirm the parameter change.');
+                error('Error: Pulse Pal did not return an expected byte to confirm the operation.');
             end
         end
 
@@ -623,7 +630,7 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function syncAllParams(obj)
+        function confirmed = syncAllParams(obj)
             %   syncAllParams Encode and transmit the complete parameter set.
             %   Used when autoSync is false to batch all output and trigger parameters
             %   into a single command. This is more efficient than item-wise data transfers.
@@ -657,7 +664,7 @@ classdef PulsePalDevice < handle
             SingleByteParams = [SingleByteOutputParams(1:end) obj.linkTriggerChannel1 obj.linkTriggerChannel2 obj.triggerMode];
             obj.Port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
                 typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
-            obj.confirmWrite;
+            confirmed = obj.confirmWrite;
         end
 
         function sendCustomTrain(obj, trainID, pulseTimes, voltages)
@@ -711,7 +718,7 @@ classdef PulsePalDevice < handle
                 typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
-        function importCurrentParamsFromPulsePal(obj)
+        function confirmed = importCurrentParamsFromPulsePal(obj)
             %   importCurrentParamsFromPulsePal Import all parameters currently stored on the device.
             %   Firmware v22 or newer is required. The method reads the packed parameter
             %   message, decodes times and voltages, and updates object properties while
@@ -720,8 +727,12 @@ classdef PulsePalDevice < handle
                 error(['importCurrentParamsFromPulsePal() requires firmware v22 or newer.'...
                       newline 'Detected firmware is v' num2str(obj.firmwareVersion)])
             end
+            confirmed = false;
             obj.Port.write([obj.OpMenuByte 93], 'uint8');
             Msg = obj.Port.read(178, 'uint8');
+            if length(Msg) == 178
+                confirmed = true;
+            end
             autoSyncState = obj.autoSync;
             obj.autoSync = false;
             Pos = 1;

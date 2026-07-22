@@ -47,6 +47,10 @@ end
 SettingsNameLength = length(SettingsFileName);
 Message = [PulsePalSystem.OpMenuByte 90 OpByte SettingsNameLength SettingsFileName];
 PulsePalSerialInterface('write', Message, 'uint8');
+ConfirmBit = 1;
+if PulsePalSystem.FirmwareVersion > 21
+    ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8');
+end
 CycleFreq = PulsePalSystem.CycleFrequency;
 RegisterBits = PulsePalSystem.RegisterBits;
 maxBits = 2^RegisterBits - 1;
@@ -81,7 +85,7 @@ if strcmp(Op, 'load')
         PulsePalSystem.Params.TriggerMode = Msg(Pos:Pos+1);
     end
 end
-ConfirmBit = 1;
+
 function Seconds = Bytes2Seconds(Bytes, CycleFreq)
 Seconds = double(typecast(uint8(Bytes), 'uint32'))/CycleFreq;
 

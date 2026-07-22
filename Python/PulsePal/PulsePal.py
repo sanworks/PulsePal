@@ -570,6 +570,8 @@ class PulsePalDevice:
             list(filename_bytes),
             "uint8",
         )
+        if self.info.firmware_version > 21:
+            self._read_ack("sd_settings()")
         if op_byte == 2:
             time.sleep(0.1)
             self.sync_from_device()
