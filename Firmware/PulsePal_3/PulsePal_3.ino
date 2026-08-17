@@ -763,6 +763,7 @@ void loop() {
             IsCustomBurstTrain[x] = 0;
            }
            dacValue.uint16[x] = RestingVoltage[x];
+           DACFlags[x] = 1;
          }
          dacWrite();
         } break;

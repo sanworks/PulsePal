@@ -31,6 +31,7 @@ import serial
 class PulsePalError(Exception):
     """Raised when PulsePal communication or configuration fails."""
 
+
 @dataclass
 class DeviceInfo:
     output_parameter_names: list = None
@@ -157,13 +158,14 @@ class PulsePalDevice:
         if firmware_version < self._OLDEST_FIRMWARE_SUPPORTED:
             raise PulsePalError(
                 "Error: Old firmware detected, v"
-                f"{firmware_version}. v{self._OLDEST_FIRMWARE_SUPPORTED} or newer is required."
+                f"{firmware_version}. v{self._OLDEST_FIRMWARE_SUPPORTED} or "
+                "newer is required."
             )
         if firmware_version > self._CURRENT_FIRMWARE_VERSION:
             raise PulsePalError(
                 "Error: Future firmware detected, v"
-                f"{firmware_version}. Please update PulsePal.py or downgrade firmware to v"
-                f"{self._CURRENT_FIRMWARE_VERSION}."
+                f"{firmware_version}. Please update PulsePal.py or downgrade "
+                f"firmware to v{self._CURRENT_FIRMWARE_VERSION}."
             )
         if firmware_version < self._CURRENT_FIRMWARE_VERSION:
             print(
@@ -178,7 +180,9 @@ class PulsePalDevice:
             self._write_serial((self._OP_MENU_BYTE, 94), "uint8")
             self.info.hardware_version = self._read_serial(1, "uint8")
             self.info.cycle_period_us = self._read_serial(1, "uint32")
-            self.info.cycle_frequency = 1 / (self.info.cycle_period_us / 1000000)
+            self.info.cycle_frequency = 1 / (
+                self.info.cycle_period_us / 1000000
+            )
             self.info.n_custom_pulse_trains = self._read_serial(1, "uint8")
             self.info.max_custom_pulses = self._read_serial(1, "uint32")
         else:
@@ -240,23 +244,27 @@ class PulsePalDevice:
 
     def set_calibration(self, channel, voltage_offset):
         """Set a voltage offset on each channel. The offset is
-           stored in the device's EEPROM and loaded on boot.
+        stored in the device's EEPROM and loaded on boot.
 
-            Args:
-                channel: A Pulse Pal output channel (1, 2, 3 or 4)
-                voltage_offset: The voltage offset in range [-0.1, 0.1]. Units = volts
+        Args:
+            channel: A Pulse Pal output channel (1, 2, 3 or 4)
+            voltage_offset: The voltage offset in range [-0.1, 0.1].
+                Units = volts
         """
         if self.info.hardware_version < 3:
-            raise PulsePalError("set_calibration() requires hardware v3 or newer.")
+            raise PulsePalError(
+                "set_calibration() requires hardware v3 or newer."
+            )
         if channel not in (1, 2, 3, 4):
             raise ValueError("channel must be 1, 2, 3 or 4")
         if voltage_offset < -0.1 or voltage_offset > 0.1:
             raise ValueError(
-                "voltage_offset for zero code calibration must be in range [-0.1, 0.1]"
+                "voltage_offset for zero code calibration must be in range "
+                "[-0.1, 0.1]"
             )
-        voltage_bits = voltage_offset*(1/(20/65536))
+        voltage_bits = voltage_offset * (1 / (20 / 65536))
         self._write_serial(
-            (self._OP_MENU_BYTE, 96, channel-1),
+            (self._OP_MENU_BYTE, 96, channel - 1),
             "uint8",
             voltage_bits,
             "int16",
@@ -332,9 +340,9 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If the device does not acknowledge the command.
         """
-
-        """_sync_all_params() for firmware v22+ uses the newer packed sync opcode (92)
-        _sync_all_params_legacy() uses the less efficient legacy packed sync opcode (73)."""
+        # _sync_all_params() for firmware v22+ uses the newer packed sync
+        # opcode (92). _sync_all_params_legacy() uses the less efficient
+        # legacy packed sync opcode (73).
         if self.info.firmware_version > 21:
             self._sync_all_params()
         else:
@@ -359,7 +367,10 @@ class PulsePalDevice:
                 self,
                 attr_name,
                 [float("nan")]
-                + [self._cycles_to_seconds(x) for x in self._read_serial(4, "uint32")],
+                + [
+                    self._cycles_to_seconds(x)
+                    for x in self._read_serial(4, "uint32")
+                ],
             )
 
         for attr_name in (
@@ -371,7 +382,10 @@ class PulsePalDevice:
                 self,
                 attr_name,
                 [float("nan")]
-                + [self._bits_to_volts(x) for x in self._read_serial(4, "uint16")],
+                + [
+                    self._bits_to_volts(x)
+                    for x in self._read_serial(4, "uint16")
+                ],
             )
 
         for attr_name in (
@@ -506,7 +520,8 @@ class PulsePalDevice:
            (e.g., `trigger([1, 4])`)
 
         Args:
-            channel1: Logical for channel 1, OR a single int channel ID, OR a list of channel IDs.
+            channel1: Logical for channel 1, OR a single int channel ID, OR
+                a list of channel IDs.
             channel2: ``1`` to trigger channel 2, otherwise ``0``.
             channel3: ``1`` to trigger channel 3, otherwise ``0``.
             channel4: ``1`` to trigger channel 4, otherwise ``0``.
@@ -524,7 +539,8 @@ class PulsePalDevice:
             else:
                 channels_to_trigger = []
 
-            # Use bitwise shifts to calculate the trigger byte (ch1=bit0, ch2=bit1, etc.)
+            # Use bitwise shifts to calculate the trigger byte
+            # (ch1=bit0, ch2=bit1, etc.)
             for ch in channels_to_trigger:
                 if 1 <= ch <= 4:
                     trigger_byte |= (1 << (ch - 1))
@@ -554,12 +570,16 @@ class PulsePalDevice:
             op: ``"save"``, ``"load"``, or ``"delete"``.
         """
         if ".pps" not in settings_file_name:
-            raise PulsePalError("Error: The file name must have a valid .pps extension.")
+            raise PulsePalError(
+                "Error: The file name must have a valid .pps extension."
+            )
         op_byte_by_name = {"save": 1, "load": 2, "delete": 3}
         try:
             op_byte = op_byte_by_name[str(op).lower()]
         except KeyError as exc:
-            raise PulsePalError("File op must be: 'save', 'load' or 'delete'.") from exc
+            raise PulsePalError(
+                "File op must be: 'save', 'load' or 'delete'."
+            ) from exc
 
         filename_bytes = settings_file_name.encode("ascii")
         if len(filename_bytes) > 15:
@@ -593,7 +613,9 @@ class PulsePalDevice:
             None
         """
         if self.info.hardware_version < 3:
-            raise PulsePalError("format_microsd() requires hardware v3 or newer.")
+            raise PulsePalError(
+                "format_microsd() requires hardware v3 or newer."
+            )
 
         print("*** Pulse Pal microSD Formatter ***")
         print("This will format Pulse Pal's microSD card,")
@@ -662,7 +684,8 @@ class PulsePalDevice:
     def _get_trigger_param_code(self, param_name):
         if isinstance(param_name, str):
             try:
-                return self.info.trigger_parameter_names.index(param_name) + 128
+                index = self.info.trigger_parameter_names.index(param_name)
+                return index + 128
             except ValueError as exc:
                 raise PulsePalError(
                     f"Unknown trigger parameter: {param_name}."
@@ -830,7 +853,10 @@ class PulsePalDevice:
         return float(value) / float(self.info.cycle_frequency)
 
     def _require_firmware(self, minimum_version, context):
-        if self.info.firmware_version is None or self.info.firmware_version < minimum_version:
+        if (
+            self.info.firmware_version is None
+            or self.info.firmware_version < minimum_version
+        ):
             raise PulsePalError(
                 f"{context} requires firmware v{minimum_version} or newer. "
                 f"Detected firmware is v{self.info.firmware_version}."
@@ -873,11 +899,20 @@ class PulsePalDevice:
             "custom_train_loop",
         ):
             single_byte_values.extend(
-                int(getattr(self, attr_name)[channel]) for channel in range(1, 5)
+                int(getattr(self, attr_name)[channel])
+                for channel in range(1, 5)
             )
-        single_byte_values.extend(int(self.link_trigger_channel1[channel]) for channel in range(1, 5))
-        single_byte_values.extend(int(self.link_trigger_channel2[channel]) for channel in range(1, 5))
-        single_byte_values.extend(int(value) for value in self.trigger_mode[1:3])
+        single_byte_values.extend(
+            int(self.link_trigger_channel1[channel])
+            for channel in range(1, 5)
+        )
+        single_byte_values.extend(
+            int(self.link_trigger_channel2[channel])
+            for channel in range(1, 5)
+        )
+        single_byte_values.extend(
+            int(value) for value in self.trigger_mode[1:3]
+        )
 
         self._write_serial(
             (self._OP_MENU_BYTE, 92),
@@ -898,14 +933,22 @@ class PulsePalDevice:
         for channel in range(1, 5):
             program_values_32.extend(
                 [
-                    self._seconds_to_cycles(self.phase1_duration[channel]),
-                    self._seconds_to_cycles(self.inter_phase_interval[channel]),
-                    self._seconds_to_cycles(self.phase2_duration[channel]),
-                    self._seconds_to_cycles(self.inter_pulse_interval[channel]),
-                    self._seconds_to_cycles(self.burst_duration[channel]),
-                    self._seconds_to_cycles(self.inter_burst_interval[channel]),
-                    self._seconds_to_cycles(self.pulse_train_duration[channel]),
-                    self._seconds_to_cycles(self.pulse_train_delay[channel]),
+                    self._seconds_to_cycles(
+                        self.phase1_duration[channel]),
+                    self._seconds_to_cycles(
+                        self.inter_phase_interval[channel]),
+                    self._seconds_to_cycles(
+                        self.phase2_duration[channel]),
+                    self._seconds_to_cycles(
+                        self.inter_pulse_interval[channel]),
+                    self._seconds_to_cycles(
+                        self.burst_duration[channel]),
+                    self._seconds_to_cycles(
+                        self.inter_burst_interval[channel]),
+                    self._seconds_to_cycles(
+                        self.pulse_train_duration[channel]),
+                    self._seconds_to_cycles(
+                        self.pulse_train_delay[channel]),
                 ]
             )
 
@@ -958,16 +1001,16 @@ class PulsePalDevice:
 
     def __exit__(self, exc_type, exc_value, traceback):
         try:
-            self._write_serial((self._OP_MENU_BYTE, 81),"uint8")
-        except:
+            self._write_serial((self._OP_MENU_BYTE, 81), "uint8")
+        except Exception:
             pass
         self.close()
         return False
 
     def __del__(self):
         try:
-            self._write_serial((self._OP_MENU_BYTE, 81),"uint8")
-        except:
+            self._write_serial((self._OP_MENU_BYTE, 81), "uint8")
+        except Exception:
             pass
 
         try:
