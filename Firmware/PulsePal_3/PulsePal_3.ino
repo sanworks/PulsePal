@@ -46,9 +46,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 
-#define PIN_MAP_VERSION 0 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+ 
+#define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+ 
                           // PIN_MAP_VERSION Does not affect hardware v2.X.
 
 // Validate setup macros
@@ -329,6 +329,7 @@ void setup() {
   #if (HARDWARE_VERSION > 2)
     EEPROM.get(0, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
   #endif
+  ProgramDAC(28, 0, 0); // Clear DAC register
   ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
