@@ -129,6 +129,7 @@ class PulsePalDevice:
             PulsePalError: If connection initialization fails.
         """
         self.info = DeviceInfo()
+        self._gui = None
         self.port = serial.Serial(
             port_name,
             baud_rate,
@@ -654,8 +655,49 @@ class PulsePalDevice:
         self.set_default_params()
         return None
 
+    def gui(self, block=None):
+        """Launch the Pulse Pal parameter GUI.
+
+        The GUI edits a local copy of the parameters, and loads them to the
+        device when its 'Load to Device' button is clicked. The window is
+        closed automatically when the device is closed or deleted.
+
+        Args:
+            block: If ``True``, the call returns when the GUI is closed. If
+                ``False``, the call returns immediately, and the host
+                application must run the Tk event loop. If ``None``, the GUI
+                blocks only when the host does not already provide a Tk event
+                loop (e.g. when launched from a script).
+
+        Returns:
+            The PulsePalGUI instance driving the window.
+        """
+        gui = getattr(self, "_gui", None)
+        if gui is not None and not gui.is_closed:
+            gui.focus()
+            return gui
+
+        try:
+            from .PulsePalGUI import PulsePalGUI
+        except ImportError:
+            from PulsePalGUI import PulsePalGUI
+
+        gui = PulsePalGUI(self)
+        self._gui = gui
+        gui.start(block=block)
+        return gui
+
     def close(self, send_disconnect=True):
-        """Close the serial connection to PulsePal."""
+        """Close the serial connection to PulsePal, and the GUI if open."""
+        gui = getattr(self, "_gui", None)
+        self._gui = None
+        if gui is not None:
+            try:
+                gui.close()
+            except Exception:
+                # Cleanup must not raise; Tk may already be torn down
+                pass
+
         if getattr(self, "_closed", True):
             return
 

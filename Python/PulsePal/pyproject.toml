@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["PulsePal"]
+py-modules = ["PulsePal", "PulsePalGUI"]
