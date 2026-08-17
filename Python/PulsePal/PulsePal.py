@@ -655,7 +655,7 @@ class PulsePalDevice:
         self.set_default_params()
         return None
 
-    def gui(self, block=None):
+    def gui(self, block=None, theme=None):
         """Launch the Pulse Pal parameter GUI.
 
         The GUI edits a local copy of the parameters, and loads them to the
@@ -668,12 +668,20 @@ class PulsePalDevice:
                 application must run the Tk event loop. If ``None``, the GUI
                 blocks only when the host does not already provide a Tk event
                 loop (e.g. when launched from a script).
+            theme: ``"light"`` or ``"dark"`` to select the color theme, or
+                ``None`` to match the desktop theme. Passing a theme to an
+                already-open GUI recolors it in place.
 
         Returns:
             The PulsePalGUI instance driving the window.
+
+        Raises:
+            ValueError: If the theme name is not recognized.
         """
         gui = getattr(self, "_gui", None)
         if gui is not None and not gui.is_closed:
+            if theme is not None:
+                gui.set_theme(theme)
             gui.focus()
             return gui
 
@@ -682,7 +690,7 @@ class PulsePalDevice:
         except ImportError:
             from PulsePalGUI import PulsePalGUI
 
-        gui = PulsePalGUI(self)
+        gui = PulsePalGUI(self, theme=theme)
         self._gui = gui
         gui.start(block=block)
         return gui

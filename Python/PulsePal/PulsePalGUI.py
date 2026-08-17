@@ -23,10 +23,98 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import dataclasses
 import json
+import subprocess
 import sys
 import tkinter as tk
 import weakref
 from tkinter import filedialog, messagebox, ttk
+
+# Widget colors for each theme. The light palette matches the platform's
+# native widget colors, so light mode can keep the native ttk theme.
+_PALETTES = {
+    "light": {
+        "bg": "#f0f0f0",
+        "field": "#ffffff",
+        "fg": "#000000",
+        "disabled_fg": "#6d6d6d",
+        "disabled_field": "#f0f0f0",
+        "select_bg": "#0078d7",
+        "select_fg": "#ffffff",
+        "border": "#a0a0a0",
+        "button": "#e1e1e1",
+        "active": "#cce4f7",
+        "tooltip_bg": "#ffffe0",
+        "tooltip_fg": "#000000",
+    },
+    "dark": {
+        "bg": "#2b2b2b",
+        "field": "#3c3f41",
+        "fg": "#e0e0e0",
+        "disabled_fg": "#808080",
+        "disabled_field": "#323232",
+        "select_bg": "#4b6eaf",
+        "select_fg": "#ffffff",
+        "border": "#555555",
+        "button": "#3c3f41",
+        "active": "#4c5052",
+        "tooltip_bg": "#4b4b4b",
+        "tooltip_fg": "#e8e8e8",
+    },
+}
+
+
+def _detect_desktop_theme():
+    """Return 'dark' or 'light' by probing the desktop, defaulting to light."""
+    try:
+        if sys.platform == "win32":
+            import winreg
+
+            key_path = (
+                r"Software\Microsoft\Windows\CurrentVersion\Themes"
+                r"\Personalize"
+            )
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                uses_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return "light" if uses_light else "dark"
+
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ("defaults", "read", "-g", "AppleInterfaceStyle"),
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            # The key is absent entirely when macOS is in light mode
+            return "dark" if "dark" in result.stdout.lower() else "light"
+
+        result = subprocess.run(
+            (
+                "gsettings",
+                "get",
+                "org.gnome.desktop.interface",
+                "color-scheme",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        return "dark" if "dark" in result.stdout.lower() else "light"
+    except Exception:
+        # Probing is best-effort; any failure falls back to the light theme
+        return "light"
+
+
+def _resolve_theme(theme):
+    """Validate a theme, resolving None/'auto' to the desktop theme."""
+    if theme is None or str(theme).lower() == "auto":
+        return _detect_desktop_theme()
+    name = str(theme).lower()
+    if name not in _PALETTES:
+        raise ValueError(
+            f"Unknown theme: {theme!r}. theme must be 'light', 'dark', or "
+            "None to match the desktop theme."
+        )
+    return name
 
 
 def _format_number(value):
@@ -44,9 +132,11 @@ def _parse_number_list(text):
 class _ToolTip:
     """Minimal hover tooltip, used to mirror the MATLAB GUI's tooltips."""
 
-    def __init__(self, widget, text):
+    def __init__(self, widget, text, palette):
         self._widget = widget
         self._text = text
+        # Held by reference, and updated in place by set_theme()
+        self._palette = palette
         self._window = None
         widget.bind("<Enter>", self._show, add="+")
         widget.bind("<Leave>", self._hide, add="+")
@@ -64,8 +154,8 @@ class _ToolTip:
             self._window,
             text=self._text,
             justify="left",
-            background="#ffffe0",
-            foreground="#000000",
+            background=self._palette["tooltip_bg"],
+            foreground=self._palette["tooltip_fg"],
             relief="solid",
             borderwidth=1,
             wraplength=320,
@@ -87,6 +177,12 @@ class PulsePalGUI:
     to the device when 'Load to Device' is clicked. This matches the behavior
     of the MATLAB parameter GUI.
     """
+
+    # Check mark strokes, as 2x2 blocks on the indicator grid
+    _INDICATOR_SIZE = 13
+    _CHECK_MARK = (
+        (3, 6), (4, 7), (5, 8), (6, 7), (7, 6), (8, 5), (9, 4),
+    )
 
     _PULSE_TYPES = ("Monophasic", "Biphasic")
     _CUSTOM_TRAIN_TARGETS = ("Pulses", "Bursts")
@@ -195,12 +291,22 @@ class PulsePalGUI:
         "pulse_train_delay": (0.0, 3600.0),
     }
 
-    def __init__(self, device):
+    def __init__(self, device, theme=None):
         # The device is held weakly so that the GUI never keeps a released
         # PulsePalDevice alive: the device's destructor closes this window.
         self._device_ref = weakref.ref(device)
         self._closed = False
         self._release_host_event_loop = None
+        self._topmost_after_id = None
+
+        # Resolved before any window exists, so an invalid theme argument
+        # raises without leaving a half-built GUI behind
+        theme = _resolve_theme(theme)
+        self._theme = None
+        self._palette = {}
+        self._native_ttk_theme = None
+        self._indicator_element = None
+        self._indicator_images = {}
         self._loading = True
         self._last_program_dir = ""
 
@@ -225,6 +331,10 @@ class PulsePalGUI:
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self.close)
 
+        # Applied before the widgets are built: several of them take their
+        # colors at construction time
+        self.set_theme(theme)
+
         self._build_header()
         self._build_output_panel()
         self._build_trigger_panel()
@@ -248,6 +358,240 @@ class PulsePalGUI:
         ref = self._device_ref
         return ref() if ref is not None else None
 
+    @property
+    def theme(self):
+        """The active color theme, 'light' or 'dark'."""
+        return self._theme
+
+    def set_theme(self, theme):
+        """Switch the GUI between the light and dark color themes.
+
+        Args:
+            theme: ``"light"``, ``"dark"``, or ``None`` to match the
+                desktop theme.
+
+        Raises:
+            ValueError: If the theme name is not recognized.
+        """
+        name = _resolve_theme(theme)
+        if self._closed or name == self._theme:
+            return
+        self._theme = name
+        # Updated in place, since tooltips hold a reference to this dict
+        self._palette.clear()
+        self._palette.update(_PALETTES[name])
+        self._apply_theme_styles()
+        self._apply_widget_palette()
+
+    def _apply_theme_styles(self):
+        """Configure the ttk styles for the active theme."""
+        palette = self._palette
+        style = ttk.Style(self._root)
+        if self._native_ttk_theme is None:
+            self._native_ttk_theme = style.theme_use()
+
+        if self._theme != "dark":
+            # The native ttk theme already matches the light palette
+            style.theme_use(self._native_ttk_theme)
+        else:
+            # Native themes draw most widgets with the platform's own
+            # colors and ignore color options, so dark mode switches to
+            # 'clam', which is fully colorable
+            style.theme_use("clam")
+            style.configure(
+                ".",
+                background=palette["bg"],
+                foreground=palette["fg"],
+                fieldbackground=palette["field"],
+                bordercolor=palette["border"],
+                lightcolor=palette["bg"],
+                darkcolor=palette["bg"],
+                troughcolor=palette["field"],
+                focuscolor=palette["select_bg"],
+            )
+            # clam maps disabled widgets to a light background of its own,
+            # which configure() above does not override
+            style.map(
+                ".",
+                background=[("disabled", palette["bg"])],
+                foreground=[("disabled", palette["disabled_fg"])],
+                fieldbackground=[("disabled", palette["disabled_field"])],
+            )
+            style.configure("TLabelframe", bordercolor=palette["border"])
+            style.configure(
+                "TButton",
+                background=palette["button"],
+                bordercolor=palette["border"],
+                focuscolor=palette["bg"],
+            )
+            style.configure("TEntry", insertcolor=palette["fg"])
+            style.configure(
+                "TCombobox",
+                arrowcolor=palette["fg"],
+                background=palette["button"],
+            )
+            for widget in ("TCheckbutton", "TRadiobutton"):
+                style.configure(
+                    widget,
+                    indicatorbackground=palette["field"],
+                    indicatorforeground=palette["fg"],
+                    # The indicator draws its own border, from options that
+                    # do not inherit the style's bordercolor
+                    upperbordercolor=palette["border"],
+                    lowerbordercolor=palette["border"],
+                )
+                style.map(
+                    widget,
+                    foreground=[("disabled", palette["disabled_fg"])],
+                    indicatorbackground=[
+                        ("disabled", palette["disabled_field"]),
+                        ("selected", palette["select_bg"]),
+                    ],
+                    indicatorforeground=[
+                        ("selected", palette["select_fg"]),
+                    ],
+                )
+            style.map(
+                "TButton",
+                background=[
+                    ("pressed", palette["border"]),
+                    ("active", palette["active"]),
+                ],
+                foreground=[("disabled", palette["disabled_fg"])],
+            )
+            style.map(
+                "TEntry",
+                fieldbackground=[
+                    ("disabled", palette["disabled_field"]),
+                ],
+                foreground=[("disabled", palette["disabled_fg"])],
+            )
+            style.map(
+                "TCombobox",
+                fieldbackground=[
+                    ("disabled", palette["disabled_field"]),
+                    ("readonly", palette["field"]),
+                ],
+                foreground=[("disabled", palette["disabled_fg"])],
+                arrowcolor=[("disabled", palette["disabled_fg"])],
+                selectbackground=[("readonly", palette["field"])],
+                selectforeground=[("readonly", palette["fg"])],
+            )
+            self._install_check_indicator(style)
+
+        # The combobox dropdown is a plain Tk listbox inside the popdown
+        # window, which ttk styles do not reach
+        for option, value in (
+            ("*TCombobox*Listbox.background", palette["field"]),
+            ("*TCombobox*Listbox.foreground", palette["fg"]),
+            ("*TCombobox*Listbox.selectBackground", palette["select_bg"]),
+            ("*TCombobox*Listbox.selectForeground", palette["select_fg"]),
+        ):
+            self._root.option_add(option, value)
+
+    def _install_check_indicator(self, style):
+        """Give checkbuttons a check mark, which clam draws as an X."""
+        name = "PulsePal.Checkbutton.indicator"
+        if self._indicator_element is None:
+            palette = self._palette
+            images = {
+                "off": self._draw_indicator(
+                    palette["field"], palette["border"], None
+                ),
+                "on": self._draw_indicator(
+                    palette["select_bg"],
+                    palette["select_bg"],
+                    palette["select_fg"],
+                ),
+                "off_disabled": self._draw_indicator(
+                    palette["disabled_field"], palette["disabled_fg"], None
+                ),
+                "on_disabled": self._draw_indicator(
+                    palette["disabled_field"],
+                    palette["disabled_fg"],
+                    palette["disabled_fg"],
+                ),
+            }
+            # Held on the instance: ttk keeps no reference of its own, and
+            # the indicators go blank if the images are collected
+            self._indicator_images = images
+            style.element_create(
+                name,
+                "image",
+                images["off"],
+                ("disabled", "selected", images["on_disabled"]),
+                ("disabled", images["off_disabled"]),
+                ("selected", images["on"]),
+                sticky="",
+            )
+            self._indicator_element = name
+
+        style.layout(
+            "TCheckbutton",
+            self._replace_indicator(style.layout("TCheckbutton"), name),
+        )
+
+    def _draw_indicator(self, fill, border, mark):
+        """Draw one checkbutton indicator as a Tk image."""
+        size = self._INDICATOR_SIZE
+        image = tk.PhotoImage(master=self._root, width=size, height=size)
+        image.put(border, to=(0, 0, size, size))
+        image.put(fill, to=(1, 1, size - 1, size - 1))
+        if mark is not None:
+            for x, y in self._CHECK_MARK:
+                image.put(mark, to=(x, y, x + 2, y + 2))
+        return image
+
+    @classmethod
+    def _replace_indicator(cls, layout, name):
+        """Return a ttk layout with the checkbutton indicator swapped out."""
+        replaced = []
+        for element, options in layout:
+            options = dict(options)
+            children = options.get("children")
+            if children:
+                options["children"] = cls._replace_indicator(children, name)
+            if element.endswith("Checkbutton.indicator"):
+                element = name
+            replaced.append((element, options))
+        return replaced
+
+    def _apply_widget_palette(self):
+        """Color the plain Tk widgets, which ttk styles do not cover."""
+        palette = self._palette
+        self._root.configure(background=palette["bg"])
+
+        listbox = getattr(self, "_custom_train_list", None)
+        if listbox is not None:
+            listbox.configure(
+                background=palette["field"],
+                foreground=palette["fg"],
+                disabledforeground=palette["disabled_fg"],
+                selectbackground=palette["select_bg"],
+                selectforeground=palette["select_fg"],
+                highlightbackground=palette["border"],
+                highlightcolor=palette["select_bg"],
+            )
+
+        texts = [
+            getattr(self, "_timestamp_text", None),
+            getattr(self, "_voltage_text", None),
+        ]
+        for text in texts:
+            if text is None:
+                continue
+            text.configure(
+                foreground=palette["fg"],
+                insertbackground=palette["fg"],
+                selectbackground=palette["select_bg"],
+                selectforeground=palette["select_fg"],
+                highlightbackground=palette["border"],
+                highlightcolor=palette["select_bg"],
+            )
+        if all(text is not None for text in texts):
+            # Repaints the text backgrounds for the current enabled state
+            self._update_enabled_state()
+
     def start(self, block=None):
         """Show the GUI.
 
@@ -261,6 +605,7 @@ class PulsePalGUI:
             return
         if block is None:
             block = not self._enable_host_event_loop()
+        self._bring_to_front()
         if block:
             try:
                 self._root.mainloop()
@@ -269,12 +614,51 @@ class PulsePalGUI:
 
     def focus(self):
         """Raise the GUI window and give it keyboard focus."""
-        if self._closed:
+        self._bring_to_front()
+
+    def _bring_to_front(self):
+        """Raise the window above the windows of other applications.
+
+        Windows refuses to activate a window belonging to a process that has
+        not yet been in the foreground, which leaves the first GUI of a
+        session stuck behind the host IDE. Marking the window topmost is not
+        subject to that restriction; the flag is dropped again as soon as the
+        window is up, so the window is raised without staying pinned over
+        everything else.
+        """
+        root = self._root
+        if self._closed or root is None:
             return
         try:
-            self._root.deiconify()
-            self._root.lift()
-            self._root.focus_force()
+            root.deiconify()
+            # The window must be realized before it can be raised
+            root.update_idletasks()
+            root.lift()
+            root.attributes("-topmost", True)
+            root.focus_force()
+            self._cancel_topmost_reset()
+            self._topmost_after_id = root.after_idle(self._clear_topmost)
+        except tk.TclError:
+            pass
+
+    def _clear_topmost(self):
+        """Drop the topmost flag, leaving the window raised where it is."""
+        self._topmost_after_id = None
+        if self._closed or self._root is None:
+            return
+        try:
+            self._root.attributes("-topmost", False)
+        except tk.TclError:
+            pass
+
+    def _cancel_topmost_reset(self):
+        """Cancel a pending topmost reset, so it cannot outlive the window."""
+        after_id = self._topmost_after_id
+        self._topmost_after_id = None
+        if after_id is None or self._root is None:
+            return
+        try:
+            self._root.after_cancel(after_id)
         except tk.TclError:
             pass
 
@@ -291,6 +675,8 @@ class PulsePalGUI:
 
         # Unregister before the window is destroyed, so that the host does
         # not keep pumping events for a dead Tk interpreter
+        self._cancel_topmost_reset()
+
         release = self._release_host_event_loop
         self._release_host_event_loop = None
         if release is not None:
@@ -373,7 +759,7 @@ class PulsePalGUI:
 
         fire = ttk.Button(header, text="FIRE", width=6, command=self._fire)
         fire.pack(side="right", padx=(8, 0))
-        _ToolTip(fire, "Trigger the selected output channels")
+        self._tooltip(fire, "Trigger the selected output channels")
 
         checks = ttk.Frame(header)
         checks.pack(side="right")
@@ -393,7 +779,9 @@ class PulsePalGUI:
             ).grid(row=0, column=channel)
             check = ttk.Checkbutton(checks, variable=var)
             check.grid(row=1, column=channel)
-            _ToolTip(check, f"Include output channel {channel} when firing")
+            self._tooltip(
+                check, f"Include output channel {channel} when firing"
+            )
 
         toolbar = ttk.Frame(self._root)
         toolbar.pack(fill="x", padx=10, pady=(6, 0))
@@ -410,7 +798,7 @@ class PulsePalGUI:
         for text, command, tooltip in tools:
             button = ttk.Button(toolbar, text=text, command=command)
             button.pack(side="left", padx=(0, 6))
-            _ToolTip(button, tooltip)
+            self._tooltip(button, tooltip)
 
     def _build_output_panel(self):
         panel = ttk.LabelFrame(self._root, text="Output Channels")
@@ -418,7 +806,7 @@ class PulsePalGUI:
 
         channels = ttk.LabelFrame(panel, text="Channel")
         channels.pack(side="left", padx=6, pady=4, anchor="n")
-        _ToolTip(channels, "Select an output channel to edit")
+        self._tooltip(channels, "Select an output channel to edit")
         self._output_channel_var = tk.IntVar(value=1)
         for index, channel in enumerate((1, 2, 3, 4)):
             ttk.Radiobutton(
@@ -518,7 +906,7 @@ class PulsePalGUI:
 
         channels = ttk.LabelFrame(panel, text="Channel")
         channels.pack(side="left", padx=6, pady=4, anchor="n")
-        _ToolTip(channels, "Select a trigger channel to edit")
+        self._tooltip(channels, "Select a trigger channel to edit")
         self._trigger_channel_var = tk.IntVar(value=1)
         for channel in (1, 2):
             ttk.Radiobutton(
@@ -560,7 +948,7 @@ class PulsePalGUI:
                 command=lambda c=channel: self._on_trigger_link(c),
             )
             check.pack(side="left", padx=(0, 8))
-            _ToolTip(check, f"Link trigger channel to output channel "
+            self._tooltip(check, f"Link trigger channel to output channel "
                             f"{channel}")
 
     def _build_custom_train_panel(self):
@@ -575,6 +963,18 @@ class PulsePalGUI:
             height=min(self._n_custom_trains, 4),
             width=6,
             exportselection=False,
+            # A plain Tk border is always drawn black, so the colorable
+            # focus ring is used as the border instead
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=self._palette["border"],
+            highlightcolor=self._palette["select_bg"],
+            background=self._palette["field"],
+            foreground=self._palette["fg"],
+            disabledforeground=self._palette["disabled_fg"],
+            selectbackground=self._palette["select_bg"],
+            selectforeground=self._palette["select_fg"],
         )
         for train_id in range(1, self._n_custom_trains + 1):
             self._custom_train_list.insert("end", str(train_id))
@@ -583,8 +983,8 @@ class PulsePalGUI:
             "<<ListboxSelect>>", self._on_custom_train_selected
         )
         self._custom_train_list.pack(anchor="w")
-        _ToolTip(self._custom_train_list, "Select the custom train to "
-                                          "program")
+        self._tooltip(self._custom_train_list, "Select the custom train to "
+                                               "program")
 
         self._timestamp_text = self._make_train_text(
             panel,
@@ -622,6 +1022,10 @@ class PulsePalGUI:
             font=("TkDefaultFont", 9, "bold"),
         ).pack(side="right")
 
+    def _tooltip(self, widget, text):
+        """Attach a hover tooltip that follows the active theme."""
+        return _ToolTip(widget, text, self._palette)
+
     def _labeled(self, parent, column, label, widget_factory, tooltip=None):
         """Create a labeled widget in a grid column of parent."""
         holder = ttk.Frame(parent)
@@ -630,7 +1034,7 @@ class PulsePalGUI:
         widget = widget_factory(holder)
         widget.pack(anchor="w")
         if tooltip:
-            _ToolTip(widget, tooltip)
+            self._tooltip(widget, tooltip)
         return widget
 
     def _make_entry(self, parent, name):
@@ -657,10 +1061,27 @@ class PulsePalGUI:
         holder = ttk.Frame(parent)
         holder.pack(side="left", padx=6, pady=4, anchor="n")
         ttk.Label(holder, text=label).pack(anchor="w")
-        text = tk.Text(holder, width=34, height=3, wrap="word")
+        text = tk.Text(
+            holder,
+            width=34,
+            height=3,
+            wrap="word",
+            # A plain Tk border is always drawn black, so the colorable
+            # focus ring is used as the border instead
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=self._palette["border"],
+            highlightcolor=self._palette["select_bg"],
+            background=self._palette["field"],
+            foreground=self._palette["fg"],
+            insertbackground=self._palette["fg"],
+            selectbackground=self._palette["select_bg"],
+            selectforeground=self._palette["select_fg"],
+        )
         text.pack(anchor="w")
         text.bind("<FocusOut>", lambda event: commit())
-        _ToolTip(text, tooltip)
+        self._tooltip(text, tooltip)
         return text
 
     # ---- Refreshing the view ----
@@ -729,7 +1150,12 @@ class PulsePalGUI:
             state="normal" if uses_custom else "disabled"
         )
         for text in (self._timestamp_text, self._voltage_text):
-            text.configure(state="normal" if uses_custom else "disabled")
+            text.configure(
+                state="normal" if uses_custom else "disabled",
+                background=self._palette[
+                    "field" if uses_custom else "disabled_field"
+                ],
+            )
 
     def _set_text(self, widget, value):
         was_disabled = str(widget.cget("state")) == "disabled"
