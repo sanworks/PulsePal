@@ -69,8 +69,26 @@ jobs:
           version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
           pdoc PulsePal PulsePalGUI \
             --docformat google \
-            --output-directory "$GITHUB_WORKSPACE/site" \
+            --output-directory "$GITHUB_WORKSPACE/site/Python" \
             --footer-text "Pulse Pal Python interface v$version"
+
+      # The docs go under /Python/ so the URL says what they are. pdoc names
+      # each output file after its module, so renaming PulsePal.html is not an
+      # option: the in-page search builds result URLs from the module name at
+      # run time, and every hit would 404.
+      #
+      # MATLAB and C++ are documented on the Pulse Pal wiki, so nothing else
+      # lives at the site root. Send it straight on to the Python docs.
+      - name: Redirect the site root to the Python docs
+        run: |
+          cat > "$GITHUB_WORKSPACE/site/index.html" <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Pulse Pal Python API</title>
+          <link rel="canonical" href="Python/">
+          <meta http-equiv="refresh" content="0; url=Python/">
+          <p><a href="Python/">Pulse Pal Python API documentation</a></p>
+          HTML
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
