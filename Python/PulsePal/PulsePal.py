@@ -1,6 +1,6 @@
 """
-Python interface for [Pulse Pal](https://sites.google.com/site/pulsepalwiki/),
-the open source pulse train generator.
+Python interface for the [Pulse Pal](https://sites.google.com/site/pulsepalwiki/)
+open source pulse train generator.
 
 Pulse Pal delivers precisely timed voltage pulse trains on four analog
 output channels, and can be triggered by TTL logic on two trigger
@@ -30,9 +30,9 @@ holds `nan`, and indices 1 to 4 hold the values for output channels
 three elements, for trigger channels 1 and 2.
 
 ```python
-pulse_pal.phase1_voltage[2] = 7                  # channel 2 only
-pulse_pal.inter_pulse_interval[1:5] = [0.2] * 4  # all four channels
-pulse_pal.sync_to_device()             # push the edits to the device
+P.phase1_voltage[2] = 7                  # channel 2 only
+P.inter_pulse_interval[1:5] = [0.2] * 4  # all four channels
+P.sync_to_device()             # push the edits to the device
 ```
 
 Editing these lists changes only the local copy. Call
@@ -106,7 +106,7 @@ class DeviceInfo:
     known values for Pulse Pal hardware v2.
 
     ```python
-    print(pulse_pal.info.firmware_version)
+    print(P.info.firmware_version)
     ```
     """
 
@@ -250,13 +250,13 @@ class PulsePalDevice:
     seconds."""
 
     link_trigger_channel1: list
-    """Whether each output channel follows trigger channel 1.
+    """Whether each output channel is linked to trigger channel 1.
 
     `1` links the output channel to trigger channel 1, `0` unlinks it.
     """
 
     link_trigger_channel2: list
-    """Whether each output channel follows trigger channel 2.
+    """Whether each output channel is linked to trigger channel 2.
 
     `1` links the output channel to trigger channel 2, `0` unlinks it.
     """
@@ -264,7 +264,7 @@ class PulsePalDevice:
     custom_train_id: list
     """Custom pulse train played by each output channel.
 
-    `0` plays the parametrically defined train. `1` or `2` plays the
+    `0` plays the parametrically defined train. `1` or higher plays the
     matching custom train, previously loaded with
     `PulsePalDevice.send_custom_pulse_train` or
     `PulsePalDevice.send_custom_waveform`.
@@ -289,11 +289,13 @@ class PulsePalDevice:
     """Response of each trigger channel to an incoming TTL pulse.
 
     Three element list indexed by trigger channel, with index 0 unused.
+    Elements 1 and 2 control the respective channels on the device.
+    Their values can be:
 
     - `0` (normal): a TTL rising edge starts the pulse train, and edges
       during the train are ignored.
-    - `1` (toggle): a TTL rising edge during the train stops it.
-    - `2` (pulse gated): the train runs only while the trigger is high.
+    - `1` (toggle): same as 0 but a TTL rising edge during the train stops it.
+    - `2` (pulse gated): the train runs only while the trigger TTL is high.
     """
 
     _CURRENT_FIRMWARE_VERSION = 22
@@ -558,9 +560,9 @@ class PulsePalDevice:
         `PulsePalDevice.sync_to_device` will not undo the change.
 
         ```python
-        pulse_pal.set_output_param("is_biphasic", 1, 1)
-        pulse_pal.set_output_param("phase1_voltage", 1, 10)
-        pulse_pal.set_output_param(3, 1, -10)   # same, by param code
+        P.set_output_param("is_biphasic", 1, 1)
+        P.set_output_param("phase1_voltage", 1, 10)
+        P.set_output_param(3, 1, -10)   # same, by param code
         ```
 
         Args:
@@ -612,7 +614,7 @@ class PulsePalDevice:
         `PulsePalDevice.sync_to_device` will not undo the change.
 
         ```python
-        pulse_pal.set_trigger_param("trigger_mode", 1, 2)  # pulse gated
+        P.set_trigger_param("trigger_mode", 1, 2)  # pulse gated
         ```
 
         Args:
@@ -648,8 +650,8 @@ class PulsePalDevice:
         single transaction.
 
         ```python
-        pulse_pal.phase1_voltage[1:5] = [5] * 4
-        pulse_pal.sync_to_device()
+        P.phase1_voltage[1:5] = [5] * 4
+        P.sync_to_device()
         ```
 
         Raises:
@@ -670,8 +672,7 @@ class PulsePalDevice:
 
         Overwrites every parameter array attribute with the program
         currently stored on the device. Useful after the device has been
-        reprogrammed from its front panel, or after loading a settings
-        file with `PulsePalDevice.sd_settings`.
+        reprogrammed from its thumb joystick.
 
         Requires firmware v22 or newer.
 
@@ -745,10 +746,10 @@ class PulsePalDevice:
         the train there.
 
         ```python
-        pulse_pal.send_custom_pulse_train(
+        P.send_custom_pulse_train(
             2, [0, 0.2, 0.5, 1], [8, 4, -3.5, -10]
         )
-        pulse_pal.set_output_param("custom_train_id", 1, 2)
+        P.set_output_param("custom_train_id", 1, 2)
         ```
 
         Args:
