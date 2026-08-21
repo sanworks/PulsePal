@@ -1,0 +1,90 @@
+name: Docs
+
+# Builds the Pulse Pal Python API documentation with pdoc and publishes it to
+# GitHub Pages.
+#
+# Before the first run, set the Pages source to "GitHub Actions", under
+# Settings > Pages > Build and deployment > Source. Pull requests build the
+# site to catch breakage, but only pushes to master or develop deploy it.
+
+on:
+  push:
+    branches: [master, develop]
+    paths:
+      - Python/PulsePal/**
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - Python/PulsePal/**
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Queue deployments rather than cancelling one part way through.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Python/PulsePal
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # pdoc imports every module it documents, and PulsePalGUI imports tkinter
+      # at module scope. That needs the Tcl/Tk runtime libraries, which the
+      # runner image does not carry by default.
+      - name: Install Tcl/Tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+          python -c "import tkinter"
+
+      - name: Install package and docs tooling
+        run: python -m pip install ".[docs]"
+
+      # -d google is the fallback for modules that do not set __docformat__
+      # themselves, so that PulsePalGUI's Args/Returns/Raises sections render
+      # as lists rather than as one run-on paragraph.
+      #
+      # --edit-url is deliberately omitted. pdoc builds edit links from the part
+      # of the module path below the mapping key, which is empty for a top-level
+      # module, so every link would point at ".py". The "View Source" panes
+      # carry the source instead.
+      - name: Build documentation
+        run: |
+          version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          pdoc PulsePal PulsePalGUI \
+            --docformat google \
+            --output-directory "$GITHUB_WORKSPACE/site" \
+            --footer-text "Pulse Pal Python interface v$version"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

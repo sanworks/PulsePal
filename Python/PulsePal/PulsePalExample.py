@@ -28,7 +28,7 @@ import math
 import time
 
 # Initializing PulsePal
-P = PulsePalDevice('COM14')  # Create a new instance of a PulsePal object (set this to your USB serial port)
+P = PulsePalDevice('COM10')  # Create a new instance of a PulsePal object (set this to your USB serial port)
 print("Hardware Version: " + str(P.info.hardware_version))  # Print hardware version to the console
 print("Firmware Version: " + str(P.info.firmware_version))  # Print firmware version to the console
 

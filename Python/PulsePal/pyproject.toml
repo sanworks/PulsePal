@@ -13,5 +13,9 @@ dependencies = [
     "numpy>=1.22.0",
 ]
 
+[project.optional-dependencies]
+# Tooling for building the API documentation site. See .github/workflows/docs.yml
+docs = ["pdoc>=14"]
+
 [tool.setuptools]
 py-modules = ["PulsePal", "PulsePalGUI"]
