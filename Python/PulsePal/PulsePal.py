@@ -288,8 +288,8 @@ class PulsePalDevice:
     playback_mode: list
     """Continuous playback mode of parametric pulse trains after being triggered
 
-    `0` plays the pulse train once until pulse_train_duration seconds
-    `1` plays the pulse train indefinitely, ignoring pulse_train_duration
+    - `0` plays the pulse train once until pulse_train_duration seconds
+    - `1` plays the pulse train indefinitely, ignoring pulse_train_duration
     
     """
 
