@@ -184,6 +184,16 @@ class PulsePalGUI:
         (3, 6), (4, 7), (5, 8), (6, 7), (7, 6), (8, 5), (9, 4),
     )
 
+    # Side length of the square FIRE button, in pixels. The MATLAB GUI
+    # draws the same button 46x44.
+    _FIRE_BUTTON_SIZE = 45
+
+    # Distance, in pixels, from the center of a checkbutton's indicator
+    # to the center of the widget. A checkbutton keeps room to the right
+    # of its indicator for text, which these checkbuttons do not have,
+    # so their indicators sit left of center by this much.
+    _INDICATOR_OFFSET = 2
+
     _PULSE_TYPES = ("Monophasic", "Biphasic")
     _CUSTOM_TRAIN_TARGETS = ("Pulses", "Bursts")
     _TRIGGER_MODES = ("Normal", "Toggle", "Pulse Gated")
@@ -327,7 +337,7 @@ class PulsePalGUI:
         }
 
         self._root = tk.Tk()
-        self._root.title("Pulse Pal Parameter GUI")
+        self._root.title("Pulse Pal Parameter Editor")
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -751,17 +761,32 @@ class PulsePalGUI:
         header = ttk.Frame(self._root)
         header.pack(fill="x", padx=10, pady=(8, 0))
 
-        ttk.Label(
-            header,
-            text="Pulse Pal Program Editor",
-            font=("TkDefaultFont", 16, "bold"),
-        ).pack(side="left")
+        # The title and the toolbar are stacked on the left, so that the
+        # trigger controls on the right are centered across both of them
+        titles = ttk.Frame(header)
+        titles.pack(side="left", fill="x", expand=True)
 
-        fire = ttk.Button(header, text="FIRE", width=6, command=self._fire)
-        fire.pack(side="right", padx=(8, 0))
+        ttk.Label(
+            titles,
+            text="Pulse Pal Parameter Editor",
+            font=("TkDefaultFont", 16, "bold"),
+        ).pack(anchor="w")
+
+        trigger_controls = ttk.Frame(header)
+        trigger_controls.pack(side="right")
+
+        # A ttk.Button has no height option, and its width is measured in
+        # text characters, so it is packed into a fixed size frame with
+        # geometry propagation off to make it square
+        size = self._FIRE_BUTTON_SIZE
+        fire_box = ttk.Frame(trigger_controls, width=size, height=size)
+        fire_box.pack(side="right", padx=(8, 0))
+        fire_box.pack_propagate(False)
+        fire = ttk.Button(fire_box, text="FIRE", command=self._fire)
+        fire.pack(fill="both", expand=True)
         self._tooltip(fire, "Trigger the selected output channels")
 
-        checks = ttk.Frame(header)
+        checks = ttk.Frame(trigger_controls)
         checks.pack(side="right")
         ttk.Label(
             checks,
@@ -772,19 +797,26 @@ class PulsePalGUI:
         for channel in range(1, 5):
             var = tk.IntVar(value=0)
             self._fire_vars.append(var)
+            # Padding on the right shifts the digit left by half of
+            # itself, since grid centers the label and its padding
+            # together, to place the digit over the indicator below
             ttk.Label(
                 checks,
                 text=str(channel),
                 font=("TkDefaultFont", 9, "bold"),
-            ).grid(row=0, column=channel)
+            ).grid(
+                row=0,
+                column=channel,
+                padx=(0, 2 * self._INDICATOR_OFFSET),
+            )
             check = ttk.Checkbutton(checks, variable=var)
             check.grid(row=1, column=channel)
             self._tooltip(
                 check, f"Include output channel {channel} when firing"
             )
 
-        toolbar = ttk.Frame(self._root)
-        toolbar.pack(fill="x", padx=10, pady=(6, 0))
+        toolbar = ttk.Frame(titles)
+        toolbar.pack(fill="x", pady=(6, 0))
         tools = (
             ("Restore Defaults", self._restore_defaults,
              "Restore default parameters"),
@@ -887,6 +919,7 @@ class PulsePalGUI:
             ),
             "If enabled, the custom pulse train loops until the pulse train "
             "duration (Train (s) below)",
+            center=True,
         )
 
         bottom = ttk.Frame(fields)
@@ -1026,13 +1059,26 @@ class PulsePalGUI:
         """Attach a hover tooltip that follows the active theme."""
         return _ToolTip(widget, text, self._palette)
 
-    def _labeled(self, parent, column, label, widget_factory, tooltip=None):
-        """Create a labeled widget in a grid column of parent."""
+    def _labeled(
+        self, parent, column, label, widget_factory, tooltip=None,
+        center=False,
+    ):
+        """Create a labeled widget in a grid column of parent.
+
+        The widget lines up with the left edge of its label, unless
+        center is set, which centers a checkbutton's indicator under the
+        label instead.
+        """
         holder = ttk.Frame(parent)
         holder.grid(row=0, column=column, padx=4, pady=2, sticky="w")
         ttk.Label(holder, text=label).pack(anchor="w")
         widget = widget_factory(holder)
-        widget.pack(anchor="w")
+        if center:
+            # The padding shifts the widget right by half of itself,
+            # which centers the indicator rather than the checkbutton
+            widget.pack(padx=(2 * self._INDICATOR_OFFSET, 0))
+        else:
+            widget.pack(anchor="w")
         if tooltip:
             self._tooltip(widget, tooltip)
         return widget
