@@ -285,6 +285,14 @@ class PulsePalDevice:
     once.
     """
 
+    playback_mode: list
+    """Continuous playback mode of parametric pulse trains after being triggered
+
+    `0` plays the pulse train once until pulse_train_duration seconds
+    `1` plays the pulse train indefinitely, ignoring pulse_train_duration
+    
+    """
+
     trigger_mode: list
     """Response of each trigger channel to an incoming TTL pulse.
 
@@ -323,6 +331,7 @@ class PulsePalDevice:
         "custom_train_id",
         "custom_train_target",
         "custom_train_loop",
+        "playback_mode",
         "resting_voltage",
     )
     _TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
@@ -345,6 +354,7 @@ class PulsePalDevice:
         15: "custom_train_target",
         16: "custom_train_loop",
         17: "resting_voltage",
+        18: "playback_mode",
     }
     _ENDIANNESS = "<"
     _STRUCT_FORMATS = {
@@ -489,6 +499,7 @@ class PulsePalDevice:
         self.custom_train_id = [nan, 0, 0, 0, 0]
         self.custom_train_target = [nan, 0, 0, 0, 0]
         self.custom_train_loop = [nan, 0, 0, 0, 0]
+        self.playback_mode = [nan, 0, 0, 0, 0]
         self.trigger_mode = [nan, 0, 0]
 
     def set_voltage(self, channel, voltage):
@@ -855,22 +866,6 @@ class PulsePalDevice:
             "uint16",
         )
         self._read_ack("send_custom_waveform()")
-
-    def set_continuous_loop(self, channel, state):
-        """Set the continuous loop state of an output channel.
-
-        In continuous loop mode the channel repeats its pulse train
-        indefinitely the next time it is triggered, until the mode is
-        cleared or `PulsePalDevice.stop` is called.
-
-        Args:
-            channel: Output channel number, 1-4.
-            state: `1` for continuous loop, `0` for normal mode.
-        """
-        self._write_serial(
-            (self._OP_MENU_BYTE, 82, channel, state),
-            "uint8",
-        )
 
     def trigger(
         self,
@@ -1378,6 +1373,7 @@ class PulsePalDevice:
             "custom_train_id",
             "custom_train_target",
             "custom_train_loop",
+            "playback_mode",
         ):
             single_byte_values.extend(
                 int(getattr(self, attr_name)[channel])

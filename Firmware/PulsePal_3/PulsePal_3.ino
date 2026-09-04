@@ -218,6 +218,7 @@ unsigned long PulseDuration[4] = {0}; // Duration of a pulse (sum of 3 phases fo
 byte IsBiphasic[4] = {0};
 boolean IsCustomBurstTrain[4] = {0};
 byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
+byte ContinuousLoopModeOriginal[4] = {0}; // Memory for previous continuous loop mode state
 byte StimulatingState = 0; // 1 if ANY channel is stimulating, 2 if this is the first cycle after the system was triggered. 
 byte LastStimulatingState = 0;
 boolean WasStimulating = 0; // true if any channel was stimulating on the previous loop. Used to force a DAC write after all channels end their stimulation, to return lines to 0
@@ -483,6 +484,7 @@ void loop() {
           inByte2 = PPUSB.readByte();
           inByte3 = PPUSB.readByte(); // inByte3 = channel (1-4)
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
+          ContinuousLoopModeOriginal[inByte3] = ContinuousLoopMode[inByte3];
           switch (inByte2) { 
              case 1: {IsBiphasic[inByte3] = PPUSB.readByte();} break;
              case 2: {Phase1Voltage[inByte3] = PPUSB.readUint16();} break;
@@ -501,6 +503,7 @@ void loop() {
              case 15: {CustomTrainTarget[inByte3] = PPUSB.readByte();} break;
              case 16: {CustomTrainLoop[inByte3] = PPUSB.readByte();} break;
              case 17: {RestingVoltage[inByte3] = PPUSB.readUint16();} break;
+             case 18: {ContinuousLoopMode[inByte3] = PPUSB.readByte();} break;
              case 128: {TriggerMode[inByte3] = PPUSB.readByte();} break;
           }
           if (inByte2 < 14) {
@@ -511,6 +514,11 @@ void loop() {
           if (inByte2 == 17) {
             dacValue.uint16[inByte3] = RestingVoltage[inByte3];
             dacWrite();
+          }
+          if (inByte2 == 18) {
+            if (!ContinuousLoopMode[inByte3] && ContinuousLoopModeOriginal[inByte3]) {
+              killChannel(inByte3);
+            }
           }
           PulseDuration[inByte3] = ComputePulseDuration(IsBiphasic[inByte3], Phase1Duration[inByte3], InterPhaseInterval[inByte3], Phase2Duration[inByte3]);
           if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 1)) {
@@ -597,9 +605,7 @@ void loop() {
           inByte2 = inByte2 - 1; // Convert for zero-indexing
           inByte3 = SerialReadByte(); // State (0 = off, 1 = on)
           ContinuousLoopMode[inByte2] = inByte3;
-          if (inByte3) {
-            SoftTriggerScheduled[inByte2] = 1;
-          } else {
+          if (!inByte3) {
             killChannel(inByte2);
             DACFlags[inByte2] = 1;
             dacWrite();
@@ -671,6 +677,9 @@ void loop() {
 
         case 91: { // Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 
                    // Op 74, a per-parameter & per-channel method, is used by the legacy interface
+          for (int i = 0; i < 4; i++) {
+            ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
+          }
           inByte2 = PPUSB.readByte();
           switch (inByte2) { 
              case 1: {PPUSB.readByteArray(IsBiphasic, 4);} break;
@@ -710,9 +719,7 @@ void loop() {
               DACFlags[iChan] = 1;
             }
             if (inByte2 == 18) {
-              if (ContinuousLoopMode[iChan]) {
-                SoftTriggerScheduled[iChan] = 1;
-              } else {
+              if (!ContinuousLoopMode[iChan] && ContinuousLoopModeOriginal[iChan]) {
                 killChannel(iChan);
               }
             }
@@ -730,6 +737,9 @@ void loop() {
         } break;
 
         case 92: {  // Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
+          for (int i = 0; i < 4; i++) {
+            ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
+          }
           PPUSB.readUint32Array(Phase1Duration, 4);
           PPUSB.readUint32Array(InterPhaseInterval, 4);
           PPUSB.readUint32Array(Phase2Duration, 4);
@@ -745,6 +755,7 @@ void loop() {
           PPUSB.readByteArray(CustomTrainID, 4);
           PPUSB.readByteArray(CustomTrainTarget, 4);
           PPUSB.readByteArray(CustomTrainLoop, 4);
+          PPUSB.readByteArray(ContinuousLoopMode, 4);
          for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
            for (int y = 0; y < 4; y++) {
              TriggerAddress[x][y] = PPUSB.readByte();
@@ -764,6 +775,9 @@ void loop() {
            }
            dacValue.uint16[x] = RestingVoltage[x];
            DACFlags[x] = 1;
+           if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
+            killChannel(x);
+           }
          }
          dacWrite();
         } break;
@@ -1438,7 +1452,6 @@ void UpdateSettingsMenu() {
                  write2Screen("<  Continuous  >","      On");
                  delayMicroseconds(200000); // Debounce
                  ContinuousLoopMode[SelectedChannel-1] = true;
-                 SoftTriggerScheduled[SelectedChannel-1] = 1;
              } else {
                  write2Screen("<  Continuous  >","      Off");
                  ContinuousLoopMode[SelectedChannel-1] = false;

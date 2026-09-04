@@ -620,8 +620,10 @@ classdef PulsePalDevice < handle
                     if obj.firmwareVersion > 21
                         obj.Port.write([obj.OpMenuByte 91 paramCode value2send], 'uint8');
                     else
-                        for i = 1:4
-                            Msg = [Msg obj.OpMenuByte 74 paramCode i value2send(i)];
+                        if paramCode < 18 || paramCode == 128 % Firmware v21 did not process code 18
+                            for i = 1:4
+                                Msg = [Msg obj.OpMenuByte 74 paramCode i value2send(i)];
+                            end
                         end
                         obj.Port.write(Msg, 'uint8');
                     end
@@ -652,7 +654,11 @@ classdef PulsePalDevice < handle
             TimeData = TimeData';
             VoltageData = [obj.volts2Bits(obj.phase1Voltage); obj.volts2Bits(obj.phase2Voltage); obj.volts2Bits(obj.restingVoltage)];
             VoltageData = VoltageData';
-            SingleByteOutputParams = [obj.isBiphasic; obj.customTrainID; obj.customTrainTarget; obj.customTrainLoop];
+            playbackModeData = [];
+            if obj.firmwareVersion > 21
+                playbackModeData = obj.playbackMode;
+            end
+            SingleByteOutputParams = [obj.isBiphasic; obj.customTrainID; obj.customTrainTarget; obj.customTrainLoop; playbackModeData];
             opCode = 92;
             if obj.firmwareVersion < 22 % Use op 73 for firmware v21
                 opCode = 73;
