@@ -8,12 +8,12 @@ channels or in software. This module configures and triggers the device
 over its USB serial port.
 
 Everything is accessed through `PulsePalDevice`. Import it, connect to
-the device's serial port, program parameters, and trigger:
+the device's serial port, program parameters, and trigger, e.g.
 
 ```python
 from PulsePal import PulsePalDevice
 
-with PulsePalDevice("COM3") as P:       # /dev/ttyACM0 on Linux
+with PulsePalDevice("COM3") as P:
     P.set_output_param("phase1_voltage", 1, 5)
     P.set_output_param("phase1_duration", 1, 0.001)
     P.set_output_param("pulse_train_duration", 1, 2)
@@ -80,6 +80,7 @@ import time
 
 import numpy as np
 import serial
+import serial.tools.list_ports
 
 __all__ = ["PulsePalDevice", "DeviceInfo", "PulsePalError"]
 __docformat__ = "google"
@@ -167,7 +168,16 @@ class PulsePalDevice:
     P.close()
     ```
 
-    The class is also a context manager, which closes the connection on
+    Here, replace "COM3" with Pulse Pal's USB serial port name.
+    To view a list of available ports, use
+    PulsePalDevice.serialportlist()
+    Pulse Pal's port may not be visible if it is connected to another
+    instance of PulsePalDevice or an external application. Use
+    PulsePalDevice.serialportlist('all') to view all ports.
+    If you see multiple available ports, disconnect Pulse Pal's USB plug
+    and re-run serialportlist(). Notice which port disappears from the list.
+
+    PulsePalDevice is also a context manager, which closes the connection on
     exit even if an error is raised:
 
     ```python
@@ -177,8 +187,10 @@ class PulsePalDevice:
 
     The attributes below named after Pulse Pal parameters are the local
     copy of the device's program. Each is a five element list indexed by
-    channel number, with index 0 unused. Assigning to them does not
-    reach the device until `PulsePalDevice.sync_to_device` is called;
+    channel number, with index 0 unused. This way channels are addressed
+    by the index on the device, e.g. trigger channels 1-2 and output
+    channels 1-4. Assigning parameters does not update the device until
+    `PulsePalDevice.sync_to_device` is called;
     `PulsePalDevice.set_output_param` programs one parameter right away.
     """
 
@@ -470,6 +482,74 @@ class PulsePalDevice:
 
         self.set_default_params()
         self.sync_to_device()
+
+    @staticmethod
+    def serialportlist(ports_to_list="available"):
+        """Return the names of the USB serial ports on this computer.
+
+        Called on the class, without connecting to a device, to find the
+        port name to pass to `PulsePalDevice`:
+
+        ```python
+        from PulsePal import PulsePalDevice
+
+        ports = PulsePalDevice.serialportlist()
+        P = PulsePalDevice(ports[0])
+        ```
+
+        Args:
+            ports_to_list: `available` to list only the ports that are
+                not already in use, or `all` to list every USB serial
+                port. Not case sensitive.
+
+        Returns:
+            Sorted list of port names, such as `["COM3", "COM7"]` on
+            Windows or `["/dev/ttyACM0"]` on Linux.
+
+        Raises:
+            PulsePalError: If `ports_to_list` is not `available` or
+                `all`.
+        """
+        if not isinstance(ports_to_list, str):
+            raise PulsePalError(
+                "serialportlist() takes 'available' or 'all'."
+            )
+        mode = ports_to_list.lower()
+        if mode not in ("available", "all"):
+            raise PulsePalError(
+                f"Unknown port list type: {ports_to_list}. "
+                "Use 'available' or 'all'."
+            )
+
+        port_names = []
+        for port_info in serial.tools.list_ports.comports():
+            is_usb = port_info.vid is not None or "USB" in (
+                port_info.hwid or ""
+            ).upper()
+            if not is_usb:
+                continue
+            if mode == "available" and not PulsePalDevice._port_is_free(
+                port_info.device
+            ):
+                continue
+            port_names.append(port_info.device)
+        return sorted(port_names)
+
+    @staticmethod
+    def _port_is_free(port_name):
+        """Return True if the port is not already open in another program."""
+        port = serial.Serial()
+        port.port = port_name
+        # Leaving the control lines low avoids resetting boards that
+        # reset on DTR while the port is probed.
+        port.dtr = False
+        port.rts = False
+        try:
+            port.open()
+        except (serial.SerialException, OSError):
+            return False
+        port.close()
+        return True
 
     def set_default_params(self):
         """Reset the local copy of all parameters to their defaults.
