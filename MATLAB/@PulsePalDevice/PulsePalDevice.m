@@ -175,9 +175,26 @@ classdef PulsePalDevice < handle
             obj.Port.write([obj.OpMenuByte 77 TriggerAddress], 'uint8');
         end
 
-        function stop(obj)
-            % Stop all ongoing playback
-            obj.Port.write([obj.OpMenuByte 80], 'uint8');
+        function stop(obj, varargin)
+            % Stop ongoing playback
+            % Optional arg (requires firmware v22+): an array with a list of channels to stop, e.g.
+            % [1 3 4] to stop playback on Ch1, Ch3, and Ch4. Default = all channels.
+            bitCode = 15; % All channels
+            if nargin > 1
+                if obj.firmwareVersion < 22
+                    error('stop() cannot address individual channels prior to firmware v22')
+                end
+                channels = varargin{1};
+                if ~all(ismember(channels, [1 2 3 4]))
+                    error('All channels must be valid Pulse Pal output channel indexes: 1,2,3 or 4')
+                end
+                bitCode = uint8(sum(bitshift(uint16(1), channels-1)));
+            end
+            if obj.firmwareVersion < 22
+                obj.Port.write([obj.OpMenuByte 80], 'uint8');
+            else
+                obj.Port.write([obj.OpMenuByte 98 bitCode], 'uint8');
+            end
         end
 
         function confirmed = syncToDevice(obj)

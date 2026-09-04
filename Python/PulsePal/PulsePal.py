@@ -980,13 +980,40 @@ class PulsePalDevice:
             time.sleep(0.1)
             self.sync_from_device()
 
-    def stop(self):
-        """Stop all pulse trains currently playing on the device.
+    def stop(self, channels=None):
+        """Stop pulse trains currently playing on the device.
 
         Every output channel returns to its
         `PulsePalDevice.resting_voltage`.
+
+        Args:
+            channels (list or tuple, optional): A list of channels to stop, e.g.,
+                [1, 3, 4] to stop playback on Ch1, Ch3, and Ch4. Default is None,
+                which stops all channels. (Requires firmware v22+)
         """
-        self._write_serial((self._OP_MENU_BYTE, 80), "uint8")
+        bit_code = 15  # Default: 15 (binary 1111) stops all channels
+
+        if channels is not None:
+            if self.info.firmware_version < 22:
+                raise ValueError("stop() cannot address individual channels prior to firmware v22")
+
+            # If a single integer is provided, wrap it in a list
+            if isinstance(channels, int):
+                channels = [channels]
+
+            bit_code = 0
+            for ch in channels:
+                if ch not in (1, 2, 3, 4):
+                    raise ValueError("All channels must be valid Pulse Pal output channel indexes: 1, 2, 3 or 4")
+
+                # Bitwise OR (|=) handles the summation, safely ignoring duplicate channel entries
+                bit_code |= 1 << (ch - 1)
+
+        # Send
+        if self.info.firmware_version < 22:
+            self._write_serial((self._OP_MENU_BYTE, 80), "uint8")
+        else:
+            self._write_serial((self._OP_MENU_BYTE, 98, bit_code), "uint8")
 
     def format_microsd(self, timeout=30):
         """Format the device's microSD card.

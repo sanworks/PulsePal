@@ -587,7 +587,7 @@ void loop() {
         }
         dacWrite();
        } break;
-       case 81: { // Disconnect from client
+       case 81: { // Disconnect from PC app
           ConnectedToApp = 0;
           inMenu = 0;
           for (int i = 0; i < 4; i++) {
@@ -817,6 +817,16 @@ void loop() {
             LoadDefaultParameters();
           #endif
         }
+        case 98: { // Terminate ongoing stimulation on a specific set of output channels
+         inByte = PPUSB.readByte();
+         for (int i = 0; i < 4; i++) {
+          if bitRead(inByte, i) {
+            killChannel(i);
+            DACFlags[i] = 1;
+          }
+        }
+        dacWrite();
+       } break;
      }
     }
   }
