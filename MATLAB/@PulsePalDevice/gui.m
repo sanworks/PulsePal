@@ -30,7 +30,7 @@ end
 % Create figure
 obj.ui.Figure = uifigure('Visible', 'off');
 obj.ui.Figure.Position = [100 100 725 480];
-obj.ui.Figure.Name = 'Pulse Pal Parameter GUI';
+obj.ui.Figure.Name = 'Pulse Pal Parameter Editor';
 
 % Create Toolbar
 obj.ui.Toolbar = uitoolbar(obj.ui.Figure);
@@ -402,8 +402,8 @@ obj.ui.VoltagesVLabel.Text = 'Voltages (V)';
 obj.ui.PulsePalProgramEditorLabel = uilabel(obj.ui.Figure);
 obj.ui.PulsePalProgramEditorLabel.FontSize = 24;
 obj.ui.PulsePalProgramEditorLabel.FontWeight = 'bold';
-obj.ui.PulsePalProgramEditorLabel.Position = [13 432 297 32];
-obj.ui.PulsePalProgramEditorLabel.Text = 'Pulse Pal Program Editor';
+obj.ui.PulsePalProgramEditorLabel.Position = [13 432 325 32];
+obj.ui.PulsePalProgramEditorLabel.Text = 'Pulse Pal Parameter Editor';
 
 % Create FIREButton
 obj.ui.FIREButton = uibutton(obj.ui.Figure, 'push');

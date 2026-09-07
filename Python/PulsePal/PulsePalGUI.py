@@ -198,6 +198,20 @@ class PulsePalGUI:
     # in proportion with the rest of the window on both.
     _TITLE_FONT_SCALE = 16 / 9
 
+    # Width of the custom train text boxes, in characters. This is only
+    # a floor: the boxes expand to fill the Custom Pulse Trains panel,
+    # which the wider Output Channels panel above sizes. Asking for the
+    # full width here instead made this panel the widest in the window,
+    # which stretched the panels above it past their own content and
+    # widened the window again whenever a scrollbar appeared.
+    _TRAIN_TEXT_COLUMNS = 20
+
+    # Height of those boxes, in rows. Four reaches just past the bottom
+    # of the train selector beside them, which holds four trains on
+    # current hardware, and takes a fourth line of values before a
+    # scrollbar is needed.
+    _TRAIN_TEXT_ROWS = 4
+
     # Distance, in pixels, from the center of a checkbutton's indicator
     # to the center of the widget. A checkbutton keeps room to the right
     # of its indicator for text, which these checkbuttons do not have,
@@ -446,6 +460,17 @@ class PulsePalGUI:
                 focuscolor=palette["bg"],
             )
             style.configure("TEntry", insertcolor=palette["fg"])
+            style.configure(
+                "TScrollbar",
+                background=palette["button"],
+                troughcolor=palette["field"],
+                bordercolor=palette["border"],
+                arrowcolor=palette["fg"],
+            )
+            style.map(
+                "TScrollbar",
+                background=[("active", palette["active"])],
+            )
             style.configure(
                 "TCombobox",
                 arrowcolor=palette["fg"],
@@ -891,8 +916,14 @@ class PulsePalGUI:
         panel = ttk.LabelFrame(self._root, text="Output Channels")
         panel.pack(fill="x", padx=10, pady=(8, 0), ipady=4)
 
+        # The channel selector spans the first row of fields only, so
+        # that the second row starts at the panel's left edge as it does
+        # in the MATLAB GUI. Placing both rows beside the selector
+        # instead indented the second one by the selector's width, which
+        # widened the window and left the first row short of the right
+        # edge, as a gap after the Loop checkbox.
         channels = ttk.LabelFrame(panel, text="Channel")
-        channels.pack(side="left", padx=6, pady=4, anchor="n")
+        channels.grid(row=0, column=0, padx=6, pady=4, sticky="nw")
         self._tooltip(channels, "Select an output channel to edit")
         self._output_channel_var = tk.IntVar(value=1)
         for index, channel in enumerate((1, 2, 3, 4)):
@@ -904,11 +935,9 @@ class PulsePalGUI:
                 command=self._refresh,
             ).grid(row=index // 2, column=index % 2, sticky="w", padx=2)
 
-        fields = ttk.Frame(panel)
-        fields.pack(side="left", fill="x", expand=True, pady=2)
-
-        top = ttk.Frame(fields)
-        top.pack(fill="x")
+        panel.columnconfigure(1, weight=1)
+        top = ttk.Frame(panel)
+        top.grid(row=0, column=1, sticky="ew", pady=2)
         column = 0
 
         self._pulse_type_box = self._labeled(
@@ -977,8 +1006,10 @@ class PulsePalGUI:
             center=True,
         )
 
-        bottom = ttk.Frame(fields)
-        bottom.pack(fill="x")
+        # padx lines the first entry up with the selector's left edge,
+        # allowing for the padding _labeled puts around each field
+        bottom = ttk.Frame(panel)
+        bottom.grid(row=1, column=0, columnspan=2, sticky="ew", padx=2)
         for column, (name, label, tooltip) in enumerate(self._TIME_FIELDS):
             self._labeled(
                 bottom,
@@ -987,6 +1018,16 @@ class PulsePalGUI:
                 lambda parent, n=name: self._make_entry(parent, n),
                 tooltip,
             )
+
+        # Room left over once the fields have their natural widths is
+        # divided evenly between the columns, rather than all of it
+        # falling after the last field, which is how the MATLAB GUI
+        # spaces the same two rows. The fields stay left aligned in
+        # their columns, so the space opens up as wider gaps between
+        # them.
+        for row in (top, bottom):
+            for index in range(row.grid_size()[0]):
+                row.columnconfigure(index, weight=1)
 
     def _build_trigger_panel(self):
         panel = ttk.LabelFrame(self._root, text="Trigger Channels")
@@ -1070,7 +1111,8 @@ class PulsePalGUI:
         self._custom_train_list.bind(
             "<<ListboxSelect>>", self._on_custom_train_selected
         )
-        self._custom_train_list.pack(anchor="w")
+        # Fills the holder, whose width is set by the wider label above
+        self._custom_train_list.pack(fill="x")
         self._tooltip(self._custom_train_list, "Select the custom train to "
                                                "program")
 
@@ -1133,7 +1175,14 @@ class PulsePalGUI:
             # which centers the indicator rather than the checkbutton
             widget.pack(padx=(2 * self._INDICATOR_OFFSET, 0))
         else:
-            widget.pack(anchor="w")
+            # Widened to its label where the label is the longer of the
+            # two, as the MATLAB GUI sizes the same fields. A field is
+            # otherwise as wide as the characters asked of it, which
+            # leaves labels such as "Custom Train ID" overhanging their
+            # field by more the larger the desktop's UI font is. The
+            # holder takes its width from the wider of the pair, so this
+            # never widens the column.
+            widget.pack(anchor="w", fill="x")
         if tooltip:
             self._tooltip(widget, tooltip)
         return widget
@@ -1167,10 +1216,16 @@ class PulsePalGUI:
         holder.pack(side="left", padx=6, pady=4, anchor="n", fill="x",
                     expand=True)
         ttk.Label(holder, text=label).pack(anchor="w")
+        # The text and its scrollbar share a grid, so that the
+        # scrollbar can leave the layout without the text shifting
+        body = ttk.Frame(holder)
+        body.pack(fill="x", expand=True)
+        body.columnconfigure(0, weight=1)
+
         text = tk.Text(
-            holder,
-            width=34,
-            height=3,
+            body,
+            width=self._TRAIN_TEXT_COLUMNS,
+            height=self._TRAIN_TEXT_ROWS,
             wrap="word",
             # A plain Tk border is always drawn black, so the colorable
             # focus ring is used as the border instead
@@ -1185,10 +1240,53 @@ class PulsePalGUI:
             selectbackground=self._palette["select_bg"],
             selectforeground=self._palette["select_fg"],
         )
-        text.pack(anchor="w", fill="x", expand=True)
+        text.grid(row=0, column=0, sticky="nsew")
         text.bind("<FocusOut>", lambda event: commit())
         self._tooltip(text, tooltip)
+
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        # Laid out and then withdrawn, so that _autoscroll can restore it
+        # with the same grid options once there is something to scroll
+        scrollbar.grid_remove()
+        text.configure(
+            yscrollcommand=lambda first, last: self._on_text_scrolled(
+                scrollbar, text, first, last
+            )
+        )
+        # Tk measures wrapped lines in the background, and reports a
+        # complete view to the scroll callback until that pass finishes.
+        # After a large insert, such as opening a program, the fractions
+        # the callback is handed therefore say the text fits when it
+        # does not. This event marks the end of the pass.
+        text.bind(
+            "<<WidgetViewSync>>",
+            lambda event: self._sync_scrollbar(scrollbar, text),
+            add="+",
+        )
         return text
+
+    def _on_text_scrolled(self, scrollbar, text, first, last):
+        """Track a text widget's view, and show its scrollbar as needed."""
+        scrollbar.set(first, last)
+        self._sync_scrollbar(scrollbar, text)
+
+    def _sync_scrollbar(self, scrollbar, text):
+        """Show a scrollbar only while its text has rows out of view.
+
+        Tk leaves a scrollbar wherever it is put, whether or not the
+        widget it drives has anything to scroll, so hiding it is left to
+        the application, as MATLAB's edit boxes do. The view is read
+        from the widget rather than taken from the scroll callback,
+        whose fractions can predate the wrapped line measurements.
+        """
+        if self._closed:
+            return
+        first, last = text.yview()
+        if first <= 0.0 and last >= 1.0:
+            scrollbar.grid_remove()
+        else:
+            scrollbar.grid()
 
     # ---- Refreshing the view ----
 
