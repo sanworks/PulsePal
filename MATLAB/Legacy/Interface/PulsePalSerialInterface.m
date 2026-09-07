@@ -226,10 +226,14 @@ switch op
                 srl_flush(PulsePalSystem.SerialPort);
             case 3
                 disp('Connecting with MATLAB serialport interface (low latency).')
+                defaultBaudRate = 12000000;
+                if isunix
+                    defaultBaudRate = 4000000;
+                end
                 while (Found == 0) && (i < length(Ports))
                     i = i + 1;
                     disp(['Trying port ' Ports{i}])
-                    TestPort = serialport(Ports{i}, 12000000, 'Timeout', 1);
+                    TestPort = serialport(Ports{i}, defaultBaudRate, 'Timeout', 1);
                     setDTR(TestPort, true);
                     pause(.1);
                     TestPort.write([PulsePalSystem.OpMenuByte 72], 'uint8');
@@ -258,7 +262,7 @@ switch op
                 if Found ~= 0
                     % Note: DTR is now to "on" here - was off for earlier versions of Pulse Pal 1, but
                     % this seems to work for both
-                    PulsePalSystem.SerialPort = serialport(Ports{Found}, 12000000, 'Timeout', 1);
+                    PulsePalSystem.SerialPort = serialport(Ports{Found}, defaultBaudRate, 'Timeout', 1);
                     setDTR(PulsePalSystem.SerialPort, true);
                 else
                     error('Error: could not find your Pulse Pal device. Please make sure it is connected.');

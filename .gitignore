@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs
+.idea/
+.vscode/
+
+# MATLAB: serial port cached by PulsePal.m at runtime
+MATLAB/Legacy/LastSerialPortUsed.mat
+
+# OS
+.DS_Store
+Thumbs.db
