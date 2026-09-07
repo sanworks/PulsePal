@@ -104,6 +104,64 @@ def _detect_desktop_theme():
         return "light"
 
 
+# Families to fall back through on desktops that do not publish their
+# UI font. Ubuntu ships the first, GNOME the second, and the rest are
+# common enough elsewhere that one of them is almost always installed.
+_UI_FONT_FALLBACKS = (
+    "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans", "Liberation Sans",
+)
+
+
+def _detect_desktop_font(root):
+    """Return the desktop's UI font as (family, size), or (None, None).
+
+    Tk chooses its own default on X11, which can be a coarse bitmap face
+    that looks out of place beside the rest of the desktop, and is a
+    different size from what other applications use. GNOME publishes the
+    font it draws everything else with, so ask for that and fall back to
+    whichever of the usual families is installed. Windows and macOS Tk
+    already follow the platform's own UI font.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return None, None
+
+    installed = {name.lower() for name in tkfont.families(root)}
+    described = ""
+    try:
+        result = subprocess.run(
+            (
+                "gsettings",
+                "get",
+                "org.gnome.desktop.interface",
+                "font-name",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        described = result.stdout.strip().strip("'\"")
+    except Exception:
+        # Probing is best-effort, as it is for the theme
+        described = ""
+
+    # A description is a family followed by an optional style and the
+    # point size, e.g. "Ubuntu 11" or "Cantarell Light 11"
+    words = described.split()
+    size = None
+    if words and words[-1].replace(".", "", 1).isdigit():
+        size = round(float(words.pop()))
+    while words:
+        family = " ".join(words)
+        if family.lower() in installed:
+            return family, size
+        words.pop()
+
+    for family in _UI_FONT_FALLBACKS:
+        if family.lower() in installed:
+            return family, size
+    return None, size
+
+
 def _resolve_theme(theme):
     """Validate a theme, resolving None/'auto' to the desktop theme."""
     if theme is None or str(theme).lower() == "auto":
@@ -189,9 +247,12 @@ class PulsePalGUI:
     # where the theme font needs the room, so that its label always fits.
     _FIRE_BUTTON_SIZE = 45
 
-    # Room left around the FIRE label inside its square, in pixels,
-    # covering the button's border and internal padding.
-    _FIRE_BUTTON_PADDING = 16
+    # Line height of the font the pixel sizes here were measured
+    # against, Windows' 9 point Segoe UI. Desktops that set a larger UI
+    # font scale them up in proportion, so that the parts drawn to a
+    # pixel size keep pace with the parts drawn to the font. See
+    # _scaled.
+    _REFERENCE_LINESPACE = 15
 
     # Title size as a multiple of the default UI font, which is 9 point on
     # Windows and larger on most Linux desktops. Scaling keeps the heading
@@ -211,6 +272,9 @@ class PulsePalGUI:
     # current hardware, and takes a fourth line of values before a
     # scrollbar is needed.
     _TRAIN_TEXT_ROWS = 4
+
+    # Space around each field in the parameter panels, in pixels
+    _FIELD_PADDING = 4
 
     # Distance, in pixels, from the center of a checkbutton's indicator
     # to the center of the widget. A checkbutton keeps room to the right
@@ -578,14 +642,25 @@ class PulsePalGUI:
         )
 
     def _draw_indicator(self, fill, border, mark):
-        """Draw one checkbutton indicator as a Tk image."""
-        size = self._INDICATOR_SIZE
+        """Draw one checkbutton indicator as a Tk image.
+
+        Drawn at the size the desktop's font asks for. The native themes
+        size their own indicators from the font, so a fixed size here
+        left dark mode, which draws these instead, with check boxes
+        visibly smaller than the light theme's.
+        """
+        size = self._scaled(self._INDICATOR_SIZE)
+        edge = self._scaled(1)
         image = tk.PhotoImage(master=self._root, width=size, height=size)
         image.put(border, to=(0, 0, size, size))
-        image.put(fill, to=(1, 1, size - 1, size - 1))
+        image.put(fill, to=(edge, edge, size - edge, size - edge))
         if mark is not None:
+            # The stroke coordinates are on the reference grid, so they
+            # scale with it
+            block = self._scaled(2)
             for x, y in self._CHECK_MARK:
-                image.put(mark, to=(x, y, x + 2, y + 2))
+                left, top = self._scaled(x), self._scaled(y)
+                image.put(mark, to=(left, top, left + block, top + block))
         return image
 
     @classmethod
@@ -808,6 +883,24 @@ class PulsePalGUI:
         # that already created one. (nametofont grew a root argument in
         # 3.10, past this package's floor.)
         base = tkfont.Font(root=self._root, name="TkDefaultFont", exists=True)
+
+        # Named fonts are shared by every widget that does not ask for
+        # one of its own, so pointing them at the desktop's UI font
+        # covers the labels, buttons and lists at once. The custom train
+        # boxes keep TkFixedFont, whose columns line their values up.
+        family, desktop_size = _detect_desktop_font(self._root)
+        if family is not None or desktop_size is not None:
+            changes = {}
+            if family is not None:
+                changes["family"] = family
+            if desktop_size is not None:
+                changes["size"] = desktop_size
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                         "TkHeadingFont"):
+                tkfont.Font(
+                    root=self._root, name=name, exists=True
+                ).configure(**changes)
+
         size = base.cget("size")
 
         self._title_font = base.copy()
@@ -821,6 +914,20 @@ class PulsePalGUI:
         # these labels stay in step with the plain ones beside them
         self._label_font = base.copy()
         self._label_font.configure(weight="bold")
+
+        self._ui_scale = (
+            base.metrics("linespace") / self._REFERENCE_LINESPACE
+        )
+
+    def _scaled(self, pixels):
+        """Scale a pixel size measured at the reference font size.
+
+        Sizes given in pixels do not follow the desktop's UI font the
+        way the widgets around them do. Under a larger font they end up
+        cramped, which showed as a crowded parameter panel and undersized
+        check marks on desktops whose font is larger than Windows'.
+        """
+        return max(1, round(pixels * self._ui_scale))
 
     def _build_header(self):
         header = ttk.Frame(self._root)
@@ -851,18 +958,26 @@ class PulsePalGUI:
         self._tooltip(fire, "Trigger the selected output channels")
 
         # A fixed 45 px is only wide enough for "FIRE" in fonts as
-        # narrow as Windows' 9 point Segoe UI, and clipped the label to
-        # "FI" under the larger default fonts of Linux desktops. The
-        # button's own requested width is no use as a floor: themes
-        # report a standard button width there, 76 px under vista, for
-        # text that measures 22. Measuring the label is what tracks the
-        # font that will actually draw it.
+        # narrow as Windows' 9 point Segoe UI, and clipped the label
+        # under the larger fonts of Linux desktops. Fitting it takes the
+        # width of the text plus the room the theme leaves around it,
+        # which is 10 px under vista and 16 under clam, the theme dark
+        # mode switches to. A button cannot be asked for that room
+        # directly, and its requested width is no help: themes ask for a
+        # standard button width, 11 characters under vista, which has
+        # nothing to do with the label. Text longer than that minimum
+        # leaves the theme's own padding as the difference.
         style = ttk.Style(self._root)
         spec = style.lookup("TButton", "font") or "TkDefaultFont"
         button_font = tkfont.Font(root=self._root, font=spec)
+        probe_text = "FIRE" * 10
+        probe = ttk.Button(fire_box, text=probe_text)
+        chrome = probe.winfo_reqwidth() - button_font.measure(probe_text)
+        probe.destroy()
+
         side = max(
-            self._FIRE_BUTTON_SIZE,
-            button_font.measure("FIRE") + self._FIRE_BUTTON_PADDING,
+            self._scaled(self._FIRE_BUTTON_SIZE),
+            button_font.measure("FIRE") + chrome,
         )
         fire_box.configure(width=side, height=side)
 
@@ -887,7 +1002,7 @@ class PulsePalGUI:
             ).grid(
                 row=0,
                 column=channel,
-                padx=(0, 2 * self._INDICATOR_OFFSET),
+                padx=(0, self._scaled(2 * self._INDICATOR_OFFSET)),
             )
             check = ttk.Checkbutton(checks, variable=var)
             check.grid(row=1, column=channel)
@@ -1166,14 +1281,15 @@ class PulsePalGUI:
         center is set, which centers a checkbutton's indicator under the
         label instead.
         """
+        padding = self._scaled(self._FIELD_PADDING)
         holder = ttk.Frame(parent)
-        holder.grid(row=0, column=column, padx=4, pady=2, sticky="w")
+        holder.grid(row=0, column=column, padx=padding, pady=2, sticky="w")
         ttk.Label(holder, text=label).pack(anchor="w")
         widget = widget_factory(holder)
         if center:
             # The padding shifts the widget right by half of itself,
             # which centers the indicator rather than the checkbutton
-            widget.pack(padx=(2 * self._INDICATOR_OFFSET, 0))
+            widget.pack(padx=(self._scaled(2 * self._INDICATOR_OFFSET), 0))
         else:
             # Widened to its label where the label is the longer of the
             # two, as the MATLAB GUI sizes the same fields. A field is
