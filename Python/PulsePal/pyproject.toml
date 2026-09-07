@@ -19,3 +19,14 @@ docs = ["pdoc>=14"]
 
 [tool.setuptools]
 py-modules = ["PulsePal", "PulsePalGUI"]
+
+[tool.uv]
+# PulsePalGUI imports tkinter, which CPython builds ship but Linux distributions
+# package separately (python3-tk on Debian/Ubuntu, python3-tkinter on Fedora).
+# A venv built from the system interpreter inherits that gap, so P.gui() fails
+# with ModuleNotFoundError long after `uv sync` reported success.
+#
+# uv's own CPython builds bundle Tcl/Tk, so requiring one makes `uv sync` alone
+# sufficient on a bare Ubuntu install. Without this, uv prefers any system
+# interpreter satisfying .python-version and the gap comes back.
+python-preference = "only-managed"
