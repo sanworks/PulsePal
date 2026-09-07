@@ -450,6 +450,9 @@ class PulsePalGUI:
         self._n_custom_trains = int(n_trains)
         self._custom_timestamps = [""] * self._n_custom_trains
         self._custom_voltages = [""] * self._n_custom_trains
+        # The train the text boxes are showing, which is not always the
+        # one selected in the list: see _commit_timestamps
+        self._displayed_train = 0
 
         self._params = {}
         self._trigger_mode = []
@@ -1484,6 +1487,7 @@ class PulsePalGUI:
 
     def _refresh_custom_train_view(self):
         train_index = self._selected_custom_train() - 1
+        self._displayed_train = train_index
         self._set_text(
             self._timestamp_text, self._custom_timestamps[train_index]
         )
@@ -1589,13 +1593,27 @@ class PulsePalGUI:
         )
 
     def _on_custom_train_selected(self, _event=None):
+        # Both boxes are committed before the new train is loaded over
+        # them, since this arrives before they lose focus
+        self._commit_timestamps()
+        self._commit_voltages()
         self._refresh_custom_train_view()
 
     def _commit_timestamps(self):
+        """Store the timestamps box against the train it is showing.
+
+        Not against the selected train: a click on the train list
+        changes the selection, and loads the newly selected train into
+        the boxes, before they are told they have lost focus. Committing
+        to the selection at that point would file the edit under the
+        train the user had just moved to. _on_custom_train_selected
+        commits first, so that by the time the focus event arrives the
+        boxes and this index agree and the commit is a no-op.
+        """
         if self._closed:
             return
         text = self._timestamp_text.get("1.0", "end-1c")
-        self._custom_timestamps[self._selected_custom_train() - 1] = text
+        self._custom_timestamps[self._displayed_train] = text
         try:
             _parse_number_list(text)
         except ValueError:
@@ -1605,10 +1623,11 @@ class PulsePalGUI:
             )
 
     def _commit_voltages(self):
+        """Store the voltages box against the train it is showing."""
         if self._closed:
             return
         text = self._voltage_text.get("1.0", "end-1c")
-        self._custom_voltages[self._selected_custom_train() - 1] = text
+        self._custom_voltages[self._displayed_train] = text
         try:
             _parse_number_list(text)
         except ValueError:
@@ -1648,6 +1667,7 @@ class PulsePalGUI:
         if device is None:
             return
 
+        self._store_train_boxes()
         custom_trains = self._collect_custom_trains()
         if custom_trains is None:
             return
@@ -1676,6 +1696,25 @@ class PulsePalGUI:
                              f"{exc}")
             return
         self._set_status("Program Loaded to Device")
+
+    def _store_train_boxes(self):
+        """File what the text boxes hold, without validating it.
+
+        The toolbar works from the stored copy of the custom trains, so
+        anything typed since the boxes last lost focus has to be filed
+        before it is read. Whether the toolbar waits for the boxes to
+        lose focus first is up to how the platform orders a click on a
+        button against the focus change it causes, which is not worth
+        depending on. Validation is left to the caller, which reports
+        what it finds in terms of the action the user asked for.
+        """
+        if self._closed:
+            return
+        index = self._displayed_train
+        self._custom_timestamps[index] = self._timestamp_text.get(
+            "1.0", "end-1c"
+        )
+        self._custom_voltages[index] = self._voltage_text.get("1.0", "end-1c")
 
     def _collect_custom_trains(self):
         """Parse the custom train editor, returning None if it is invalid."""
@@ -1710,6 +1749,7 @@ class PulsePalGUI:
         if device is None:
             return
 
+        self._store_train_boxes()
         path = filedialog.asksaveasfilename(
             parent=self._root,
             title="Save program",
@@ -1798,8 +1838,17 @@ class PulsePalGUI:
     def _reset_selections(self):
         self._output_channel_var.set(1)
         self._trigger_channel_var.set(1)
+        # A disabled listbox drops selection changes without complaint,
+        # and this one is disabled whenever the output channel on show
+        # plays no custom train, which is the default. Restoring
+        # defaults or opening a program would then leave the list on the
+        # train that happened to be selected. The state is put back as
+        # it was, and _update_enabled_state settles it either way.
+        state = str(self._custom_train_list.cget("state"))
+        self._custom_train_list.configure(state="normal")
         self._custom_train_list.selection_clear(0, "end")
         self._custom_train_list.selection_set(0)
+        self._custom_train_list.configure(state=state)
 
     def _show_error(self, message):
         messagebox.showerror("Pulse Pal", message, parent=self._root)
