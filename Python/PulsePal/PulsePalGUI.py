@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tkinter as tk
 import weakref
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 # Widget colors for each theme. The light palette matches the platform's
 # native widget colors, so light mode can keep the native ttk theme.
@@ -184,9 +184,19 @@ class PulsePalGUI:
         (3, 6), (4, 7), (5, 8), (6, 7), (7, 6), (8, 5), (9, 4),
     )
 
-    # Side length of the square FIRE button, in pixels. The MATLAB GUI
-    # draws the same button 46x44.
+    # Minimum side length of the square FIRE button, in pixels. The
+    # MATLAB GUI draws the same button 46x44. The button grows past this
+    # where the theme font needs the room, so that its label always fits.
     _FIRE_BUTTON_SIZE = 45
+
+    # Room left around the FIRE label inside its square, in pixels,
+    # covering the button's border and internal padding.
+    _FIRE_BUTTON_PADDING = 16
+
+    # Title size as a multiple of the default UI font, which is 9 point on
+    # Windows and larger on most Linux desktops. Scaling keeps the heading
+    # in proportion with the rest of the window on both.
+    _TITLE_FONT_SCALE = 16 / 9
 
     # Distance, in pixels, from the center of a checkbutton's indicator
     # to the center of the widget. A checkbutton keeps room to the right
@@ -340,6 +350,7 @@ class PulsePalGUI:
         self._root.title("Pulse Pal Parameter Editor")
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self.close)
+        self._init_fonts()
 
         # Applied before the widgets are built: several of them take their
         # colors at construction time
@@ -757,6 +768,35 @@ class PulsePalGUI:
 
     # ---- Widget construction ----
 
+    def _init_fonts(self):
+        """Derive the header fonts from the platform's default UI font.
+
+        The family in a font tuple has to be a font family, and
+        "TkDefaultFont" is the name of a named font rather than one.
+        Naming it as a family leaves Tk no match, so it substitutes its
+        fallback: a scalable face on Windows, which hid the mistake, and
+        a bitmap face on X11, which rendered these labels pixelated.
+        """
+        # Bound to this window's interpreter rather than looked up with
+        # nametofont, which resolves against the default root: that is a
+        # different window when the GUI runs inside a host application
+        # that already created one. (nametofont grew a root argument in
+        # 3.10, past this package's floor.)
+        base = tkfont.Font(root=self._root, name="TkDefaultFont", exists=True)
+        size = base.cget("size")
+
+        self._title_font = base.copy()
+        # A font size is in points when positive and pixels when negative
+        scaled = round(abs(size) * self._TITLE_FONT_SCALE)
+        self._title_font.configure(
+            size=-scaled if size < 0 else scaled, weight="bold"
+        )
+
+        # Bold at the default size, rather than at a fixed 9 point, so
+        # these labels stay in step with the plain ones beside them
+        self._label_font = base.copy()
+        self._label_font.configure(weight="bold")
+
     def _build_header(self):
         header = ttk.Frame(self._root)
         header.pack(fill="x", padx=10, pady=(8, 0))
@@ -769,7 +809,7 @@ class PulsePalGUI:
         ttk.Label(
             titles,
             text="Pulse Pal Parameter Editor",
-            font=("TkDefaultFont", 16, "bold"),
+            font=self._title_font,
         ).pack(anchor="w")
 
         trigger_controls = ttk.Frame(header)
@@ -778,20 +818,35 @@ class PulsePalGUI:
         # A ttk.Button has no height option, and its width is measured in
         # text characters, so it is packed into a fixed size frame with
         # geometry propagation off to make it square
-        size = self._FIRE_BUTTON_SIZE
-        fire_box = ttk.Frame(trigger_controls, width=size, height=size)
+        fire_box = ttk.Frame(trigger_controls)
         fire_box.pack(side="right", padx=(8, 0))
         fire_box.pack_propagate(False)
         fire = ttk.Button(fire_box, text="FIRE", command=self._fire)
         fire.pack(fill="both", expand=True)
         self._tooltip(fire, "Trigger the selected output channels")
 
+        # A fixed 45 px is only wide enough for "FIRE" in fonts as
+        # narrow as Windows' 9 point Segoe UI, and clipped the label to
+        # "FI" under the larger default fonts of Linux desktops. The
+        # button's own requested width is no use as a floor: themes
+        # report a standard button width there, 76 px under vista, for
+        # text that measures 22. Measuring the label is what tracks the
+        # font that will actually draw it.
+        style = ttk.Style(self._root)
+        spec = style.lookup("TButton", "font") or "TkDefaultFont"
+        button_font = tkfont.Font(root=self._root, font=spec)
+        side = max(
+            self._FIRE_BUTTON_SIZE,
+            button_font.measure("FIRE") + self._FIRE_BUTTON_PADDING,
+        )
+        fire_box.configure(width=side, height=side)
+
         checks = ttk.Frame(trigger_controls)
         checks.pack(side="right")
         ttk.Label(
             checks,
             text="Trigger Channels:",
-            font=("TkDefaultFont", 9, "bold"),
+            font=self._label_font,
         ).grid(row=1, column=0, padx=(0, 6))
         self._fire_vars = []
         for channel in range(1, 5):
@@ -803,7 +858,7 @@ class PulsePalGUI:
             ttk.Label(
                 checks,
                 text=str(channel),
-                font=("TkDefaultFont", 9, "bold"),
+                font=self._label_font,
             ).grid(
                 row=0,
                 column=channel,
@@ -1052,7 +1107,7 @@ class PulsePalGUI:
         ttk.Label(
             bar,
             textvariable=self._status_var,
-            font=("TkDefaultFont", 9, "bold"),
+            font=self._label_font,
         ).pack(side="right")
 
     def _tooltip(self, widget, text):
@@ -1104,8 +1159,13 @@ class PulsePalGUI:
         return box
 
     def _make_train_text(self, parent, label, tooltip, commit):
+        # The two boxes divide whatever width the panel has beyond the
+        # train selector, which is what the wider Output Channels panel
+        # above sets. Their requested width still sets the floor, so
+        # sharing the spare room never widens the window.
         holder = ttk.Frame(parent)
-        holder.pack(side="left", padx=6, pady=4, anchor="n")
+        holder.pack(side="left", padx=6, pady=4, anchor="n", fill="x",
+                    expand=True)
         ttk.Label(holder, text=label).pack(anchor="w")
         text = tk.Text(
             holder,
@@ -1125,7 +1185,7 @@ class PulsePalGUI:
             selectbackground=self._palette["select_bg"],
             selectforeground=self._palette["select_fg"],
         )
-        text.pack(anchor="w")
+        text.pack(anchor="w", fill="x", expand=True)
         text.bind("<FocusOut>", lambda event: commit())
         self._tooltip(text, tooltip)
         return text
