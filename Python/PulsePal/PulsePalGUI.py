@@ -23,6 +23,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 import tkinter as tk
@@ -160,6 +161,43 @@ def _detect_desktop_font(root):
         if family.lower() in installed:
             return family, size
     return None, size
+
+
+def _default_program_dir():
+    """Return the folder the program file dialogs should open in.
+
+    Tk opens a file dialog in the working directory unless it is told
+    otherwise, which on Linux is wherever the interpreter was started,
+    often the package directory. Programs belong with the user's own
+    files, so start at the desktop, or the documents folder where there
+    is no desktop. Windows and macOS open somewhere sensible of their
+    own accord, and are left to it.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return ""
+
+    home = os.path.expanduser("~")
+    for key, default_name in (("DESKTOP", "Desktop"),
+                              ("DOCUMENTS", "Documents")):
+        path = ""
+        try:
+            result = subprocess.run(
+                ("xdg-user-dir", key),
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            path = result.stdout.strip()
+        except Exception:
+            # Probing is best-effort, as it is for the theme and font
+            path = ""
+        # xdg-user-dir answers with the home directory for a folder the
+        # desktop does not define, which is not what was asked for
+        if not path or os.path.normpath(path) == os.path.normpath(home):
+            path = os.path.join(home, default_name)
+        if os.path.isdir(path):
+            return path
+    return home if os.path.isdir(home) else ""
 
 
 def _resolve_theme(theme):
@@ -406,7 +444,7 @@ class PulsePalGUI:
         self._indicator_element = None
         self._indicator_images = {}
         self._loading = True
-        self._last_program_dir = ""
+        self._last_program_dir = _default_program_dir()
 
         n_trains = getattr(device.info, "n_custom_pulse_trains", None) or 2
         self._n_custom_trains = int(n_trains)
@@ -1699,7 +1737,7 @@ class PulsePalGUI:
             self._show_error(f"Failed to save the program:\n{exc}")
             return
 
-        self._last_program_dir = path
+        self._last_program_dir = os.path.dirname(path)
         self._set_status("Program Saved")
         self.focus()
 
@@ -1744,7 +1782,7 @@ class PulsePalGUI:
         self._custom_voltages = self._fit_custom_trains(voltages)
         self._reset_selections()
         self._refresh()
-        self._last_program_dir = path
+        self._last_program_dir = os.path.dirname(path)
         self._set_status("Program Opened")
         self.focus()
 
