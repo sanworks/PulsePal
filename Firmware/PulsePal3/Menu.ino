@@ -189,9 +189,6 @@ void UpdateSettingsMenu() {
             } break;
            }
            updateUsesBursts(SelectedChannel-1);
-if ((SelectedAction > 1) && (SelectedAction < 18)) {
-            //SaveCurrentProgram2SD();             
-           }
           } break;
           case MENU_OUTPUT_TRIGGER: { // Trigger menu
           switch (SelectedStimMode) {
@@ -280,9 +277,7 @@ if ((SelectedAction > 1) && (SelectedAction < 18)) {
               LoadDefaultParameters();
             } else {
               outputRestingVoltages();
-              for (int i = 0; i < 16; i++) {
-                currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
-              }
+              strcpy(currentSettingsFileNameChar, candidateSettingsFileChar);
               write2Screen("Settings loaded."," ");
               delayMicroseconds(1000000);
               inMenu = MENU_CHANNEL_LIST;
@@ -398,9 +393,7 @@ if ((SelectedAction > 1) && (SelectedAction < 18)) {
                 currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
               }
             } else { // Overwrite the file selected in RefreshFileMenu()
-              for (int i = 0; i < 16; i++) {
-                currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
-              }
+              strcpy(currentSettingsFileNameChar, candidateSettingsFileChar);
             }
             if (nameIsReserved) {
               write2Screen("Name reserved.", " ");

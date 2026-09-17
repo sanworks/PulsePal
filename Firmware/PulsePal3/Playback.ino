@@ -42,7 +42,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Returns the DAC code for the same voltage with the opposite sign. Used for phase 2 of biphasic custom pulses.
 static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
   if (dacCode < 32768) {
-    return 32768 + (32768 - dacCode);
+    uint32_t mirrored = 32768 + (32768 - (uint32_t)dacCode);
+    if (mirrored > 65535) {
+      return 65535; // -10V mirrors to +10V, the top of the DAC range
+    }
+    return (uint16_t)mirrored;
   } else {
     return 32768 - (dacCode - 32768);
   }
@@ -398,10 +402,6 @@ void handler(void) {
                 killChannel(x);
             }
           }
-          if (PulseTrainDuration_ExamplePulse[x] > 0) {
-            PulseTrainDuration[x] = PulseTrainDuration_ExamplePulse[x];
-            PulseTrainDuration_ExamplePulse[x] = 0;
-          }
         }
      }
    }
@@ -409,6 +409,10 @@ void handler(void) {
 // End hw timer callback
 
 void killChannel(byte outputChannel) {
+  if (PulseTrainDuration_ExamplePulse[outputChannel] > 0) { // Restore the duration saved by the single pulse menu option
+    PulseTrainDuration[outputChannel] = PulseTrainDuration_ExamplePulse[outputChannel];
+    PulseTrainDuration_ExamplePulse[outputChannel] = 0;
+  }
   CustomPulseTimeIndex[outputChannel] = 0;
   PreStimulusStatus[outputChannel] = 0;
   StimulusStatus[outputChannel] = 0;

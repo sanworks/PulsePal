@@ -216,7 +216,7 @@ bool findListedFile(uint16_t position, bool includeDefault) {
   #else
   while (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
   #endif
-    candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+    candidateSettingsFile.getName(candidateSettingsFileChar, sizeof(candidateSettingsFileChar));
     candidateSettingsFile.close();
     if (!isDefaultSettingsFile(candidateSettingsFileChar)) {
       nListed++;

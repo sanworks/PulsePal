@@ -29,6 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   LCD_clear()
 //   LCD_print()
 //   LCD_print_no_trim_no_render()
+//   trimmedCopy()
 //   LCD_setCursor()
 //   LCD_cursor()
 //   LCD_noCursor()
@@ -36,10 +37,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   runSplashScreen()
 
 void write2Screen(const char* Line1, const char* Line2) {
-    LCD_clear(); 
+    LCD_clear();
     #if (HARDWARE_VERSION == 3)
-      trimString(Line1);
-      lcd.print(Line1);
+      lcd.print(trimmedCopy(Line1));
     #else
       // In-line LCD_print without render
       LCD_home();
@@ -57,19 +57,16 @@ void LCD_clear() {
     lcd.clear();
 }
 
-template <typename T>
-void LCD_print(const T &value) {
+void LCD_print(const char* value) {
   #if (HARDWARE_VERSION == 3)
-    trimString(value);
-    lcd.print(value);
+    lcd.print(trimmedCopy(value)); // Pulse Pal 3 centers each line, so leading and trailing spaces are removed
     lcd.render();
   #else
     lcd.print(value);
   #endif
 }
 
-template <typename T>
-void LCD_print_no_trim_no_render(const T &value) {
+void LCD_print_no_trim_no_render(const char* value) {
   lcd.print(value);
 }
 
@@ -93,6 +90,17 @@ void LCD_noCursor() {
   #else
     lcd.noCursor();
   #endif
+}
+
+// Returns a copy of text with leading and trailing spaces removed. Screen text is usually a string literal,
+// which trimString() must not modify in place: literals are shared between call sites, so trimming one would
+// change the others. The returned buffer is reused by the next call.
+const char* trimmedCopy(const char* text) {
+  static char trimmed[33];
+  strncpy(trimmed, text, sizeof(trimmed) - 1);
+  trimmed[sizeof(trimmed) - 1] = '\0';
+  trimString(trimmed);
+  return trimmed;
 }
 
 void trimString(char *str) {
