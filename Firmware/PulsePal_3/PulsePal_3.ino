@@ -47,7 +47,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                    for parameter values, ReturnUserValue()
 //   SDSettings.ino   Settings files on the microSD card, with the file layout
 //   Display.ino      Screen output and splash screen
-//   HardwareIO.ino   DAC writes, fast digital I/O and software reset
+//   HardwareIO.ino   DAC writes, the hardware timer, fast digital I/O and software reset
 // Supporting classes: ArCOM (USB serial data types), LiquidCrystal_U8G2 (Pulse Pal 3 screen)
 
 #define FIRMWARE_VERSION 22
@@ -107,7 +107,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 enum OpCode {
   OP_HANDSHAKE = 72,                  // Returns 'K' and the firmware version
   OP_PROGRAM_ALL_PARAMS_LEGACY = 73,  // Legacy. Replaced by op 92
-  OP_PROGRAM_ONE_PARAM_LEGACY = 74,   // Legacy. Replaced by op 91
+  OP_PROGRAM_ONE_PARAM = 74,          // Program one parameter on one output or trigger channel
   OP_LOAD_CUSTOM_TRAIN1_LEGACY = 75,  // Legacy. Replaced by op 95
   OP_LOAD_CUSTOM_TRAIN2_LEGACY = 76,  // Legacy. Replaced by op 95
   OP_SOFT_TRIGGER = 77,               // Trigger output channels (1 bit per channel)
@@ -201,6 +201,8 @@ enum TriggerEventValue {
 // microSD settings files. See the file layout above SaveCurrentProgram2SD().
 #define SETTINGS_FILE_END_MARKER 252 // Last byte of a valid settings file
 #define SETTINGS_FILE_N_PARAM_BYTES 178 // Bytes in a settings file before the end marker
+#define DEFAULT_SETTINGS_FILE_NAME "default.pps" // Written with default parameters in setup(). The joystick menu lists it
+                                                 // first in the load menu, and cannot overwrite or erase it.
 
 #if (HARDWARE_VERSION == 2)
   ArCOM PPUSB(SerialUSB); // Initialize ArCOM USB serial wrapper
@@ -218,6 +220,7 @@ enum TriggerEventValue {
   byte dacMap[4] = {0,1,2,3}; // Mapping of DAC output pins to output BNC connectors from left to right
   #define N_CUSTOM_PULSE_TRAINS 2
   #define MAX_CUSTOM_PULSES 5000
+  #define CURSOR_BLINK_CYCLES 20000 // Joystick menu loop iterations between cursor blinks while editing a value
 #else
   ArCOM PPUSB(Serial); // Initialize ArCOM USB serial wrapper
   // initialize u8g2 graphics library with the numbers of the interface pins
@@ -253,6 +256,7 @@ enum TriggerEventValue {
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
   #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
+  #define CURSOR_BLINK_CYCLES 10000 // Joystick menu loop iterations between cursor blinks while editing a value
 #endif
 
 // Variables for SPI bus
@@ -291,7 +295,6 @@ boolean SerialReadTimedout = 0; // Goes to 1 if a serial read timed out, causing
 int SerialCurrentTime = 0; // Current time (millis) for serial read timeout
 int SerialReadStartTime = 0; // Time the serial read was started
 int Timeout = 500; // Times out after 500ms
-byte BrokenBytes[4] = {0}; // Used to store sequential bytes when converting bytes to short and long ints
 
 // Variables used to parse USB commands
 byte inByte; byte inByte2; byte inByte3; byte inByte4; byte CommandByte;
@@ -320,7 +323,6 @@ boolean InputValues[2] = {0}; // The values read directly from the two inputs (f
 boolean InputValuesLastCycle[2] = {0}; // The values on the last cycle. Used to detect low to high transitions.
 byte LineTriggerEvent[2] = {0}; // Trigger line transition detected this cycle. See enum TriggerEventValue
 boolean UsesBursts[4] = {0};
-unsigned long PulseDuration[4] = {0}; // Duration of a pulse (sum of 3 phases for biphasic pulse)
 byte IsBiphasic[4] = {0};
 byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 byte ContinuousLoopModeOriginal[4] = {0}; // Memory for previous continuous loop mode state
@@ -343,7 +345,7 @@ uint8_t buf4[4];
   FsFile candidateSettingsFile;
   uint8_t mountOK = 0;
 #endif
-String currentSettingsFileName = "default.pps"; // Filename is a string so it can be easily resized
+String currentSettingsFileName = DEFAULT_SETTINGS_FILE_NAME; // Used to build file names received from USB or entered with the joystick
 byte settingsFileNameLength = 0; // Set when a new file name is entered
 char currentSettingsFileNameChar[100]; // Filename must be converted from string to character array for use with sdFAT
 char candidateSettingsFileChar[17];
@@ -361,7 +363,7 @@ byte ValidCursorPositions[9] = {0};
 int Digits[9] = {0};
 unsigned int DACBits = pow(2,16);
 unsigned long CursorToggleTimer = 0; 
-unsigned long CursorToggleThreshold = 20000;
+unsigned long CursorToggleThreshold = CURSOR_BLINK_CYCLES;
 boolean CursorOn = 0;
 int ClickerX = 0; // Value of analog reads from X line of joystick input device
 int ClickerY = 0; // Value of analog reads from Y line of joystick input device
@@ -433,11 +435,10 @@ void setup() {
   // Set DAC to resting voltage on all channels
   for (int i = 0; i < 4; i++) {
     RestingVoltage[i] = 32768; // 16-bit code for 0, in the range of -10 to +10
-    dacValue.uint16[i] = RestingVoltage[i];
-    DACFlags[i] = 1; // DACFlags must be set to 1 on each channel, so the channels aren't skipped in dacWrite()
+    setDAC(i, RestingVoltage[i]);
   }
   ProgramDAC(16, 0, 31); // Power up DACs
-  dacWrite(); // Update the DAC
+  dacWrite(); // Update the DAC. This is the only dacWrite() call outside handler(), because the hardware timer has not started.
 
   #if (HARDWARE_VERSION == 2)
     SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
@@ -497,14 +498,10 @@ void setup() {
       write2Screen("Startup Error:"," Need SD Format");
     }
   #endif
-  currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-  settingsFile.open(currentSettingsFileNameChar, O_READ);
-  
-  
-  validProgram = RestoreParametersFromSD();
-  if (validProgram != SETTINGS_FILE_END_MARKER) { // The end marker is the last byte in a valid settings file, returned from RestoreParametersFromSD()
-    LoadDefaultParameters();
-  }
+  // Start with default parameters, and write them to the default settings file. The joystick menu cannot overwrite
+  // or erase this file, so the default parameters can always be loaded from it.
+  LoadDefaultParameters();
+  SaveCurrentProgram2SD();
 
   write2Screen(CommanderString," Click for menu");
   DefaultInputLevel = 1 - TriggerLevel;
@@ -512,23 +509,7 @@ void setup() {
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;
   CycleFrequency = 1.0/(TIMER_PERIOD/1000000.0); // Given as decimals to force floating point arithmetic
-  #if (HARDWARE_VERSION == 2)
-    // The following hardware timer setup for Pulse Pal v2 is adapted from the DueTimer library by Ivan Seidel. (Thanks Ivan!!)
-    // https://github.com/ivanseidel/DueTimer
-    // Configure timer counter TC3 (TC1 channel 0) to interrupt every TIMER_PERIOD us.
-    // The interrupt runs TC3_Handler() in Playback.ino, which calls handler().
-    pmc_set_writeprotect(false); // Allow writes to the power management and timer registers
-    pmc_enable_periph_clk(ID_TC3); // Enable the timer's peripheral clock
-    TC_Configure(TC1, 0, TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC | TC_CMR_TCCLKS_TIMER_CLOCK2); // Count up from 0 to RC, then reset. Clocked at MCK/8 (10.5MHz)
-    TC_SetRC(TC1, 0, (uint32_t)round(VARIANT_MCK / 8.0 * TIMER_PERIOD / 1000000.0)); // RC = ticks per period (525 for 50us)
-    TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS; // Enable the interrupt on RC compare...
-    TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS; // ...and disable all other timer interrupts
-    NVIC_ClearPendingIRQ(TC3_IRQn);
-    NVIC_EnableIRQ(TC3_IRQn);
-    TC_Start(TC1, 0);
-  #else
-    hardwareTimer.begin(handler, TIMER_PERIOD);
-  #endif
+  startHardwareTimer();
 }
 
 // loop() runs the joystick menu (only while no channel is playing), and handles commands from the PC.
@@ -543,20 +524,9 @@ void loop() {
   }
   usbLoadFlag = false;
   if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
-    #if (HARDWARE_VERSION == 2)
-      NVIC_DisableIRQ(TC3_IRQn); // Stop the hardware timer
-      TC_Stop(TC1, 0);
-    #else
-      hardwareTimer.end();
-    #endif
+    stopHardwareTimer();
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
     SerialReadTimedout = 0;
-    #if (HARDWARE_VERSION == 2)
-      NVIC_ClearPendingIRQ(TC3_IRQn); // Restart the hardware timer
-      NVIC_EnableIRQ(TC3_IRQn);
-      TC_Start(TC1, 0);
-    #else
-      hardwareTimer.begin(handler, TIMER_PERIOD);
-    #endif
+    startHardwareTimer();
   }
 }

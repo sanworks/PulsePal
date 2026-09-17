@@ -39,7 +39,12 @@ Editing these lists changes only the local copy. Call
 `PulsePalDevice.sync_to_device` to program the device, or use
 `PulsePalDevice.set_output_param` and
 `PulsePalDevice.set_trigger_param`, which program a single parameter
-immediately and keep the local copy in step.
+immediately and keep the local copy in step. `set_output_param` can also
+set one parameter on several output channels at once:
+
+```python
+P.set_output_param("inter_pulse_interval", [1, 2, 3, 4], 0.2)
+```
 
 ## Units
 
@@ -326,6 +331,8 @@ class PulsePalDevice:
     _DAC_BITMAX = 65535
     _OLDEST_FIRMWARE_SUPPORTED = 21
 
+    # Parameter names in order of their parameter codes (code = index + 1),
+    # matching _OUTPUT_PARAMETER_ATTRS and the firmware.
     _OUTPUT_PARAMETER_NAMES = (
         "is_biphasic",
         "phase1_voltage",
@@ -343,8 +350,8 @@ class PulsePalDevice:
         "custom_train_id",
         "custom_train_target",
         "custom_train_loop",
-        "playback_mode",
         "resting_voltage",
+        "playback_mode",
     )
     _TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
 
@@ -645,7 +652,7 @@ class PulsePalDevice:
         self._read_ack("set_calibration()")
 
     def set_output_param(self, param_name, channel, value):
-        """Program a single output channel parameter on the device.
+        """Program an output channel parameter on the device.
 
         The local copy of the parameter is updated to match, so a later
         `PulsePalDevice.sync_to_device` will not undo the change.
@@ -654,49 +661,75 @@ class PulsePalDevice:
         P.set_output_param("is_biphasic", 1, 1)
         P.set_output_param("phase1_voltage", 1, 10)
         P.set_output_param(3, 1, -10)   # same, by param code
+        P.set_output_param("phase1_voltage", [1, 2, 3, 4], [5, 5, 5, 3])
+        P.set_output_param("phase1_duration", [2, 4], 0.002)
         ```
+
+        Setting all four channels in one call programs them with a single
+        command (firmware v22 or newer). Otherwise, each listed channel is
+        programmed with its own command. Channels that are not listed are
+        not changed.
 
         Args:
             param_name: Parameter name, as listed in
                 `DeviceInfo.output_parameter_names`, or its integer
                 parameter code.
-            channel: Output channel number, 1-4.
+            channel: Output channel number, 1-4, or a list of distinct
+                output channel numbers.
             value: Value to set. Units are volts for voltage parameters,
                 seconds for time parameters, and integers for enumerated
                 parameters. See the attributes of `PulsePalDevice` for
-                the meaning of each parameter.
+                the meaning of each parameter. If `channel` is a list,
+                either one value for all listed channels, or a list with
+                one value per listed channel, in the same order.
 
         Raises:
             PulsePalError: If the parameter name is not recognized, the
-                value does not fit the datatype the device expects, or
-                the device does not acknowledge the command.
+                channels or number of values are invalid, a value does not
+                fit the datatype the device expects, or the device does not
+                acknowledge the command.
         """
-        original_value = value
         param_code = self._get_output_param_code(param_name)
 
-        if param_code in (2, 3, 17):
-            value = self._volts_to_bits(value)
-            self._write_serial(
-                (self._OP_MENU_BYTE, 74, param_code, channel),
-                "uint8",
-                value,
-                "uint16",
+        if isinstance(channel, numbers.Integral):
+            self._set_one_output_param(param_code, int(channel), value)
+            return
+
+        channels = [int(ch) for ch in self._as_list(channel)]
+        if (
+            not channels
+            or len(set(channels)) != len(channels)
+            or any(ch not in (1, 2, 3, 4) for ch in channels)
+        ):
+            raise PulsePalError(
+                "channel must be an output channel number, 1-4, or a list "
+                "of distinct output channel numbers."
             )
-        elif 4 <= param_code <= 11:
-            self._write_serial(
-                (self._OP_MENU_BYTE, 74, param_code, channel),
-                "uint8",
-                self._seconds_to_cycles(value),
-                "uint32",
-            )
-        else:
-            self._write_serial(
-                (self._OP_MENU_BYTE, 74, param_code, channel, value),
-                "uint8",
+        values = self._as_list(value)
+        if len(values) == 1:
+            values = values * len(channels)
+        if len(values) != len(channels):
+            raise PulsePalError(
+                f"{len(values)} values were given for {len(channels)} "
+                "channels. Give one value, or one value per channel."
             )
 
-        self._read_ack("program_output_channel_param()")
-        self._set_output_param_value(param_code, channel, original_value)
+        if sorted(channels) == [1, 2, 3, 4] and self.info.firmware_version > 21:
+            # One op 91 command programs this parameter on all four channels
+            values_by_channel = [values[channels.index(ch)] for ch in (1, 2, 3, 4)]
+            data, datatype = self._encode_output_param(param_code, values_by_channel)
+            self._write_serial(
+                (self._OP_MENU_BYTE, 91, param_code),
+                "uint8",
+                data,
+                datatype,
+            )
+            self._read_ack("set_output_param()")
+            for ch, channel_value in zip((1, 2, 3, 4), values_by_channel):
+                self._set_output_param_value(param_code, ch, channel_value)
+        else:
+            for ch, channel_value in zip(channels, values):
+                self._set_one_output_param(param_code, ch, channel_value)
 
     def set_trigger_param(self, param_name, channel, value):
         """Program a single trigger channel parameter on the device.
@@ -844,8 +877,9 @@ class PulsePalDevice:
         ```
 
         Args:
-            custom_train_id: Custom train to load, 1-2. See
-                `DeviceInfo.n_custom_pulse_trains`.
+            custom_train_id: Custom train to load, from 1 to
+                `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
+                4 on Pulse Pal 3).
             pulse_times: Pulse onset times, in seconds, relative to the
                 start of the train. Accepts a list, tuple or NumPy
                 array.
@@ -853,9 +887,11 @@ class PulsePalDevice:
                 Must be the same length as `pulse_times`.
 
         Raises:
-            PulsePalError: If `pulse_times` and `pulse_voltages` differ
-                in length, or the device does not acknowledge the
-                command.
+            PulsePalError: If `custom_train_id` is out of range,
+                `pulse_times` and `pulse_voltages` differ in length,
+                there are more pulses than
+                `DeviceInfo.max_custom_pulses`, or the device does not
+                acknowledge the command.
         """
         pulse_times = self._as_list(pulse_times)
         pulse_voltages = self._as_list(pulse_voltages)
@@ -874,18 +910,12 @@ class PulsePalDevice:
             for voltage in pulse_voltages
         ]
 
-        op_code = int(custom_train_id) + 74
-        self._write_serial(
-            (self._OP_MENU_BYTE, op_code),
-            "uint8",
-            n_pulses,
-            "uint32",
+        self._send_custom_train(
+            custom_train_id,
             pulse_times_cycles,
-            "uint32",
             pulse_voltage_bits,
-            "uint16",
+            "send_custom_pulse_train()",
         )
-        self._read_ack("send_custom_pulse_train()")
 
     def send_custom_waveform(
         self,
@@ -914,16 +944,18 @@ class PulsePalDevice:
         ```
 
         Args:
-            custom_train_id: Custom train to load, 1-2. See
-                `DeviceInfo.n_custom_pulse_trains`.
+            custom_train_id: Custom train to load, from 1 to
+                `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
+                4 on Pulse Pal 3).
             pulse_width: Sampling period, in seconds. Each voltage is
                 held for this long.
             pulse_voltages: Waveform samples, in volts [-10, 10].
                 Accepts a list, tuple or NumPy array.
 
         Raises:
-            PulsePalError: If the device does not acknowledge the
-                command.
+            PulsePalError: If `custom_train_id` is out of range, there
+                are more samples than `DeviceInfo.max_custom_pulses`, or
+                the device does not acknowledge the command.
         """
         pulse_voltages = self._as_list(pulse_voltages)
         n_pulses = len(pulse_voltages)
@@ -934,18 +966,12 @@ class PulsePalDevice:
             for voltage in pulse_voltages
         ]
 
-        op_code = int(custom_train_id) + 74
-        self._write_serial(
-            (self._OP_MENU_BYTE, op_code),
-            "uint8",
-            n_pulses,
-            "uint32",
+        self._send_custom_train(
+            custom_train_id,
             pulse_times,
-            "uint32",
             pulse_voltage_bits,
-            "uint16",
+            "send_custom_waveform()",
         )
-        self._read_ack("send_custom_waveform()")
 
     def trigger(
         self,
@@ -1242,6 +1268,51 @@ class PulsePalDevice:
         """
         return self.port.in_waiting
 
+    def _send_custom_train(self, custom_train_id, pulse_times_cycles,
+                           pulse_voltage_bits, context):
+        """Send a custom pulse train, already converted to device units.
+
+        Uses op 95 on firmware v22 or newer, and the legacy ops 75 and 76
+        (trains 1 and 2 only) on firmware v21.
+        """
+        n_trains = self.info.n_custom_pulse_trains
+        try:
+            train_id = int(custom_train_id)
+        except (TypeError, ValueError):
+            train_id = None
+        if (
+            train_id is None
+            or train_id != custom_train_id
+            or not 1 <= train_id <= n_trains
+        ):
+            raise PulsePalError(
+                f"{context}: custom_train_id must be an integer from 1 to "
+                f"{n_trains}. Received {custom_train_id}."
+            )
+        n_pulses = len(pulse_times_cycles)
+        if n_pulses > self.info.max_custom_pulses:
+            raise PulsePalError(
+                f"{context}: {n_pulses} pulses were given. Pulse Pal can "
+                f"store up to {self.info.max_custom_pulses} pulses per "
+                "custom train."
+            )
+
+        if self.info.firmware_version > 21:
+            header = (self._OP_MENU_BYTE, 95, train_id - 1)
+        else:
+            header = (self._OP_MENU_BYTE, 74 + train_id)
+        self._write_serial(
+            header,
+            "uint8",
+            n_pulses,
+            "uint32",
+            pulse_times_cycles,
+            "uint32",
+            pulse_voltage_bits,
+            "uint16",
+        )
+        self._read_ack(context)
+
     def _get_output_param_code(self, param_name):
         """Resolve an output parameter name or code to its code."""
         if isinstance(param_name, str):
@@ -1385,6 +1456,32 @@ class PulsePalDevice:
             return list(values)
         except TypeError:
             return [values]
+
+    def _set_one_output_param(self, param_code, channel, value):
+        """Program one output parameter on one channel (op 74)."""
+        data, datatype = self._encode_output_param(param_code, value)
+        self._write_serial(
+            (self._OP_MENU_BYTE, 74, param_code, channel),
+            "uint8",
+            data,
+            datatype,
+        )
+        self._read_ack("program_output_channel_param()")
+        self._set_output_param_value(param_code, channel, value)
+
+    def _encode_output_param(self, param_code, values):
+        """Convert output parameter values to device units.
+
+        Returns the converted values and the datatype the device reads for
+        this parameter code: DAC bits for voltages, hardware timer cycles
+        for times, and bytes for everything else.
+        """
+        values = self._as_list(values)
+        if param_code in (2, 3, 17):
+            return [self._volts_to_bits(v) for v in values], "uint16"
+        if 4 <= param_code <= 11:
+            return [self._seconds_to_cycles(v) for v in values], "uint32"
+        return values, "uint8"
 
     def _set_output_param_value(self, param_code, channel, original_value):
         """Store a programmed value in its local parameter array."""

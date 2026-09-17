@@ -75,16 +75,13 @@ void processUSBCommands() {
          TriggerMode[1] = PPUSB.readByte();
          PPUSB.writeByte(1); // Send confirm byte
          for (int x = 0; x < 4; x++) {
-           if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
-           if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {UsesBursts[x] = false;}
-           PulseDuration[x] = ComputePulseDuration(IsBiphasic[x], Phase1Duration[x], InterPhaseInterval[x], Phase2Duration[x]);
-           dacValue.uint16[x] = RestingVoltage[x]; 
+           updateUsesBursts(x);
+           setDAC(x, RestingVoltage[x]);
          }
-         dacWrite();
         } break;
         
-        case OP_PROGRAM_ONE_PARAM_LEGACY: { // Op 74. Program one parameter - legacy method for backwards compatability. See op 91 for the method used by the current Python and MATLAB classes
+        case OP_PROGRAM_ONE_PARAM: { // Op 74. Program one parameter on one channel. Used by the Python class to set one channel, by the MATLAB class
+                                     // with firmware v21, and by the legacy MATLAB interface. See op 91 to set one parameter on all channels.
           inByte2 = PPUSB.readByte();
           inByte3 = PPUSB.readByte(); // inByte3 = channel (1-4)
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
@@ -110,30 +107,24 @@ void processUSBCommands() {
              case PARAM_CONTINUOUS_LOOP: {ContinuousLoopMode[inByte3] = PPUSB.readByte();} break;
              case PARAM_TRIGGER_MODE: {TriggerMode[inByte3] = PPUSB.readByte();} break;
           }
-          if (inByte2 < PARAM_CUSTOM_TRAIN_ID) { // Timing, voltage and trigger link params
-            if ((BurstDuration[inByte3] == 0) || (BurstInterval[inByte3] == 0)) {UsesBursts[inByte3] = false;} else {UsesBursts[inByte3] = true;}
-            if (CustomTrainTarget[inByte3] == 1) {UsesBursts[inByte3] = true;}
-            if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 0)) {UsesBursts[inByte3] = false;}
-          }
+          updateUsesBursts(inByte3);
           if (inByte2 == PARAM_RESTING_VOLTAGE) {
-            dacValue.uint16[inByte3] = RestingVoltage[inByte3];
-            dacWrite();
+            setDAC(inByte3, RestingVoltage[inByte3]);
           }
           if (inByte2 == PARAM_CONTINUOUS_LOOP) {
             if (!ContinuousLoopMode[inByte3] && ContinuousLoopModeOriginal[inByte3]) {
               killChannel(inByte3);
             }
           }
-          PulseDuration[inByte3] = ComputePulseDuration(IsBiphasic[inByte3], Phase1Duration[inByte3], InterPhaseInterval[inByte3], Phase2Duration[inByte3]);
           PPUSB.writeByte(1); // Send confirm byte
         } break;
   
-        case OP_LOAD_CUSTOM_TRAIN1_LEGACY: { // Op 75. Legacy op to program custom pulse train 1. Current MATLAB and Python interfaces use op 95
+        case OP_LOAD_CUSTOM_TRAIN1_LEGACY: { // Op 75. Legacy op to program custom pulse train 1. Used by the MATLAB and Python classes with firmware v21. Otherwise they use op 95
           usbLoadTarget = 0;
           usbLoadFlag = true;
         } break;
         
-        case OP_LOAD_CUSTOM_TRAIN2_LEGACY: { // Op 76. Legacy op to program custom pulse train 2 Current MATLAB and Python interfaces use op 95
+        case OP_LOAD_CUSTOM_TRAIN2_LEGACY: { // Op 76. Legacy op to program custom pulse train 2. Used by the MATLAB and Python classes with firmware v21. Otherwise they use op 95
           usbLoadTarget = 1;
           usbLoadFlag = true;
         } break;      
@@ -169,9 +160,7 @@ void processUSBCommands() {
         case OP_SET_FIXED_VOLTAGE: { // Op 79. Write specific voltage to an output channel (not a pulse train) 
           uint8_t myChannel = SerialReadByte() - 1; // Convert for zero-indexing
           uint16_t val = PPUSB.readUint16();
-          dacValue.uint16[myChannel] = val;
-          DACFlags[myChannel] = 1;
-          dacWrite();
+          setDAC(myChannel, val);
           if (val == RestingVoltage[myChannel]) {
             digitalWriteDirect(OutputLEDLines[myChannel], LOW);
           } else {
@@ -182,17 +171,13 @@ void processUSBCommands() {
         case OP_ABORT_ALL: { // Op 80. Soft-abort ongoing stimulation without disconnecting from client
          for (int i = 0; i < 4; i++) {
           killChannel(i);
-          DACFlags[i] = 1;
         }
-        dacWrite();
        } break;
        case OP_DISCONNECT: { // Op 81. Disconnect from PC app
           inMenu = MENU_TOP;
           for (int i = 0; i < 4; i++) {
             killChannel(i);
-            DACFlags[i] = 1;
           }
-          dacWrite();
           for (int i = 0; i < 16; i++) {
            CommanderString[i] = DefaultCommanderString[i];
          } 
@@ -205,8 +190,6 @@ void processUSBCommands() {
           ContinuousLoopMode[inByte2] = inByte3;
           if (!inByte3) {
             killChannel(inByte2);
-            DACFlags[inByte2] = 1;
-            dacWrite();
           }
           PPUSB.writeByte(1);
         } break;
@@ -260,11 +243,9 @@ void processUSBCommands() {
             validProgram = RestoreParametersFromSD();
             if (validProgram != SETTINGS_FILE_END_MARKER) { // If load failed, load defaults and report error
               LoadDefaultParameters();
-              settingsFile.close();
-              currentSettingsFileName = "defaultSettings.pps";
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-              settingsFile.open(currentSettingsFileNameChar, O_READ);
               confirmBit = 0;
+            } else {
+              outputRestingVoltages();
             }
           } else if (settingsOp == 3) { // Delete
             sd.remove(currentSettingsFileNameChar);
@@ -273,8 +254,9 @@ void processUSBCommands() {
           PPUSB.writeByte(confirmBit); // Send confirm byte (0 if a load failed)
         } break;
 
-        case OP_PROGRAM_PARAM_ALL_CHANNELS: { // Op 91. Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 
-                   // Op 74, a per-parameter & per-channel method, is used by the legacy interface
+        case OP_PROGRAM_PARAM_ALL_CHANNELS: { // Op 91. Program one parameter on all 4 output channels (or both trigger channels).
+                                              // Used by the MATLAB class, and by the Python class when all channels are set at once.
+                                              // See op 74 to set one channel.
           for (int i = 0; i < 4; i++) {
             ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
           }
@@ -307,24 +289,15 @@ void processUSBCommands() {
              case PARAM_TRIGGER_MODE: {PPUSB.readByteArray(TriggerMode, 2);} break;
           }
           for (int iChan = 0; iChan < 4; iChan++) {
-            if (inByte2 < PARAM_CUSTOM_TRAIN_ID) { // Timing, voltage and trigger link params
-              if ((BurstDuration[iChan] == 0) || (BurstInterval[iChan] == 0)) {UsesBursts[iChan] = false;} else {UsesBursts[iChan] = true;}
-              if (CustomTrainTarget[iChan] == 1) {UsesBursts[iChan] = true;}
-              if ((CustomTrainID[iChan] > 0) && (CustomTrainTarget[iChan] == 0)) {UsesBursts[iChan] = false;}
-            }
+            updateUsesBursts(iChan);
             if (inByte2 == PARAM_RESTING_VOLTAGE) {
-              dacValue.uint16[iChan] = RestingVoltage[iChan];
-              DACFlags[iChan] = 1;
+              setDAC(iChan, RestingVoltage[iChan]);
             }
             if (inByte2 == PARAM_CONTINUOUS_LOOP) {
               if (!ContinuousLoopMode[iChan] && ContinuousLoopModeOriginal[iChan]) {
                 killChannel(iChan);
               }
             }
-            PulseDuration[iChan] = ComputePulseDuration(IsBiphasic[iChan], Phase1Duration[iChan], InterPhaseInterval[iChan], Phase2Duration[iChan]);
-          }
-          if (inByte2 == PARAM_RESTING_VOLTAGE) { // If updating resting voltage
-              dacWrite();
           }
           PPUSB.writeByte(1); // Send confirm byte
         } break;
@@ -357,17 +330,12 @@ void processUSBCommands() {
          PPUSB.readByteArray(TriggerMode, 2);
          PPUSB.writeByte(1); // Send confirm byte
          for (int x = 0; x < 4; x++) {
-           if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
-           if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {UsesBursts[x] = false;}
-           PulseDuration[x] = ComputePulseDuration(IsBiphasic[x], Phase1Duration[x], InterPhaseInterval[x], Phase2Duration[x]);
-           dacValue.uint16[x] = RestingVoltage[x];
-           DACFlags[x] = 1;
+           updateUsesBursts(x);
+           setDAC(x, RestingVoltage[x]);
            if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
             killChannel(x);
            }
          }
-         dacWrite();
         } break;
         case OP_SEND_CURRENT_PARAMS: { // Op 93. Send all current parameters
           sendCurrentParams();
@@ -378,7 +346,7 @@ void processUSBCommands() {
           PPUSB.writeByte(N_CUSTOM_PULSE_TRAINS);
           PPUSB.writeUint32(MAX_CUSTOM_PULSES);
         } break;
-        case OP_LOAD_CUSTOM_TRAIN: { // Op 95. Load custom pulse train - Current method used by MATLAB and Python classes. See legacy methods 75 and 76 above.
+        case OP_LOAD_CUSTOM_TRAIN: { // Op 95. Load custom pulse train. The next byte is the train index (0 = train 1). Used by the MATLAB and Python classes. See legacy ops 75 and 76 above.
           usbLoadTarget = PPUSB.readByte();
           usbLoadFlag = true;
         } break;
@@ -389,9 +357,7 @@ void processUSBCommands() {
           #if (HARDWARE_VERSION > 2)
             EEPROM.put(0, ZeroCodeCalibration);
           #endif
-          dacValue.uint16[inByte] = RestingVoltage[inByte];
-          DACFlags[inByte] = 1;
-          dacWrite();
+          setDAC(inByte, RestingVoltage[inByte]);
         } break;
         case OP_FORMAT_SD_CARD: { // Op 97. Format microSD card
           #if (HARDWARE_VERSION > 2)
@@ -400,9 +366,8 @@ void processUSBCommands() {
             if (!mountOK) {
               write2Screen("SD CARD ERROR"," Click for menu");
             }
-            currentSettingsFileName = "default.pps";
-            currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
             LoadDefaultParameters();
+            SaveCurrentProgram2SD(); // Recreate the default settings file
           #endif
         } break;
         case OP_ABORT_CHANNELS: { // Op 98. Terminate ongoing stimulation on a specific set of output channels
@@ -410,10 +375,8 @@ void processUSBCommands() {
          for (int i = 0; i < 4; i++) {
           if bitRead(inByte, i) {
             killChannel(i);
-            DACFlags[i] = 1;
           }
         }
-        dacWrite();
        } break;
      }
     }

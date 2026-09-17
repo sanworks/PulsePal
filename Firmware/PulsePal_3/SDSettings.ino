@@ -24,20 +24,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Functions in this file:
 //   LoadDefaultParameters()
-//   breakLong()
-//   breakShort()
-//   writeLong2SD()
-//   writeShort2SD()
+//   writeLongToSD()
+//   writeShortToSD()
 //   readLongFromSD()
 //   readShortFromSD()
 //   readByteFromSD()
 //   SaveCurrentProgram2SD()
 //   RestoreParametersFromSD()
 //   rewindDirectory()
+//   isDefaultSettingsFile()
+//   findListedFile()
 //   formatCard() (HW3 only)
 
+// Loads the default parameters, sets the outputs to their resting voltage, and makes the default settings file the current
+// settings file. It does not write to the microSD card: setup() and op 97 write the default settings file with SaveCurrentProgram2SD().
 void LoadDefaultParameters() {
-  // This function is called on boot if the EEPROM has an invalid program (or no program).
   for (int x = 0; x < 4; x++) {
       Phase1Duration[x] = 2;
       InterPhaseInterval[x] = 2;
@@ -54,7 +55,7 @@ void LoadDefaultParameters() {
       CustomTrainID[x] = 0;
       CustomTrainTarget[x] = 0;
       CustomTrainLoop[x] = 0;
-      UsesBursts[x] = 0;
+      updateUsesBursts(x);
     }
     for (int y = 0; y < 4; y++) {
       TriggerAddress[0][y] = 1;
@@ -64,33 +65,22 @@ void LoadDefaultParameters() {
     }
    TriggerMode[0] = 0; 
    TriggerMode[1] = 0;
-   // Store default parameters to SD card
-   SaveCurrentProgram2SD();
+   settingsFile.close();
+   strcpy(currentSettingsFileNameChar, DEFAULT_SETTINGS_FILE_NAME);
+   settingsFile.open(currentSettingsFileNameChar, O_READ);
+   outputRestingVoltages(); // After file operations: on Pulse Pal 2 the DAC and microSD card share the SPI bus
 }
 
-void breakLong(unsigned long LongInt2Break) {
-  //BrokenBytes is a global array for the output of long int break operations
-  BrokenBytes[3] = (byte)(LongInt2Break >> 24);
-  BrokenBytes[2] = (byte)(LongInt2Break >> 16);
-  BrokenBytes[1] = (byte)(LongInt2Break >> 8);
-  BrokenBytes[0] = (byte)LongInt2Break;
+// Write a 32-bit or 16-bit integer to the settings file, least significant byte first
+void writeLongToSD(uint32_t value) {
+  settingsFile.write((uint8_t)value);
+  settingsFile.write((uint8_t)(value >> 8));
+  settingsFile.write((uint8_t)(value >> 16));
+  settingsFile.write((uint8_t)(value >> 24));
 }
-
-void breakShort(word Value2Break) {
-  //BrokenBytes is a global array for the output of long int break operations
-  BrokenBytes[1] = (byte)(Value2Break >> 8);
-  BrokenBytes[0] = (byte)Value2Break;
-}
-
-void writeLong2SD() {
-  settingsFile.write(BrokenBytes[0]);
-  settingsFile.write(BrokenBytes[1]);
-  settingsFile.write(BrokenBytes[2]);
-  settingsFile.write(BrokenBytes[3]);
-}
-void writeShort2SD() {
-  settingsFile.write(BrokenBytes[0]);
-  settingsFile.write(BrokenBytes[1]);
+void writeShortToSD(uint16_t value) {
+  settingsFile.write((uint8_t)value);
+  settingsFile.write((uint8_t)(value >> 8));
 }
 uint32_t readLongFromSD() {
   uint32_t output = 0;
@@ -131,18 +121,18 @@ void SaveCurrentProgram2SD() {
   settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR);
   // This function saves all parameters to the SD card, using the settings file layout above
   for (int chan = 0; chan < 4; chan++) {
-    breakLong(Phase1Duration[chan]); writeLong2SD();
-    breakLong(InterPhaseInterval[chan]); writeLong2SD();
-    breakLong(Phase2Duration[chan]); writeLong2SD();
-    breakLong(InterPulseInterval[chan]); writeLong2SD();
-    breakLong(BurstDuration[chan]); writeLong2SD();
-    breakLong(BurstInterval[chan]); writeLong2SD();
-    breakLong(PulseTrainDuration[chan]); writeLong2SD();
-    breakLong(PulseTrainDelay[chan]); writeLong2SD();
+    writeLongToSD(Phase1Duration[chan]);
+    writeLongToSD(InterPhaseInterval[chan]);
+    writeLongToSD(Phase2Duration[chan]);
+    writeLongToSD(InterPulseInterval[chan]);
+    writeLongToSD(BurstDuration[chan]);
+    writeLongToSD(BurstInterval[chan]);
+    writeLongToSD(PulseTrainDuration[chan]);
+    writeLongToSD(PulseTrainDelay[chan]);
     settingsFile.write(IsBiphasic[chan]);
-    breakShort(Phase1Voltage[chan]); writeShort2SD();
-    breakShort(Phase2Voltage[chan]); writeShort2SD();
-    breakShort(RestingVoltage[chan]); writeShort2SD();
+    writeShortToSD(Phase1Voltage[chan]);
+    writeShortToSD(Phase2Voltage[chan]);
+    writeShortToSD(RestingVoltage[chan]);
     settingsFile.write(CustomTrainID[chan]);
     settingsFile.write(CustomTrainTarget[chan]);
     settingsFile.write(CustomTrainLoop[chan]);
@@ -159,8 +149,9 @@ void SaveCurrentProgram2SD() {
   settingsFile.open(currentSettingsFileNameChar, O_READ);
 }
 
+// Reads parameters from the current settings file. Returns the last byte read, which is SETTINGS_FILE_END_MARKER if the file is valid.
+// If the file is invalid, the caller must load valid parameters (e.g. with LoadDefaultParameters()).
 byte RestoreParametersFromSD() {
-  // This function is called on Pulse Pal boot, to make pulse pal auto-load parameters from the previous session.
   settingsFile.rewind();
   for (int chan = 0; chan < 4; chan++) {
     Phase1Duration[chan] = readLongFromSD();
@@ -178,6 +169,7 @@ byte RestoreParametersFromSD() {
     CustomTrainID[chan] =  readByteFromSD();
     CustomTrainTarget[chan] = readByteFromSD();
     CustomTrainLoop[chan] = readByteFromSD();
+    updateUsesBursts(chan);
   }
   for (int chan = 0; chan < 2; chan++) {
     TriggerMode[chan] = readByteFromSD();
@@ -197,6 +189,44 @@ void rewindDirectory() {
   #else
     sd.vwd()->rewind();
   #endif
+}
+
+// Returns true if a file name is the default settings file name (not case sensitive, like FAT file names)
+bool isDefaultSettingsFile(const char* fileName) {
+  return strcasecmp(fileName, DEFAULT_SETTINGS_FILE_NAME) == 0;
+}
+
+// Finds the file at a position (1 = first) in the file lists shown by the joystick load, save and erase menus,
+// and copies its name to candidateSettingsFileChar. If includeDefault is true, the default settings file is first
+// in the list; otherwise it is omitted. Returns false if the list has no file at this position.
+bool findListedFile(uint16_t position, bool includeDefault) {
+  memset(candidateSettingsFileChar, 0, sizeof(candidateSettingsFileChar));
+  if (includeDefault) {
+    if (position == 1) {
+      strcpy(candidateSettingsFileChar, DEFAULT_SETTINGS_FILE_NAME);
+      return true;
+    }
+    position--;
+  }
+  candidateSettingsFile.close();
+  rewindDirectory();
+  uint16_t nListed = 0;
+  #if (HARDWARE_VERSION > 2)
+  while (candidateSettingsFile.openNext(&root, O_READ)) {
+  #else
+  while (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
+  #endif
+    candidateSettingsFile.getName(candidateSettingsFileChar, 16);
+    candidateSettingsFile.close();
+    if (!isDefaultSettingsFile(candidateSettingsFileChar)) {
+      nListed++;
+      if (nListed == position) {
+        return true;
+      }
+    }
+    memset(candidateSettingsFileChar, 0, sizeof(candidateSettingsFileChar));
+  }
+  return false;
 }
 
 #if (HARDWARE_VERSION == 3)

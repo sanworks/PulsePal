@@ -21,22 +21,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 // Pulse train playback. handler() is the hardware timer callback that plays pulse trains on all output
-// channels (see the description above it). The other functions stop playback.
+// channels (see the description above it). The other functions support it.
 //
 // Functions in this file:
 //   TC3_Handler() (HW2 only)
+//   mirrorAboutZero()
 //   handler()
 //   killChannel()
 //   AbortAllPulseTrains()
-//   ComputePulseDuration()
+//   updateUsesBursts()
 
 #if (HARDWARE_VERSION == 2)
-  // Interrupt service routine for timer counter TC3, configured in setup(). On Pulse Pal 3, IntervalTimer calls handler() directly.
+  // Interrupt service routine for timer counter TC3, configured in startHardwareTimer(). On Pulse Pal 3, IntervalTimer calls handler() directly.
   void TC3_Handler(void) {
     TC_GetStatus(TC1, 0); // Read the status register to clear the interrupt
     handler();
   }
 #endif
+
+// Returns the DAC code for the same voltage with the opposite sign. Used for phase 2 of biphasic custom pulses.
+static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
+  if (dacCode < 32768) {
+    return 32768 + (32768 - dacCode);
+  } else {
+    return 32768 - (dacCode - 32768);
+  }
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // handler() is the hardware timer callback, and it does all pulse train playback. It runs every TIMER_PERIOD
@@ -61,7 +71,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                               (bracketed phases are for biphasic pulses only)
 //     Parametric trains and looping custom trains stop at PulseTrainEndTime, unless ContinuousLoopMode is set.
 //     Non-looping custom trains stop after their last pulse.
-//     New voltages are stored in dacValue with DACFlags set, and written to the DAC at the start of the next cycle.
+//     New voltages are stored with setDAC(), and written to the DAC at the start of the next cycle.
+//     All DAC writes after setup() happen here, including values set with setDAC() from loop() while idle.
 //
 // Custom trains (CustomTrainID > 0) use CustomPulseTimes (relative to PulseTrainTimestamps) and CustomVoltages
 // in place of the parametric pulse timing and phase 1 voltage. CustomPulseTimeIndex tracks the current pulse.
@@ -73,8 +84,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // ---------------------------------------------------------------------------------------------------------------
 void handler(void) {
   if (StimulatingState == 0) {
-      if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
-        dacWrite(); // Update DAC to final voltages (should be resting voltage)
+      if ((LastStimulatingState == 1) || (DACFlag == 1)) { // The cycle on which all pulse trains have finished, or a DAC update was requested from loop()
+        dacWrite(); // Update DAC to final voltages (should be resting voltage), or to values set with setDAC()
         DACFlag = 0;
       }
       SystemTime = 0;
@@ -186,7 +197,7 @@ void handler(void) {
           }
           if (CustomTrainID[x] == 0) {
             NextPulseTransitionTime[x] = SystemTime;
-            dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+            setDAC(x, Phase1Voltage[x]);
           } else {
             NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0]; 
             CustomPulseTimeIndex[x] = 0;
@@ -208,9 +219,9 @@ void handler(void) {
                       PulseStatus[x] = PULSE_PHASE1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
                       if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                        dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                        setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
                       } else {
-                        dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                        setDAC(x, Phase1Voltage[x]);
                       }
                     }
                  }
@@ -232,7 +243,7 @@ void handler(void) {
                      if (SkipNextInterval == 0) {
                         PulseStatus[x] = PULSE_PHASE1;
                      }
-                     dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                     setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
                      digitalWriteDirect(OutputLEDLines[x], HIGH);
                      if (IsBiphasic[x] == 0) {
                         CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
@@ -255,7 +266,7 @@ void handler(void) {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
                       PulseStatus[x] = PULSE_IDLE;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
-                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      setDAC(x, RestingVoltage[x]);
                   } else {
                     if (CustomTrainTarget[x] == 0) {
                       NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
@@ -266,7 +277,7 @@ void handler(void) {
                       if (CustomTrainLoop[x] == 1) {
                               CustomPulseTimeIndex[x] = 0;
                               PulseTrainTimestamps[x] = SystemTime;
-                              dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                              setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
                               if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
                                 PulseStatus[x] = PULSE_PHASE1;
                               } else {
@@ -280,7 +291,7 @@ void handler(void) {
                     } else {
                       PulseStatus[x] = PULSE_IDLE;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
-                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      setDAC(x, RestingVoltage[x]);
                     }
                   }
      
@@ -289,14 +300,10 @@ void handler(void) {
                     NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
                     PulseStatus[x] = PULSE_PHASE2;
                     if (CustomTrainID[x] == 0) {
-                      dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                      setDAC(x, Phase2Voltage[x]);
                     } else {
                       
-                       if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
-                         dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                       } else {
-                         dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
-                       }
+                       setDAC(x, mirrorAboutZero(CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]));
                        if (CustomTrainTarget[x] == 0) {
                            CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
                        }
@@ -304,7 +311,7 @@ void handler(void) {
                   } else {
                     NextPulseTransitionTime[x] = SystemTime + InterPhaseInterval[x];
                     PulseStatus[x] = PULSE_INTER_PHASE;
-                    dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                    setDAC(x, RestingVoltage[x]);
                   }
                 }
               }
@@ -314,13 +321,9 @@ void handler(void) {
                  NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
                  PulseStatus[x] = PULSE_PHASE2;
                  if (CustomTrainID[x] == 0) {
-                   dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;  
+                   setDAC(x, Phase2Voltage[x]);  
                  } else {
-                   if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
-                     dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                   } else {
-                     dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
-                   }
+                   setDAC(x, mirrorAboutZero(CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]));
                    if (CustomTrainTarget[x] == 0) {
                        CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
                    }
@@ -344,11 +347,11 @@ void handler(void) {
                  if (!((CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0))) { 
                    PulseStatus[x] = PULSE_IDLE;
                    digitalWriteDirect(OutputLEDLines[x], LOW);
-                   dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                   setDAC(x, RestingVoltage[x]);
                  } else {
                    PulseStatus[x] = PULSE_PHASE1;
                    NextPulseTransitionTime[x] = (NextPulseTransitionTime[x] - InterPulseInterval[x]) + (Phase1Duration[x]);
-                   dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                   setDAC(x, Phase1Voltage[x]);
                  }
                }
             } break;
@@ -371,7 +374,7 @@ void handler(void) {
               NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
             }
               BurstStatus[x] = 0;
-              dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
+              setDAC(x, RestingVoltage[x]);
           } else {
           // Determine if burst status should go to 1 now
             NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
@@ -379,10 +382,10 @@ void handler(void) {
             PulseStatus[x] = PULSE_PHASE1;
             if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
               if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
-                  dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
+                  setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
               }
             } else {
-                 dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
+                 setDAC(x, Phase1Voltage[x]);
             }
             BurstStatus[x] = 1;
          }
@@ -411,7 +414,7 @@ void killChannel(byte outputChannel) {
   StimulusStatus[outputChannel] = 0;
   PulseStatus[outputChannel] = PULSE_IDLE;
   BurstStatus[outputChannel] = 0;
-  dacValue.uint16[outputChannel] = RestingVoltage[outputChannel]; DACFlag = 1; DACFlags[outputChannel] = 1;
+  setDAC(outputChannel, RestingVoltage[outputChannel]);
   digitalWriteDirect(OutputLEDLines[outputChannel], LOW);
 }
 
@@ -430,12 +433,9 @@ void AbortAllPulseTrains() {
     }
 }
 
-unsigned long ComputePulseDuration(byte myBiphasic, unsigned long myPhase1, unsigned long myPhaseInterval, unsigned long myPhase2) {
-    unsigned long Duration = 0;
-    if (myBiphasic == 0) {
-       Duration = myPhase1;
-     } else {
-       Duration = myPhase1 + myPhaseInterval + myPhase2;
-     }
-     return Duration;
+// Sets UsesBursts for an output channel (0-3) from its parameters. Call after any output channel parameter changes.
+void updateUsesBursts(byte channel) {
+  if ((BurstDuration[channel] == 0) || (BurstInterval[channel] == 0)) {UsesBursts[channel] = false;} else {UsesBursts[channel] = true;}
+  if (CustomTrainTarget[channel] == 1) {UsesBursts[channel] = true;}
+  if ((CustomTrainID[channel] > 0) && (CustomTrainTarget[channel] == 0)) {UsesBursts[channel] = false;}
 }

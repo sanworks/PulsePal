@@ -26,12 +26,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Functions in this file:
 //   UpdateSettingsMenu()
 //   centerText()
-//   skipToFile()
 //   RefreshChannelMenu()
 //   RefreshActionMenu()
 //   RefreshTriggerMenu()
+//   RefreshFileMenu()
 //   ReadDebouncedButton()
 //   FormatNumberForDisplay()
+//   placeEditCursor()
+//   redrawEditValue()
+//   digitsToVolts()
 //   ReturnUserValue()
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -62,12 +65,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            3     Exit -> MENU_CHANNEL_LIST
 //                       SelectedChannel is 1-2 while in this menu, and is restored to 5-6 on exit.
 // MENU_FILE_LOAD        myFilePos            0     Cancel -> MENU_CHANNEL_LIST
-//                                            1+    Nth file in the Pulse_Pal folder
+//                                            1     The default settings file (DEFAULT_SETTINGS_FILE_NAME)
+//                                            2+    Other files in the Pulse_Pal folder
 // MENU_FILE_SAVE        myFilePos            0     Cancel -> MENU_CHANNEL_LIST
 //                                            1     New file (opens the file name editor)
-//                                            2+    Nth file in the Pulse_Pal folder (overwrite)
-// MENU_FILE_DELETE      myFilePos            0-1   Cancel -> MENU_CHANNEL_LIST (position 1 displays the first file)
-//                                            2+    Nth file in the Pulse_Pal folder
+//                                            2+    Files in the Pulse_Pal folder, to overwrite
+// MENU_FILE_DELETE      myFilePos            0     Cancel -> MENU_CHANNEL_LIST
+//                                            1+    Files in the Pulse_Pal folder, to erase
+//                       The default settings file is not listed in the save and erase menus, and a new file cannot
+//                       use its name, so the default parameters can always be loaded. File lists come from
+//                       findListedFile(), and are drawn by RefreshFileMenu().
 //
 // To add an option: update the click handler below, the wrap-around limits in the left/right scroll handlers
 // below, the Refresh...Menu() function that draws the option, and ReturnUserValue() if it edits a parameter.
@@ -102,54 +109,20 @@ void UpdateSettingsMenu() {
               case 7: { // Save settings
                 inMenu = MENU_FILE_SAVE; // file save menu
                 myFilePos = 1;
-                write2Screen("<   New File   >", "");
+                RefreshFileMenu();
               } break;
               case 8: { // Load settings
                 inMenu = MENU_FILE_LOAD; // file load menu
                 settingsFile.close();
-                rewindDirectory();
                 myFilePos = 1;
-                #if (HARDWARE_VERSION > 2)
-                if (candidateSettingsFile.openNext(&root, O_READ)) {
-                #else
-                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                #endif
-                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                  // Center settings file name
-                  centerText(candidateSettingsFileChar);
-                  for (int i = 0; i < 16; i++) {
-                    candidateSettingsFileChar[i] = centeredText[i];
-                  }
-                  write2Screen("<Click to load >", candidateSettingsFileChar);
-                  candidateSettingsFile.close();
-                } else {
-                  write2Screen("!Error reading", "SD Card!");
-                }
+                RefreshFileMenu();
                 settingsFile.open(currentSettingsFileNameChar, O_READ);
               } break;
               case 9: { // Delete settings
-                inMenu = MENU_FILE_DELETE; 
+                inMenu = MENU_FILE_DELETE;
                 settingsFile.close();
-                rewindDirectory();
                 myFilePos = 1;
-                #if (HARDWARE_VERSION > 2)
-                if (candidateSettingsFile.openNext(&root, O_READ)) {
-                #else
-                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                #endif
-                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                  // Center settings file name
-                  centerText(candidateSettingsFileChar);
-                  for (int i = 0; i < 16; i++) {
-                    candidateSettingsFileChar[i] = centeredText[i];
-                  }
-                  write2Screen("<Click to erase>", candidateSettingsFileChar);
-                  candidateSettingsFile.close();
-                } else {
-                  write2Screen("!Error reading", "SD Card!");
-                }
+                RefreshFileMenu();
               } break;
               case 10: { // Info
                 if (!viewingInfo) {
@@ -207,18 +180,15 @@ void UpdateSettingsMenu() {
             case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1, UNITS_PULSES_BURSTS);} break; // Custom stim target (Pulses / Bursts)
             case 17: {
                       RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, UNITS_VOLTS); // Get user to input resting voltage
-                      dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; 
-                      DACFlags[SelectedChannel-1] = 1; 
-                      dacWrite(); // Update DAC
+                      setDAC(SelectedChannel-1, RestingVoltage[SelectedChannel-1]);
                       } break; 
             case 18: {
               // Exit to channel menu
             inMenu = MENU_CHANNEL_LIST; RefreshChannelMenu(SelectedChannel);
             } break;
            }
-           PulseDuration[SelectedChannel-1] = ComputePulseDuration(IsBiphasic[SelectedChannel-1], Phase1Duration[SelectedChannel-1], InterPhaseInterval[SelectedChannel-1], Phase2Duration[SelectedChannel-1]);
-           if (BurstDuration[SelectedChannel-1] == 0) {UsesBursts[SelectedChannel-1] = false;} else {UsesBursts[SelectedChannel-1] = true;}
-           if ((SelectedAction > 1) && (SelectedAction < 18)) {
+           updateUsesBursts(SelectedChannel-1);
+if ((SelectedAction > 1) && (SelectedAction < 18)) {
             //SaveCurrentProgram2SD();             
            }
           } break;
@@ -250,13 +220,7 @@ void UpdateSettingsMenu() {
              } else {
                  write2Screen("<  Continuous  >","      Off");
                  ContinuousLoopMode[SelectedChannel-1] = false;
-                 PulseStatus[SelectedChannel-1] = PULSE_IDLE;
-                 BurstStatus[SelectedChannel-1] = 0;
-                 StimulusStatus[SelectedChannel-1] = 0;
-                 CustomPulseTimeIndex[SelectedChannel-1] = 0;
-                 dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                 dacWrite();
-                 digitalWrite(OutputLEDLines[SelectedChannel-1], LOW);
+                 killChannel(SelectedChannel-1);
                }
             } break;
             case 4: {
@@ -305,9 +269,7 @@ void UpdateSettingsMenu() {
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
-            // Load settings file
-            //currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
-            
+            // Load the settings file selected in RefreshFileMenu()
             settingsFile.close();
             settingsFile.open(candidateSettingsFileChar, O_READ);
             validProgram = RestoreParametersFromSD();
@@ -316,6 +278,7 @@ void UpdateSettingsMenu() {
               delayMicroseconds(1000000);
               LoadDefaultParameters();
             } else {
+              outputRestingVoltages();
               for (int i = 0; i < 16; i++) {
                 currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
               }
@@ -337,6 +300,7 @@ void UpdateSettingsMenu() {
             myFilePos = 1;
           } else {
             // save selected or enter file name creation mode
+            boolean nameIsReserved = false;
             if (myFilePos == 1) {
               // Create file name
               CursorPos = 0;
@@ -355,10 +319,7 @@ void UpdateSettingsMenu() {
               ChoiceMade = 0;
               CursorOn = 0;
               CursorToggleTimer = 0;
-              CursorToggleThreshold = 20000;
-              if (HARDWARE_VERSION == 3) {
-                CursorToggleThreshold = 10000;
-              }
+              CursorToggleThreshold = CURSOR_BLINK_CYCLES;
               while (ChoiceMade == 0) {
                  CursorToggleTimer++;
                  if (CursorToggleTimer == CursorToggleThreshold) {
@@ -429,15 +390,23 @@ void UpdateSettingsMenu() {
               for (int i = 0; i < CursorPos+5; i++) {
                 currentSettingsFileName = currentSettingsFileName + candidateSettingsFileChar[i];
               }
-              settingsFile.close();
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-            } else {
+              if (isDefaultSettingsFile(currentSettingsFileName.c_str())) {
+                nameIsReserved = true;
+              } else {
+                settingsFile.close();
+                currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
+              }
+            } else { // Overwrite the file selected in RefreshFileMenu()
               for (int i = 0; i < 16; i++) {
                 currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
               }
             }
-            SaveCurrentProgram2SD();
-            write2Screen("Settings saved."," ");
+            if (nameIsReserved) {
+              write2Screen("Name reserved.", " ");
+            } else {
+              SaveCurrentProgram2SD();
+              write2Screen("Settings saved."," ");
+            }
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 7;
@@ -447,14 +416,16 @@ void UpdateSettingsMenu() {
           }
         } break;
         case MENU_FILE_DELETE: { // Handle click in delete menu
-          if (myFilePos < 2) {
+          if (myFilePos < 1) {
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 9;
             write2Screen(" ERASE SETTINGS ","<Click to erase>");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
-            sd.remove(candidateSettingsFileChar);
+            if (!isDefaultSettingsFile(candidateSettingsFileChar)) { // Selected in RefreshFileMenu(), which does not list the default file
+              sd.remove(candidateSettingsFileChar);
+            }
             write2Screen("Settings erased."," ");
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
@@ -538,74 +509,10 @@ void UpdateSettingsMenu() {
         case MENU_TRIGGER_CHANNEL: {
           RefreshTriggerMenu(SelectedInputAction); 
         } break;
-        case MENU_FILE_LOAD: { // Load settings file menu
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else {
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to load >", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
-        } break;
-        case MENU_FILE_SAVE: { // Save settings menu
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else if (myFilePos == 1) {
-            write2Screen("<   New File   >", "");
-          } else {
-            
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to save >", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
-        } break;
+        case MENU_FILE_LOAD:
+        case MENU_FILE_SAVE:
         case MENU_FILE_DELETE: {
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else {
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to erase>", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
+          RefreshFileMenu();
         } break;
     }
     NeedUpdate = 0;
@@ -626,20 +533,6 @@ void centerText(char myText[]) {
     for (int i = 0; i < 16; i++) {
       centeredText[i] = tempText[i];
     }
-}
-
-byte skipToFile(unsigned int fileNumber) {
-  byte ok = 0;
-  rewindDirectory();
-  for (int i = 0; i < fileNumber; i++) {
-    candidateSettingsFile.close();
-    #if (HARDWARE_VERSION > 2)
-      ok = candidateSettingsFile.openNext(&root, O_READ);
-    #else
-      ok = candidateSettingsFile.openNext(sd.vwd(), O_READ);
-    #endif
-  }
-  return ok;
 }
 
 void RefreshChannelMenu(int ThisChannel) {
@@ -688,6 +581,37 @@ void RefreshTriggerMenu(int ThisAction) {
           case 3: {write2Screen("<     Exit     >"," ");} break;
      }
 }
+
+// Draws the file load, save or erase menu (depending on inMenu) at position myFilePos. See the menu map above.
+// The name of the file shown is left in candidateSettingsFileChar, for the click handler.
+// If myFilePos is past the end of the file list, it steps back to the last file (or to the option before the list).
+void RefreshFileMenu() {
+  const char* header = "<Click to load >";
+  uint16_t firstFilePos = 1; // Menu position of the first file in the list
+  bool includeDefault = false;
+  switch (inMenu) {
+    case MENU_FILE_LOAD: {header = "<Click to load >"; includeDefault = true;} break;
+    case MENU_FILE_SAVE: {header = "<Click to save >"; firstFilePos = 2;} break;
+    case MENU_FILE_DELETE: {header = "<Click to erase>";} break;
+  }
+  if (myFilePos >= firstFilePos) {
+    if (!findListedFile(myFilePos - firstFilePos + 1, includeDefault)) {
+      myFilePos--;
+    }
+    if ((myFilePos >= firstFilePos) && findListedFile(myFilePos - firstFilePos + 1, includeDefault)) {
+      centerText(candidateSettingsFileChar);
+      write2Screen(header, centeredText);
+      return;
+    }
+  }
+  memset(candidateSettingsFileChar, 0, sizeof(candidateSettingsFileChar));
+  if (myFilePos == 0) {
+    write2Screen("<    Cancel    >", " ");
+  } else {
+    write2Screen("<   New File   >", ""); // Position 1 of the save menu
+  }
+}
+
 boolean ReadDebouncedButton() {
   DebounceTime = millis();
   ClickerButtonState = digitalRead(ClickerButtonLine);
@@ -774,6 +698,57 @@ if (Units == UNITS_VOLTS) {
   return Value2Display;
 }
 
+// Places the screen cursor under the digit being edited in ReturnUserValue(). On Pulse Pal 3 the value is centered,
+// so a minus sign shifts the digits right by one character.
+void placeEditCursor() {
+  #if (HARDWARE_VERSION < 3)
+    const uint8_t negSignOffset = 0;
+  #else
+    const uint8_t negSignOffset = 1;
+  #endif
+  if (Digits[0] < 0 || isNegativeZero) {
+    LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
+  } else {
+    LCD_setCursor(ValidCursorPositions[CursorPos], 1);
+  }
+}
+
+// Redraws the value being edited in ReturnUserValue() on the second line of the screen, with the cursor under the digit being edited
+void redrawEditValue(byte Units) {
+  LCD_noCursor();
+  #if (HARDWARE_VERSION == 3)
+    LCD_setCursor(0, 1);
+    LCD_print_no_trim_no_render("                ");
+  #endif
+  LCD_setCursor(0, 1);
+  LCD_print(FormatNumberForDisplay(UserValue, Units));
+  placeEditCursor();
+  LCD_cursor();
+  CursorOn = 1;
+}
+
+// Returns the voltage set by the digits being edited in ReturnUserValue(), and updates isNegativeZero.
+// Digits[0] is the ones digit (255 codes for -0), Digits[1] is tenths and Digits[2] is hundredths.
+float digitsToVolts() {
+  float volts = 0;
+  if (Digits[0] != 255) {
+    volts = volts + ((float)Digits[0]);
+  }
+  if ((Digits[0] < 0) || (Digits[0] == 255)) {
+    volts = volts - ((float)Digits[1]*0.1);
+    volts = volts - ((float)Digits[2]*0.01);
+  } else {
+    volts = volts + ((float)Digits[1]*0.1);
+    volts = volts + ((float)Digits[2]*0.01);
+  }
+  if (((Digits[0] == 255) && (volts == 0)) || (volts < 0)) {
+    isNegativeZero = 1;
+  } else {
+    isNegativeZero = 0;
+  }
+  return volts;
+}
+
 unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit, unsigned long StepSize, byte Units) {
       // This function returns a value that the user chooses by scrolling up and down a number list with the joystick, and clicks to select the desired number.
       // LowerLimit and UpperLimit are the limits for this selection, StepSize is the smallest step size the system will scroll. Units: see enum DisplayUnits.
@@ -849,7 +824,6 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
         case UNITS_PULSES_BURSTS: {ValidCursorPositions[0] = 7;} break;
         case UNITS_TRIGGER_MODE: {ValidCursorPositions[0] = 7;} break;
       }
-      uint8_t negSignOffset = 0;
      #else
       switch(Units) {
         case UNITS_INDEX: {ValidCursorPositions[0] = 0;} break;
@@ -859,7 +833,6 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
         case UNITS_PULSES_BURSTS: {ValidCursorPositions[0] = 0;} break;
         case UNITS_TRIGGER_MODE: {ValidCursorPositions[0] = 0;} break;
       }
-      uint8_t negSignOffset = 1;
      #endif
      // Initialize cursor starting positions and limits by unit type
      switch (Units) {
@@ -878,18 +851,10 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
        }
       CursorToggleTimer = 0;
       CursorOn = 1;   // Cursor starts visible
-      CursorToggleThreshold = 20000;
-
-      if (HARDWARE_VERSION == 3) {
-        CursorToggleThreshold = 10000;
-      }
+      CursorToggleThreshold = CURSOR_BLINK_CYCLES;
 
       // Show cursor immediately on entry
-      if (Digits[0] < 0 || isNegativeZero) {
-        LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-      } else {
-        LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-      }
+      placeEditCursor();
 
       LCD_cursor();
 
@@ -899,11 +864,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
        if (CursorToggleTimer == CursorToggleThreshold) {
          switch (CursorOn) {
            case 0: {
-            if (Digits[0] < 0 || isNegativeZero) {
-              LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-            } else {
-              LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-            }
+            placeEditCursor();
             LCD_cursor(); CursorOn = 1;
             } break;
            case 1: {
@@ -943,22 +904,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
                       } else {
                         CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
                       }
-                      CandidateVoltage = 0;
-                      if (Digits[0] != 255) {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      }
-                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
-                      } else {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
-                      }
-                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
-                        isNegativeZero = 1;
-                      } else {
-                        isNegativeZero = 0;
-                      }
+                      CandidateVoltage = digitsToVolts(); // Also updates isNegativeZero
                       
                       if (CandidateVoltage > 10) {
                         Digits[CursorPos] = Digits[CursorPos] - 1;
@@ -979,22 +925,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
             } break;
           }
           ScrollSpeedDelay = 200000;
-          LCD_noCursor();
-          #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); 
-            LCD_print_no_trim_no_render("                ");
-          #endif
-          LCD_setCursor(0, 1); 
-          LCD_print(FormatNumberForDisplay(UserValue, Units));
-          // Restore cursor to the active editable digit immediately.
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-          }
-
-          LCD_cursor();
-          CursorOn = 1;
+          redrawEditValue(Units);
        }
       else if (ClickerY > ClickerMaxThreshold) {
          switch(Units) {
@@ -1020,22 +951,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
                       } else {
                         CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
                       }
-                      CandidateVoltage = 0;
-                      if (Digits[0] != 255) {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      }
-                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
-                      } else {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
-                      }
-                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
-                        isNegativeZero = 1;
-                      } else {
-                        isNegativeZero = 0;
-                      }
+                      CandidateVoltage = digitsToVolts(); // Also updates isNegativeZero
                       CandidateVoltage = ((CandidateVoltage+10)/20)*DACBits;
                       UserValue = (unsigned int)CandidateVoltage;
                       delayMicroseconds(1000);
@@ -1050,21 +966,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
             } break;
           }
           ScrollSpeedDelay = 200000;
-          LCD_noCursor();
-          #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); 
-            LCD_print_no_trim_no_render("                ");
-          #endif
-          LCD_setCursor(0, 1); 
-          LCD_print(FormatNumberForDisplay(UserValue, Units));
-          // Restore cursor to the active editable digit immediately.
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-          }
-          LCD_cursor();
-          CursorOn = 1;
+          redrawEditValue(Units);
 
 
        } else {
@@ -1073,26 +975,12 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
        if ((ClickerX > ClickerMaxThreshold) && (CursorPos < CursorPosRightLimit)) {
          CursorPos = CursorPos + 1;
          ScrollSpeedDelay = 200000;
-         LCD_noCursor();
-          LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-          }
-         LCD_cursor(); CursorOn = 1; 
+         redrawEditValue(Units);
        }
        if ((ClickerX < ClickerMinThreshold) && (CursorPos > CursorPosLeftLimit)) {
          CursorPos = CursorPos - 1;
          ScrollSpeedDelay = 200000;
-         LCD_noCursor();
-         LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-          } 
-         LCD_cursor(); CursorOn = 1; 
+         redrawEditValue(Units);
        }
      delayMicroseconds(ScrollSpeedDelay);  
      }
