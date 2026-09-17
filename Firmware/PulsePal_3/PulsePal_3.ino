@@ -24,16 +24,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // ** DEPENDENCIES YOU NEED TO INSTALL FIRST** 
 
 // IF COMPILING FOR PULSE PAL v2 (Also see v3 Dependency Below)
-// 1.
 // Pulse Pal v2 requires the sdFat library v1, developed by Bill Greiman. (Thanks Bill!!)
 // Download it from here: https://github.com/greiman/SdFat/releases/tag/1.1.4
 // and copy it to your /Arduino/libraries folder.
-// 2.
-// Pulse Pal v2 requires the open source DueTimer library, developed by Ivan Seidel. (Thanks Ivan!!)
-// Download it from here: https://github.com/ivanseidel/DueTimer
-// and copy it to your /Arduino/Libraries folder.
-// The DueTimer library is open source, and protected by the MIT License.
-
 
 // IF COMPILING FOR PULSE PAL v3
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
@@ -42,6 +35,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // !!! To work on Teensy, a mod to u8g2/u8x8lib.cpp is required !!!
 // In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
+
+// CODE MAP
+// This sketch is split into tabs (the .ino files in this folder). Before compiling, Arduino joins them into a single
+// file (this file first, then the others in alphabetical order), so all tabs share the constants and global
+// variables defined in this file.
+//   PulsePal_3.ino   Build configuration, pin maps, named constants, global variables, setup() and loop()
+//   Playback.ino     Pulse train playback in the hardware timer callback, handler(). Start here for timing questions.
+//   USBOps.ino       Commands from the PC, processUSBCommands()
+//   Menu.ino         Thumb joystick menu, UpdateSettingsMenu(), with a map of all menu options, and the editor
+//                    for parameter values, ReturnUserValue()
+//   SDSettings.ino   Settings files on the microSD card, with the file layout
+//   Display.ino      Screen output and splash screen
+//   HardwareIO.ino   DAC writes, fast digital I/O and software reset
+// Supporting classes: ArCOM (USB serial data types), LiquidCrystal_U8G2 (Pulse Pal 3 screen)
 
 #define FIRMWARE_VERSION 22
 
@@ -70,7 +77,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #if (HARDWARE_VERSION == 2)
   #include <LiquidCrystal.h>
-  #include "DueTimer.h"
 #else
   #include <U8g2lib.h>
   #include "LiquidCrystal_U8G2.h"
@@ -91,6 +97,110 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define STRINGIFY(x) #x // This and the following line enable conversion of macros to strings (e.g. for displaying firmware version)
 #define TOSTRING(x) STRINGIFY(x)
+
+// ---------------------------------------------------------------------------------------------------------------
+// Named constants. The numeric values are part of the USB protocol, the settings file format or the menu logic,
+// so they must never be renumbered. Numbers are listed explicitly so that e.g. "op 91" is easy to find.
+// ---------------------------------------------------------------------------------------------------------------
+
+// USB op codes. Every command from the PC is: OpMenuByte (213), op code, then op-specific data.
+enum OpCode {
+  OP_HANDSHAKE = 72,                  // Returns 'K' and the firmware version
+  OP_PROGRAM_ALL_PARAMS_LEGACY = 73,  // Legacy. Replaced by op 92
+  OP_PROGRAM_ONE_PARAM_LEGACY = 74,   // Legacy. Replaced by op 91
+  OP_LOAD_CUSTOM_TRAIN1_LEGACY = 75,  // Legacy. Replaced by op 95
+  OP_LOAD_CUSTOM_TRAIN2_LEGACY = 76,  // Legacy. Replaced by op 95
+  OP_SOFT_TRIGGER = 77,               // Trigger output channels (1 bit per channel)
+  OP_DISPLAY_MESSAGE = 78,            // Show text on the screen
+  OP_SET_FIXED_VOLTAGE = 79,          // Set a static voltage on one output channel
+  OP_ABORT_ALL = 80,                  // Stop playback on all channels
+  OP_DISCONNECT = 81,                 // Disconnect from PC app
+  OP_SET_CONTINUOUS_LOOP = 82,        // Set continuous loop mode on one output channel
+  OP_SEND_SETTINGS_FILE = 85,         // Return the raw bytes of the current microSD settings file
+  OP_DEBUG_WRITE_PIN = 86,            // Development and debugging only
+  OP_DEBUG_READ_PIN = 87,             // Development and debugging only
+  OP_SET_CLIENT_NAME = 89,            // Set the 6-character client name shown on the top screen
+  OP_SD_SETTINGS_FILE = 90,           // Save, load or delete a microSD settings file
+  OP_PROGRAM_PARAM_ALL_CHANNELS = 91, // Program one parameter on all 4 output channels
+  OP_PROGRAM_ALL_PARAMS = 92,         // Program all parameters
+  OP_SEND_CURRENT_PARAMS = 93,        // Return all current parameters
+  OP_SEND_HARDWARE_INFO = 94,         // Return hardware version, timer period and custom train limits
+  OP_LOAD_CUSTOM_TRAIN = 95,          // Load a custom pulse train
+  OP_SET_ZERO_CODE_CALIBRATION = 96,  // Set DAC zero code calibration for one channel (stored in EEPROM on HW3)
+  OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only)
+  OP_ABORT_CHANNELS = 98              // Stop playback on specific output channels (1 bit per channel)
+};
+
+// Parameter IDs used by ops 74 and 91. These match the parameter codes in the MATLAB and Python interfaces.
+enum ParamID {
+  PARAM_IS_BIPHASIC = 1,
+  PARAM_PHASE1_VOLTAGE = 2,
+  PARAM_PHASE2_VOLTAGE = 3,
+  PARAM_PHASE1_DURATION = 4,
+  PARAM_INTER_PHASE_INTERVAL = 5,
+  PARAM_PHASE2_DURATION = 6,
+  PARAM_INTER_PULSE_INTERVAL = 7,
+  PARAM_BURST_DURATION = 8,
+  PARAM_BURST_INTERVAL = 9,
+  PARAM_PULSE_TRAIN_DURATION = 10,
+  PARAM_PULSE_TRAIN_DELAY = 11,
+  PARAM_LINK_TRIGGER1 = 12,
+  PARAM_LINK_TRIGGER2 = 13,
+  PARAM_CUSTOM_TRAIN_ID = 14,
+  PARAM_CUSTOM_TRAIN_TARGET = 15,
+  PARAM_CUSTOM_TRAIN_LOOP = 16,
+  PARAM_RESTING_VOLTAGE = 17,
+  PARAM_CONTINUOUS_LOOP = 18,
+  PARAM_TRIGGER_MODE = 128           // Applies to trigger channels, not output channels
+};
+
+// Values of inMenu, the current level of the thumb joystick menu. See the menu map above UpdateSettingsMenu().
+enum MenuLevel {
+  MENU_TOP = 0,                      // Top screen ("Click for menu")
+  MENU_CHANNEL_LIST = 1,             // Scroll through output channels, trigger channels, save/load/erase, info, reset, exit
+  MENU_OUTPUT_CHANNEL = 2,           // Parameters of one output channel
+  MENU_OUTPUT_TRIGGER = 3,           // Manual trigger options for one output channel (also see ReturnUserValue())
+  MENU_TRIGGER_CHANNEL = 4,          // Options for one trigger channel
+  MENU_FILE_LOAD = 5,
+  MENU_FILE_SAVE = 6,
+  MENU_FILE_DELETE = 7
+};
+
+// Display formats for FormatNumberForDisplay() and ReturnUserValue()
+enum DisplayUnits {
+  UNITS_INDEX = 0,                   // Plain integer (e.g. custom train number)
+  UNITS_TIME = 1,                    // Hardware timer cycles, shown in seconds
+  UNITS_VOLTS = 2,                   // 16-bit DAC code, shown in volts
+  UNITS_OFF_ON = 3,
+  UNITS_PULSES_BURSTS = 4,
+  UNITS_TRIGGER_MODE = 5
+};
+
+// Values of PulseStatus[], the phase of the pulse currently playing on each output channel
+enum PulseStatusValue {
+  PULSE_IDLE = 0,                    // Not delivering a pulse (e.g. inter-pulse interval)
+  PULSE_PHASE1 = 1,                  // Phase 1 (the only phase of a monophasic pulse)
+  PULSE_INTER_PHASE = 2,             // Interval between phases of a biphasic pulse
+  PULSE_PHASE2 = 3                   // Phase 2 of a biphasic pulse
+};
+
+// Values of TriggerMode[]
+enum TriggerModeValue {
+  TRIGGER_MODE_NORMAL = 0,           // Low to high transitions start playback, but do not stop it
+  TRIGGER_MODE_TOGGLE = 1,           // Low to high transitions start playback, or stop ongoing playback
+  TRIGGER_MODE_GATED = 2             // Low to high starts playback, high to low stops it
+};
+
+// Values of LineTriggerEvent[]
+enum TriggerEventValue {
+  TRIGGER_EVENT_NONE = 0,
+  TRIGGER_EVENT_LOW_TO_HIGH = 1,
+  TRIGGER_EVENT_HIGH_TO_LOW = 2
+};
+
+// microSD settings files. See the file layout above SaveCurrentProgram2SD().
+#define SETTINGS_FILE_END_MARKER 252 // Last byte of a valid settings file
+#define SETTINGS_FILE_N_PARAM_BYTES 178 // Bytes in a settings file before the end marker
 
 #if (HARDWARE_VERSION == 2)
   ArCOM PPUSB(SerialUSB); // Initialize ArCOM USB serial wrapper
@@ -168,13 +278,11 @@ uint16_t Phase1Voltage[4] = {0}; // The pulse voltage in monophasic mode, and ph
 uint16_t Phase2Voltage[4] = {0}; // Phase 2 voltage in biphasic mode.
 uint16_t RestingVoltage[4] = {32768}; // Voltage the system returns to between pulses (32768 bits = 0V)
 // The following are single byte parameters
-uint8_t CustomTrainID[4] = {0}; // If 0, uses above params. If 1 or 2, pulse times and voltages are played back from CustomTrain1 or 2
+uint8_t CustomTrainID[4] = {0}; // If 0, uses above params. If 1 to N_CUSTOM_PULSE_TRAINS, pulse times and voltages are played back from that custom train
 uint8_t CustomTrainTarget[4] = {0}; // If 0, custom times define start-times of pulses. If 1, custom times are start-times of bursts.
 uint8_t CustomTrainLoop[4] = {0}; // if 0, custom stim plays once. If 1, custom stim loops until PulseTrainDuration.
 uint8_t TriggerAddress[2][4] = {0}; // This specifies which output channels get triggered by trigger channel 1 (row 1) or trigger channel 2 (row 2)
-uint8_t TriggerMode[2] = {0}; // if 0, "Normal mode", low to high transitions on trigger channels start stimulation (but do not cancel it) 
-//                            if 1, "Toggle mode", same as normal mode, but low-to-high transitions do cancel ongoing pulse trains
-//                            if 2, "Pulse Gated mode", low to high starts playback and high to low stops it.
+uint8_t TriggerMode[2] = {0}; // Normal, toggle or pulse gated mode. See enum TriggerModeValue
 
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
@@ -185,12 +293,12 @@ int SerialReadStartTime = 0; // Time the serial read was started
 int Timeout = 500; // Times out after 500ms
 byte BrokenBytes[4] = {0}; // Used to store sequential bytes when converting bytes to short and long ints
 
-// Variables used in stimulus playback
+// Variables used to parse USB commands
 byte inByte; byte inByte2; byte inByte3; byte inByte4; byte CommandByte;
 byte LogicLevel = 0;
+
+// Variables used in stimulus playback
 unsigned long SystemTime = 0; // Number of cycles since stimulation start
-unsigned long MicrosTime = 0; // Actual system time (microseconds from boot, wraps over every 72m
-unsigned long BurstTimestamps[4] = {0};
 unsigned long PrePulseTrainTimestamps[4] = {0};
 unsigned long PulseTrainTimestamps[4] = {0};
 unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pulse-low timestamp for each channel
@@ -204,31 +312,25 @@ unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is s
   DMAMEM uint16_t CustomVoltages[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
 #endif
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
-unsigned long LastLoopTime = 0;
-byte PulseStatus[4] = {0}; // This is 0 if not delivering a pulse, 1 if phase 1, 2 if inter phase interval, 3 if phase 2.
+byte PulseStatus[4] = {0}; // Phase of the current pulse on each channel. See enum PulseStatusValue
 boolean BurstStatus[4] = {0}; // This is "true" during bursts and false during inter-burst intervals.
 boolean StimulusStatus[4] = {0}; // This is "true" for a channel when the stimulus train is actively being delivered
 boolean PreStimulusStatus[4] = {0}; // This is "true" for a channel during the pre-stimulus delay
 boolean InputValues[2] = {0}; // The values read directly from the two inputs (for analog, digital equiv. after thresholding)
 boolean InputValuesLastCycle[2] = {0}; // The values on the last cycle. Used to detect low to high transitions.
-byte LineTriggerEvent[2] = {0}; // 0 if no line trigger event detected, 1 if low-to-high, 2 if high-to-low.
-unsigned long InputLineDebounceTimestamp[2] = {0}; // Last time the line went from high to low
+byte LineTriggerEvent[2] = {0}; // Trigger line transition detected this cycle. See enum TriggerEventValue
 boolean UsesBursts[4] = {0};
 unsigned long PulseDuration[4] = {0}; // Duration of a pulse (sum of 3 phases for biphasic pulse)
 byte IsBiphasic[4] = {0};
-boolean IsCustomBurstTrain[4] = {0};
 byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 byte ContinuousLoopModeOriginal[4] = {0}; // Memory for previous continuous loop mode state
 byte StimulatingState = 0; // 1 if ANY channel is stimulating, 2 if this is the first cycle after the system was triggered. 
 byte LastStimulatingState = 0;
-boolean WasStimulating = 0; // true if any channel was stimulating on the previous loop. Used to force a DAC write after all channels end their stimulation, to return lines to 0
-int nStimulatingChannels = 0; // number of actively stimulating channels
 boolean DACFlag = 0; // true if any DAC channel needs to be updated
 byte DefaultInputLevel = 0; // 0 for PulsePal 0.3, 1 for 0.2 and 0.1. Logic is inverted by optoisolator
 
 // microSD and file management variables
 uint8_t buf[1];
-uint8_t buf2[2];
 uint8_t buf4[4];
 #if (HARDWARE_VERSION < 3)
   SdFat sd;
@@ -247,7 +349,7 @@ char currentSettingsFileNameChar[100]; // Filename must be converted from string
 char candidateSettingsFileChar[17];
 byte settingsOp = 0; // Reports whether to load an existing settings file, or create/overwrite, or delete
 byte validProgram = 0; // Reports whether the program just loaded from the SD card is valid 
-uint16_t myFilePos = 2; // Index of current file position in folder. 0 and 1 are . and ..
+uint16_t myFilePos = 2; // Selected position in the file load, save and erase menus. See the menu map above UpdateSettingsMenu()
 
 // variables used in thumb joystick menus
 char Value2Display[18] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '\0'}; // Holds text for sprintf
@@ -258,8 +360,6 @@ byte CursorPosLeftLimit = 0;
 byte ValidCursorPositions[9] = {0};
 int Digits[9] = {0};
 unsigned int DACBits = pow(2,16);
-float CandidateVoltage = 0; // used to see if voltage will go over limits for DAC
-float FractionalVoltage = 0;
 unsigned long CursorToggleTimer = 0; 
 unsigned long CursorToggleThreshold = 20000;
 boolean CursorOn = 0;
@@ -270,9 +370,8 @@ int ClickerMaxThreshold = 700;
 boolean ClickerButtonState = 0; // Value of digital reads from button line of joystick input device
 boolean LastClickerButtonState = 1;
 unsigned int DebounceTime = 0; // Time since the joystick button changed states
-int LastClickerYState = 0; // 0 for neutral, 1 for up, 2 for down.
 int LastClickerXState = 0; // 0 for neutral, 1 for left, 2 for right.
-int inMenu = 0; // Menu level: 0 for top, 1 for channel menu, 2 for action menu
+int inMenu = MENU_TOP; // Current menu level. See enum MenuLevel
 int SelectedChannel = 0; // Channel the user has selected
 int SelectedAction = 1; // Action the user has selected
 byte isNegativeZero = 0; // Keeps track of negative zero in digit-wise voltage adjustment menu
@@ -307,14 +406,13 @@ union { // dacValue contains a single sample of raw 16-bit data to be written on
 } dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
 
 // Other variables
-int ConnectedToApp = 0; // 0 if disconnected, 1 if connected
 unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_PERIOD
 void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 volatile byte usbLoadTarget = 0;
 volatile boolean usbLoadFlag = 0;
-union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
+union { // typeCast converts bytes read from the microSD card to 16 and 32-bit integers
     byte byteArray[4];
     uint16_t uint16;
     uint32_t uint32;
@@ -404,7 +502,7 @@ void setup() {
   
   
   validProgram = RestoreParametersFromSD();
-  if (validProgram != 252) { // 252 is the last byte in a real program file, returned from RestoreParametersFromSD()
+  if (validProgram != SETTINGS_FILE_END_MARKER) { // The end marker is the last byte in a valid settings file, returned from RestoreParametersFromSD()
     LoadDefaultParameters();
   }
 
@@ -413,2336 +511,52 @@ void setup() {
   InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); // Pre-read trigger channels
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;
-  LastLoopTime = SystemTime; 
   CycleFrequency = 1.0/(TIMER_PERIOD/1000000.0); // Given as decimals to force floating point arithmetic
   #if (HARDWARE_VERSION == 2)
-    Timer3.attachInterrupt(handler);
-    Timer3.start(TIMER_PERIOD); // Calls handler precisely every TIMER_PERIOD us
+    // The following hardware timer setup for Pulse Pal v2 is adapted from the DueTimer library by Ivan Seidel. (Thanks Ivan!!)
+    // https://github.com/ivanseidel/DueTimer
+    // Configure timer counter TC3 (TC1 channel 0) to interrupt every TIMER_PERIOD us.
+    // The interrupt runs TC3_Handler() in Playback.ino, which calls handler().
+    pmc_set_writeprotect(false); // Allow writes to the power management and timer registers
+    pmc_enable_periph_clk(ID_TC3); // Enable the timer's peripheral clock
+    TC_Configure(TC1, 0, TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC | TC_CMR_TCCLKS_TIMER_CLOCK2); // Count up from 0 to RC, then reset. Clocked at MCK/8 (10.5MHz)
+    TC_SetRC(TC1, 0, (uint32_t)round(VARIANT_MCK / 8.0 * TIMER_PERIOD / 1000000.0)); // RC = ticks per period (525 for 50us)
+    TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS; // Enable the interrupt on RC compare...
+    TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS; // ...and disable all other timer interrupts
+    NVIC_ClearPendingIRQ(TC3_IRQn);
+    NVIC_EnableIRQ(TC3_IRQn);
+    TC_Start(TC1, 0);
   #else
     hardwareTimer.begin(handler, TIMER_PERIOD);
   #endif
 }
 
+// loop() runs the joystick menu (only while no channel is playing), and handles commands from the PC.
+// All pulse train playback is done in handler().
 void loop() {
     if (StimulatingState == 0) {
       UpdateSettingsMenu();
     }
-    if (PPUSB.available()) { // If bytes are available in the serial port buffer and a custom pulse train transfer is not ongoing
-    CommandByte = PPUSB.readByte(); // Read a byte
-    if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
-      CommandByte = PPUSB.readByte(); // Read the command byte (an op code for the operation to execute)
-      switch (CommandByte) {
-        case 72: { // Handshake
-          PPUSB.writeByte(75); // Send 'K' (as in ok)
-          PPUSB.writeUint32(FIRMWARE_VERSION); // Send the firmware version as a 4 byte unsigned integer
-          ConnectedToApp = 1;
-          inMenu = 0;
-        } break;
-        case 73: { // Program the module - legacy method for backwards compatability. See op 92 for the more efficient method used by the current Python and MATLAB classes
-          for (int x = 0; x < 4; x++) { // Read timing parameters (4 byte integers)
-            Phase1Duration[x] = PPUSB.readUint32();
-            InterPhaseInterval[x] = PPUSB.readUint32();
-            Phase2Duration[x] = PPUSB.readUint32();
-            InterPulseInterval[x] = PPUSB.readUint32();
-            BurstDuration[x] = PPUSB.readUint32();
-            BurstInterval[x] = PPUSB.readUint32();
-            PulseTrainDuration[x] = PPUSB.readUint32();
-            PulseTrainDelay[x] = PPUSB.readUint32();
-          }
-          for (int x = 0; x < 4; x++) { // Read voltage parameters (2 byte integers)
-            Phase1Voltage[x] = PPUSB.readUint16();
-            Phase2Voltage[x] = PPUSB.readUint16();
-            RestingVoltage[x] = PPUSB.readUint16();
-          }
-          for (int x = 0; x < 4; x++) { // Read single byte parameters
-            IsBiphasic[x] = PPUSB.readByte();
-            CustomTrainID[x] = PPUSB.readByte();
-            CustomTrainTarget[x] = PPUSB.readByte();
-            CustomTrainLoop[x] = PPUSB.readByte();
-          }
-         for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
-           for (int y = 0; y < 4; y++) {
-             TriggerAddress[x][y] = PPUSB.readByte();
-           }
-         }
-         TriggerMode[0] = PPUSB.readByte(); // Read bytes that set interpretation of trigger channel voltage
-         TriggerMode[1] = PPUSB.readByte();
-         PPUSB.writeByte(1); // Send confirm byte
-         for (int x = 0; x < 4; x++) {
-           if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
-           if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {UsesBursts[x] = false;}
-           PulseDuration[x] = ComputePulseDuration(IsBiphasic[x], Phase1Duration[x], InterPhaseInterval[x], Phase2Duration[x]);
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-            IsCustomBurstTrain[x] = 1;
-           } else {
-            IsCustomBurstTrain[x] = 0;
-           }
-           dacValue.uint16[x] = RestingVoltage[x]; 
-         }
-         dacWrite();
-        } break;
-        
-        case 74: { // Program one parameter - legacy method for backwards compatability. See op 91 for the method used by the current Python and MATLAB classes
-          inByte2 = PPUSB.readByte();
-          inByte3 = PPUSB.readByte(); // inByte3 = channel (1-4)
-          inByte3 = inByte3 - 1; // Convert channel for zero-indexing
-          ContinuousLoopModeOriginal[inByte3] = ContinuousLoopMode[inByte3];
-          switch (inByte2) { 
-             case 1: {IsBiphasic[inByte3] = PPUSB.readByte();} break;
-             case 2: {Phase1Voltage[inByte3] = PPUSB.readUint16();} break;
-             case 3: {Phase2Voltage[inByte3] = PPUSB.readUint16();} break;
-             case 4: {Phase1Duration[inByte3] = PPUSB.readUint32();} break;
-             case 5: {InterPhaseInterval[inByte3] = PPUSB.readUint32();} break;
-             case 6: {Phase2Duration[inByte3] = PPUSB.readUint32();} break;
-             case 7: {InterPulseInterval[inByte3] = PPUSB.readUint32();} break;
-             case 8: {BurstDuration[inByte3] = PPUSB.readUint32();} break;
-             case 9: {BurstInterval[inByte3] = PPUSB.readUint32();} break;
-             case 10: {PulseTrainDuration[inByte3] = PPUSB.readUint32();} break;
-             case 11: {PulseTrainDelay[inByte3] = PPUSB.readUint32();} break;
-             case 12: {inByte4 = PPUSB.readByte(); TriggerAddress[0][inByte3] = inByte4;} break;
-             case 13: {inByte4 = PPUSB.readByte(); TriggerAddress[1][inByte3] = inByte4;} break;
-             case 14: {CustomTrainID[inByte3] = PPUSB.readByte();} break;
-             case 15: {CustomTrainTarget[inByte3] = PPUSB.readByte();} break;
-             case 16: {CustomTrainLoop[inByte3] = PPUSB.readByte();} break;
-             case 17: {RestingVoltage[inByte3] = PPUSB.readUint16();} break;
-             case 18: {ContinuousLoopMode[inByte3] = PPUSB.readByte();} break;
-             case 128: {TriggerMode[inByte3] = PPUSB.readByte();} break;
-          }
-          if (inByte2 < 14) {
-            if ((BurstDuration[inByte3] == 0) || (BurstInterval[inByte3] == 0)) {UsesBursts[inByte3] = false;} else {UsesBursts[inByte3] = true;}
-            if (CustomTrainTarget[inByte3] == 1) {UsesBursts[inByte3] = true;}
-            if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 0)) {UsesBursts[inByte3] = false;}
-          }
-          if (inByte2 == 17) {
-            dacValue.uint16[inByte3] = RestingVoltage[inByte3];
-            dacWrite();
-          }
-          if (inByte2 == 18) {
-            if (!ContinuousLoopMode[inByte3] && ContinuousLoopModeOriginal[inByte3]) {
-              killChannel(inByte3);
-            }
-          }
-          PulseDuration[inByte3] = ComputePulseDuration(IsBiphasic[inByte3], Phase1Duration[inByte3], InterPhaseInterval[inByte3], Phase2Duration[inByte3]);
-          if ((CustomTrainID[inByte3] > 0) && (CustomTrainTarget[inByte3] == 1)) {
-            IsCustomBurstTrain[inByte3] = 1;
-          } else {
-            IsCustomBurstTrain[inByte3] = 0;
-          }
-          PPUSB.writeByte(1); // Send confirm byte
-        } break;
-  
-        case 75: { // Legacy op to program custom pulse train 1. Current MATLAB and Python interfaces use op 95
-          usbLoadTarget = 0;
-          usbLoadFlag = true;
-        } break;
-        
-        case 76: { // Legacy op to program custom pulse train 2 Current MATLAB and Python interfaces use op 95
-          usbLoadTarget = 1;
-          usbLoadFlag = true;
-        } break;      
-        
-        case 77: { // Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
-          inByte2 = SerialReadByte();
-          for (int i = 0; i < 4; i++) {
-            // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
-            // (albeit at the expense of ~50us latency)
-            SoftTriggerScheduled[i] = bitRead(inByte2, i); 
-          }
-        } break;
-        case 78: { // Display a custom message on the oLED screen
-          LCD_clear();
-          LCD_home(); 
-          byte ByteCount = 0;
-          // read all the available characters
-          inByte2 = SerialReadByte(); // Total length of message to follow (including newline)
-          while (ByteCount < inByte2) {
-              // display each character to the LCD
-              inByte = SerialReadByte();
-              if (inByte != 254) {
-                lcd.write(inByte);
-              } else {
-                LCD_setCursor(0, 1);
-              }
-              ByteCount++;
-          }
-          #if (HARDWARE_VERSION == 3)
-            lcd.render();
-          #endif
-        } break;
-        case 79: { // Write specific voltage to an output channel (not a pulse train) 
-          uint8_t myChannel = SerialReadByte() - 1; // Convert for zero-indexing
-          uint16_t val = PPUSB.readUint16();
-          dacValue.uint16[myChannel] = val;
-          DACFlags[myChannel] = 1;
-          dacWrite();
-          if (val == RestingVoltage[myChannel]) {
-            digitalWriteDirect(OutputLEDLines[myChannel], LOW);
-          } else {
-            digitalWriteDirect(OutputLEDLines[myChannel], HIGH);
-          }
-          PPUSB.writeByte(1); // Send confirm byte
-        } break;
-        case 80: { // Soft-abort ongoing stimulation without disconnecting from client
-         for (int i = 0; i < 4; i++) {
-          killChannel(i);
-          DACFlags[i] = 1;
-        }
-        dacWrite();
-       } break;
-       case 81: { // Disconnect from PC app
-          ConnectedToApp = 0;
-          inMenu = 0;
-          for (int i = 0; i < 4; i++) {
-            killChannel(i);
-            DACFlags[i] = 1;
-          }
-          dacWrite();
-          for (int i = 0; i < 16; i++) {
-           CommanderString[i] = DefaultCommanderString[i];
-         } 
-          write2Screen(CommanderString," Click for menu");
-         } break;
-        case 82:{ // Set Continuous Loop mode (play the current parametric pulse train indefinitely)
-          inByte2 = SerialReadByte(); // Channel
-          inByte2 = inByte2 - 1; // Convert for zero-indexing
-          inByte3 = SerialReadByte(); // State (0 = off, 1 = on)
-          ContinuousLoopMode[inByte2] = inByte3;
-          if (!inByte3) {
-            killChannel(inByte2);
-            DACFlags[inByte2] = 1;
-            dacWrite();
-          }
-          PPUSB.writeByte(1);
-        } break;
-      case 85: { // Return the currently loaded parameter file from the microSD card
-          settingsFile.rewind();
-          for (int i = 0; i < 178; i++) {
-            settingsFile.read(buf, sizeof(buf));
-            SerialUSB.write(buf[0]);
-          }
-        } break;
-        
-        case 86: { // Override Arduino IO Lines (for development and debugging only - may disrupt normal function)
-          inByte2 = SerialReadByte();
-          inByte3 = SerialReadByte();
-          pinMode(inByte2, OUTPUT); digitalWrite(inByte2, inByte3);
-        } break; 
-        
-        case 87: { // Direct Read IO Lines (for development and debugging only - may disrupt normal function)
-          inByte2 = SerialReadByte();
-          pinMode(inByte2, INPUT);
-          delayMicroseconds(10);
-          LogicLevel = digitalRead(inByte2);
-          PPUSB.writeByte(LogicLevel);
-        } break; 
-        case 89: { // Receive new CommanderString (displayed on top line of OLED, i.e. "MATLAB connected"
-          for (int x = 0; x < 6; x++) {
-            CommanderString[x] = SerialReadByte();
-          }
-          for (int x = 6; x < 16; x++) {
-            CommanderString[x] = ClientStringSuffix[x-6];
-          }
-          write2Screen(CommanderString," Click for menu");
-        } break;
-        case 90: { // Save, load or delete the current microSD settings file
-          byte confirmBit = 1;
-          while (PPUSB.available()==0){}
-          settingsOp = PPUSB.readByte();
-          while (PPUSB.available()==0){}
-          settingsFileNameLength = PPUSB.readByte();
-          currentSettingsFileName = "";
-          for (int i = 0; i < settingsFileNameLength; i++) {
-            while (PPUSB.available()==0){}
-            currentSettingsFileName = currentSettingsFileName + (char)PPUSB.readByte();
-          }
-          settingsFile.close();
-          currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-          if (settingsOp == 1) { // Save
-            SaveCurrentProgram2SD();
-          } else if (settingsOp == 2) { // Load
-            settingsFile.open(currentSettingsFileNameChar, O_READ);
-            validProgram = RestoreParametersFromSD();
-            if (validProgram != 252) { // If load failed, load defaults and report error
-              LoadDefaultParameters();
-              settingsFile.close();
-              currentSettingsFileName = "defaultSettings.pps";
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-              settingsFile.open(currentSettingsFileNameChar, O_READ);
-              confirmBit = 0;
-            }
-          } else if (settingsOp == 3) { // Delete
-            sd.remove(currentSettingsFileNameChar);
-          }
-          settingsFile.rewind();
-          PPUSB.writeByte(confirmBit); // Send confirm byte (0 if a load failed)
-        } break;
-
-        case 91: { // Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 
-                   // Op 74, a per-parameter & per-channel method, is used by the legacy interface
-          for (int i = 0; i < 4; i++) {
-            ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
-          }
-          inByte2 = PPUSB.readByte();
-          switch (inByte2) { 
-             case 1: {PPUSB.readByteArray(IsBiphasic, 4);} break;
-             case 2: {PPUSB.readUint16Array(Phase1Voltage, 4);} break;
-             case 3: {PPUSB.readUint16Array(Phase2Voltage, 4);} break;
-             case 4: {PPUSB.readUint32Array(Phase1Duration,4);} break;
-             case 5: {PPUSB.readUint32Array(InterPhaseInterval,4);} break;
-             case 6: {PPUSB.readUint32Array(Phase2Duration, 4);} break;
-             case 7: {PPUSB.readUint32Array(InterPulseInterval, 4);} break;
-             case 8: {PPUSB.readUint32Array(BurstDuration, 4);} break;
-             case 9: {PPUSB.readUint32Array(BurstInterval, 4);} break;
-             case 10: {PPUSB.readUint32Array(PulseTrainDuration, 4);} break;
-             case 11: {PPUSB.readUint32Array(PulseTrainDelay, 4);} break;
-             case 12: {inByte3 = PPUSB.readByte(); TriggerAddress[0][0] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][1] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][2] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][3] = inByte3;} break;
-             case 13: {inByte3 = PPUSB.readByte(); TriggerAddress[1][0] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][1] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][2] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][3] = inByte3;} break;
-             case 14: {PPUSB.readByteArray(CustomTrainID, 4);} break;
-             case 15: {PPUSB.readByteArray(CustomTrainTarget, 4);} break;
-             case 16: {PPUSB.readByteArray(CustomTrainLoop, 4);} break;
-             case 17: {PPUSB.readUint16Array(RestingVoltage, 4);} break;
-             case 18: {PPUSB.readByteArray(ContinuousLoopMode, 4);} break;
-             case 128: {PPUSB.readByteArray(TriggerMode, 2);} break;
-          }
-          for (int iChan = 0; iChan < 4; iChan++) {
-            if (inByte2 < 14) {
-              if ((BurstDuration[iChan] == 0) || (BurstInterval[iChan] == 0)) {UsesBursts[iChan] = false;} else {UsesBursts[iChan] = true;}
-              if (CustomTrainTarget[iChan] == 1) {UsesBursts[iChan] = true;}
-              if ((CustomTrainID[iChan] > 0) && (CustomTrainTarget[iChan] == 0)) {UsesBursts[iChan] = false;}
-            }
-            if (inByte2 == 17) {
-              dacValue.uint16[iChan] = RestingVoltage[iChan];
-              DACFlags[iChan] = 1;
-            }
-            if (inByte2 == 18) {
-              if (!ContinuousLoopMode[iChan] && ContinuousLoopModeOriginal[iChan]) {
-                killChannel(iChan);
-              }
-            }
-            PulseDuration[iChan] = ComputePulseDuration(IsBiphasic[iChan], Phase1Duration[iChan], InterPhaseInterval[iChan], Phase2Duration[iChan]);
-            if ((CustomTrainID[iChan] > 0) && (CustomTrainTarget[iChan] == 1)) {
-              IsCustomBurstTrain[iChan] = 1;
-            } else {
-              IsCustomBurstTrain[iChan] = 0;
-            }
-          }
-          if (inByte2 == 17) { // If updating resting voltage
-              dacWrite();
-          }
-          PPUSB.writeByte(1); // Send confirm byte
-        } break;
-
-        case 92: {  // Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
-          for (int i = 0; i < 4; i++) {
-            ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
-          }
-          PPUSB.readUint32Array(Phase1Duration, 4);
-          PPUSB.readUint32Array(InterPhaseInterval, 4);
-          PPUSB.readUint32Array(Phase2Duration, 4);
-          PPUSB.readUint32Array(InterPulseInterval, 4);
-          PPUSB.readUint32Array(BurstDuration, 4);
-          PPUSB.readUint32Array(BurstInterval, 4);
-          PPUSB.readUint32Array(PulseTrainDuration, 4);
-          PPUSB.readUint32Array(PulseTrainDelay, 4);
-          PPUSB.readUint16Array(Phase1Voltage, 4);
-          PPUSB.readUint16Array(Phase2Voltage, 4);
-          PPUSB.readUint16Array(RestingVoltage, 4);
-          PPUSB.readByteArray(IsBiphasic, 4);
-          PPUSB.readByteArray(CustomTrainID, 4);
-          PPUSB.readByteArray(CustomTrainTarget, 4);
-          PPUSB.readByteArray(CustomTrainLoop, 4);
-          PPUSB.readByteArray(ContinuousLoopMode, 4);
-         for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
-           for (int y = 0; y < 4; y++) {
-             TriggerAddress[x][y] = PPUSB.readByte();
-           }
-         }
-         PPUSB.readByteArray(TriggerMode, 2);
-         PPUSB.writeByte(1); // Send confirm byte
-         for (int x = 0; x < 4; x++) {
-           if ((BurstDuration[x] == 0) || (BurstInterval[x] == 0)) {UsesBursts[x] = false;} else {UsesBursts[x] = true;}
-           if (CustomTrainTarget[x] == 1) {UsesBursts[x] = true;}
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {UsesBursts[x] = false;}
-           PulseDuration[x] = ComputePulseDuration(IsBiphasic[x], Phase1Duration[x], InterPhaseInterval[x], Phase2Duration[x]);
-           if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-            IsCustomBurstTrain[x] = 1;
-           } else {
-            IsCustomBurstTrain[x] = 0;
-           }
-           dacValue.uint16[x] = RestingVoltage[x];
-           DACFlags[x] = 1;
-           if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
-            killChannel(x);
-           }
-         }
-         dacWrite();
-        } break;
-        case 93: {
-          sendCurrentParams();
-        } break;
-        case 94: { // Send hardware info
-          PPUSB.writeByte(HARDWARE_VERSION);
-          PPUSB.writeUint32(TIMER_PERIOD);
-          PPUSB.writeByte(N_CUSTOM_PULSE_TRAINS);
-          PPUSB.writeUint32(MAX_CUSTOM_PULSES);
-        } break;
-        case 95: { // Load custom pulse train - Current method used by MATLAB and Python classes. See legacy methods 75 and 76 above.
-          usbLoadTarget = PPUSB.readByte();
-          usbLoadFlag = true;
-        } break;
-        case 96: { // Set Calibration to offset DAC Zero Code Error on a single channel
-          inByte = PPUSB.readByte();
-          ZeroCodeCalibration[inByte] = PPUSB.readUint16();
-          PPUSB.writeByte(1); // Send confirm byte
-          #if (HARDWARE_VERSION > 2)
-            EEPROM.put(0, ZeroCodeCalibration);
-          #endif
-          dacValue.uint16[inByte] = RestingVoltage[inByte];
-          DACFlags[inByte] = 1;
-          dacWrite();
-        } break;
-        case 97: { // Format microSD card
-          #if (HARDWARE_VERSION > 2)
-            mountOK = formatCard();
-            PPUSB.writeByte(mountOK);
-            if (!mountOK) {
-              write2Screen("SD CARD ERROR"," Click for menu");
-            }
-            currentSettingsFileName = "default.pps";
-            currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-            LoadDefaultParameters();
-          #endif
-        } break;
-        case 98: { // Terminate ongoing stimulation on a specific set of output channels
-         inByte = PPUSB.readByte();
-         for (int i = 0; i < 4; i++) {
-          if bitRead(inByte, i) {
-            killChannel(i);
-            DACFlags[i] = 1;
-          }
-        }
-        dacWrite();
-       } break;
-     }
-    }
-  }
+    processUSBCommands(); // Read and execute a command from the PC, if one is available
   if (usbLoadFlag) {
     loadCustomPulseTrain(usbLoadTarget);
   }
   usbLoadFlag = false;
   if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
     #if (HARDWARE_VERSION == 2)
-      Timer3.stop();
+      NVIC_DisableIRQ(TC3_IRQn); // Stop the hardware timer
+      TC_Stop(TC1, 0);
     #else
       hardwareTimer.end();
     #endif
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
     SerialReadTimedout = 0;
     #if (HARDWARE_VERSION == 2)
-      Timer3.start();
+      NVIC_ClearPendingIRQ(TC3_IRQn); // Restart the hardware timer
+      NVIC_EnableIRQ(TC3_IRQn);
+      TC_Start(TC1, 0);
     #else
       hardwareTimer.begin(handler, TIMER_PERIOD);
     #endif
   }
 }
-
-void handler(void) {                  
-  if (StimulatingState == 0) {
-      if (LastStimulatingState == 1) { // The cycle on which all pulse trains have finished
-        dacWrite(); // Update DAC to final voltages (should be resting voltage)
-        DACFlag = 0;
-      }
-      SystemTime = 0;
-   } else {
-  //     if (StimulatingState == 2) {
-  //        // Place to include custom code that executes on the first cycle of a pulse train
-  //     }
-       StimulatingState = 1;
-       if (DACFlag == 1) { // A DAC update was requested
-         dacWrite(); // Update DAC
-         DACFlag = 0;
-       }
-       SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
-       ClickerButtonState = digitalReadDirect(ClickerButtonLine); // Read the joystick button
-       if (ClickerButtonState == 0){ // A button click (pulls line to ground, = logic 0) and ends ongoing stimulation on all channels.
-         AbortAllPulseTrains();
-       }
-    }
-    for (int i = 0; i<4; i++) {
-      if(SoftTriggerScheduled[i]) { // Soft triggers are "scheduled" to be handled on the next cycle, since the serial read took too much time.
-        SoftTriggered[i] = 1;
-        SoftTriggerScheduled[i] = 0;
-      }
-    }
-    LastStimulatingState = StimulatingState;
-
-    // Read values of trigger pins
-    LineTriggerEvent[0] = 0; LineTriggerEvent[1] = 0;
-    for (int x = 0; x < 2; x++) {
-         InputValues[x] = digitalReadDirect(TriggerLines[x]);
-         if (InputValues[x] == TriggerLevel) {
-           digitalWriteDirect(InputLEDLines[x], HIGH);
-         } else {
-           digitalWriteDirect(InputLEDLines[x], LOW);
-         }
-         // update LineTriggerEvent with logic representing logic transition
-         if ((InputValues[x] == TriggerLevel) && (InputValuesLastCycle[x] == DefaultInputLevel)) {
-           LineTriggerEvent[x] = 1; // Low to high transition
-         } else if ((InputValues[x] == DefaultInputLevel) && (InputValuesLastCycle[x] == TriggerLevel)) {
-           LineTriggerEvent[x] = 2; // High to low transition
-         }
-         InputValuesLastCycle[x] = InputValues[x];
-    }
-       
-    for (int x = 0; x < 4; x++) {
-      byte KillChannel = 0;
-       // If trigger channels are in toggle mode and a trigger arrived, or in gated mode and line is low, shut down any governed channels that are playing a pulse train
-       if (((StimulusStatus[x] == 1) || (PreStimulusStatus[x] == 1))) {
-          for (int y = 0; y < 2; y++) {
-            if (TriggerAddress[y][x]) {
-                if ((TriggerMode[y] == 1) && (LineTriggerEvent[y] == 1)) {
-                     KillChannel = 1;
-                }
-                if ((TriggerMode[y] == 2) && (LineTriggerEvent[y] == 2)) {
-                    if ((TriggerMode[1-y] == 2) && (TriggerAddress[1-y][x])) {
-                      if (InputValues[1-y] == DefaultInputLevel) {
-                        KillChannel = 1;
-                      }
-                    } else {
-                      KillChannel = 1;
-                    }
-                }
-            }
-          }   
-          if (KillChannel) {
-             killChannel(x);
-          }
-        
-      } else {
-       // Adjust StimulusStatus to reflect any new trigger events
-       if ((TriggerAddress[0][x] && (LineTriggerEvent[0] == 1)) || SoftTriggered[x]) {
-         if (StimulatingState == 0) {SystemTime = 0; StimulatingState = 2;}
-         PreStimulusStatus[x] = 1; BurstStatus[x] = 1; PrePulseTrainTimestamps[x] = SystemTime; PulseStatus[x] = 0; 
-         SoftTriggered[x] = 0;
-       }
-       if (TriggerAddress[1][x] && (LineTriggerEvent[1] == 1)) {
-         if (StimulatingState == 0) {SystemTime = 0; StimulatingState = 2;}
-         PreStimulusStatus[x] = 1; BurstStatus[x] = 1; PrePulseTrainTimestamps[x] = SystemTime; PulseStatus[x] = 0;
-       }
-      }
-    }
-    if (StimulatingState != 2) {
-     StimulatingState = 0; // null condition, will be overridden in loop if any channels are still stimulating.
-    }
-    
-    // Check clock and adjust line levels for new time as per programming
-    for (int x = 0; x < 4; x++) {
-      byte thisTrainID = CustomTrainID[x];
-      byte thisTrainIDIndex = thisTrainID-1;
-      if (PreStimulusStatus[x] == 1) {
-          if (StimulatingState != 2) {
-           StimulatingState = 1;
-          }
-        if (SystemTime == (PrePulseTrainTimestamps[x] + PulseTrainDelay[x])) {
-          PreStimulusStatus[x] = 0;
-          StimulusStatus[x] = 1;
-          PulseStatus[x] = 0;
-          PulseTrainTimestamps[x] = SystemTime;
-          PulseTrainEndTime[x] = SystemTime + PulseTrainDuration[x];
-          if (CustomTrainTarget[x] == 1)  {
-            if (CustomTrainID[x] > 0) {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0];
-            } else {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[1][0]; // Legacy behavior: burst target with no custom train selected
-            }
-            BurstStatus[x] = 0;
-          } else {
-            NextBurstTransitionTime[x] = SystemTime+BurstDuration[x];
-          }
-          if (CustomTrainID[x] == 0) {
-            NextPulseTransitionTime[x] = SystemTime;
-            dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
-          } else {
-            NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0]; 
-            CustomPulseTimeIndex[x] = 0;
-          }
-        }
-      }
-      if (StimulusStatus[x] == 1) { // if this output line has been triggered and is delivering a pulse train
-          if (StimulatingState != 2) {
-           StimulatingState = 1; 
-          }
-        if (BurstStatus[x] == 1) { // if this output line is currently gated "on"
-          switch (PulseStatus[x]) { // depending on the phase of the pulse
-           case 0: { // if this is the inter-pulse interval
-            // determine if the next pulse should start now
-            if ((CustomTrainID[x] == 0) || ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1))) {
-              if (SystemTime == NextPulseTransitionTime[x]) {
-                NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                    if (!((UsesBursts[x] == 1) && (NextPulseTransitionTime[x] >= NextBurstTransitionTime[x]))){ // so that it doesn't start a pulse it can't finish due to burst end
-                      PulseStatus[x] = 1;
-                      digitalWriteDirect(OutputLEDLines[x], HIGH);
-                      if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                        dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-                      } else {
-                        dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                      }
-                    }
-                 }
-              } else {
-               if (SystemTime == NextPulseTransitionTime[x]) {
-                     int SkipNextInterval = 0;
-                     if ((CustomTrainLoop[x] == 1) && (CustomPulseTimeIndex[x] == CustomTrainNpulses[thisTrainIDIndex])) {
-                            CustomPulseTimeIndex[x] = 0;
-                            PulseTrainTimestamps[x] = SystemTime;
-                     }
-                     if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]) {
-                       if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
-                         NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                       } else {
-                         NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1];  
-                         SkipNextInterval = 1;
-                       }
-                     }
-                     if (SkipNextInterval == 0) {
-                        PulseStatus[x] = 1;
-                     }
-                     dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-                     digitalWriteDirect(OutputLEDLines[x], HIGH);
-                     if (IsBiphasic[x] == 0) {
-                        CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                     }
-                     if (CustomPulseTimeIndex[x] > (CustomTrainNpulses[thisTrainIDIndex])){
-                       CustomPulseTimeIndex[x] = 0;
-                       if (CustomTrainLoop[x] == 0) {
-                         killChannel(x);
-                       }
-                     }
-                  }
-              } 
-            } break;
-            
-            case 1: { // if this is the first phase of the pulse
-             // determine if this phase should end now
-             if (SystemTime == NextPulseTransitionTime[x]) {
-                if (IsBiphasic[x] == 0) {
-                  if (CustomTrainID[x] == 0) {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                      PulseStatus[x] = 0;
-                      digitalWriteDirect(OutputLEDLines[x], LOW);
-                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                  } else {
-                    if (CustomTrainTarget[x] == 0) {
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
-                    } else {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                    }
-                    if (CustomPulseTimeIndex[x] == CustomTrainNpulses[thisTrainIDIndex]) {
-                      if (CustomTrainLoop[x] == 1) {
-                              CustomPulseTimeIndex[x] = 0;
-                              PulseTrainTimestamps[x] = SystemTime;
-                              dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-                              if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
-                                PulseStatus[x] = 1;
-                              } else {
-                                PulseStatus[x] = 0;
-                              }
-                              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + Phase1Duration[x];
-                              CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                      } else {
-                        killChannel(x);
-                      }
-                    } else {
-                      PulseStatus[x] = 0;
-                      digitalWriteDirect(OutputLEDLines[x], LOW);
-                      dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                    }
-                  }
-     
-                } else {
-                  if (InterPhaseInterval[x] == 0) {
-                    NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
-                    PulseStatus[x] = 3;
-                    if (CustomTrainID[x] == 0) {
-                      dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                    } else {
-                      
-                       if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
-                         dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                       } else {
-                         dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
-                       }
-                       if (CustomTrainTarget[x] == 0) {
-                           CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                       }
-                    } 
-                  } else {
-                    NextPulseTransitionTime[x] = SystemTime + InterPhaseInterval[x];
-                    PulseStatus[x] = 2;
-                    dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                  }
-                }
-              }
-            } break;
-            case 2: {
-               if (SystemTime == NextPulseTransitionTime[x]) {
-                 NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
-                 PulseStatus[x] = 3;
-                 if (CustomTrainID[x] == 0) {
-                   dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;  
-                 } else {
-                   if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
-                     dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                   } else {
-                     dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
-                   }
-                   if (CustomTrainTarget[x] == 0) {
-                       CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                   }
-                 }
-               }
-            } break;
-            case 3: {
-              if (SystemTime == NextPulseTransitionTime[x]) {
-                  if (CustomTrainID[x] == 0) {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                  } else {
-                    if (CustomTrainTarget[x] == 0) {
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
-                      if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
-                          killChannel(x);
-                     }
-                    } else {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                    }
-                  }
-                 if (!((CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0))) { 
-                   PulseStatus[x] = 0;
-                   digitalWriteDirect(OutputLEDLines[x], LOW);
-                   dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                 } else {
-                   PulseStatus[x] = 1;
-                   NextPulseTransitionTime[x] = (NextPulseTransitionTime[x] - InterPulseInterval[x]) + (Phase1Duration[x]);
-                   dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
-                 }
-               }
-            } break;
-            
-          }
-        }
-          // Determine if burst status should go to 0 now
-       if (UsesBursts[x] == true) {
-        if (SystemTime == NextBurstTransitionTime[x]) {
-          if (BurstStatus[x] == 1) {
-            if (CustomTrainID[x] == 0) {
-                     NextPulseTransitionTime[x] = SystemTime + BurstInterval[x];
-                     NextBurstTransitionTime[x] = SystemTime + BurstInterval[x];              
-            } else if (CustomTrainTarget[x] == 1) {
-              CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-              if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
-                  killChannel(x);
-              }
-              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
-              NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
-            }
-              BurstStatus[x] = 0;
-              dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
-          } else {
-          // Determine if burst status should go to 1 now
-            NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
-            NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-            PulseStatus[x] = 1;
-            if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-              if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
-                  dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-              }
-            } else {
-                 dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
-            }
-            BurstStatus[x] = 1;
-         }
-        }
-       } 
-        // Determine if Stimulus Status should go to 0 now
-        if ((SystemTime == PulseTrainEndTime[x]) && (StimulusStatus[x] == 1)) {
-          if (((CustomTrainID[x] > 0) && (CustomTrainLoop[x] == 1)) || (CustomTrainID[x] == 0)) {
-            if (ContinuousLoopMode[x] == false) {
-                killChannel(x);
-            }
-          }
-          if (PulseTrainDuration_ExamplePulse[x] > 0) {
-            PulseTrainDuration[x] = PulseTrainDuration_ExamplePulse[x];
-            PulseTrainDuration_ExamplePulse[x] = 0;
-          }
-        }
-     }
-   }
-}
-// End hw timer callback
-
-void killChannel(byte outputChannel) {
-  CustomPulseTimeIndex[outputChannel] = 0;
-  PreStimulusStatus[outputChannel] = 0;
-  StimulusStatus[outputChannel] = 0;
-  PulseStatus[outputChannel] = 0;
-  BurstStatus[outputChannel] = 0;
-  dacValue.uint16[outputChannel] = RestingVoltage[outputChannel]; DACFlag = 1; DACFlags[outputChannel] = 1;
-  digitalWriteDirect(OutputLEDLines[outputChannel], LOW);
-}
-
-void dacWrite() {
-  digitalWriteDirect(LDACPin,HIGH);
-  for (int i = 0; i < 4; i++) {
-    if (DACFlags[i]) {
-      dacValue.uint16[i] = clampU16(dacValue.uint16[i], ZeroCodeCalibration[i]);
-      digitalWriteDirect(SyncPin,LOW);
-      dacBuffer[0] = dacMap[i];
-      dacBuffer[1] = dacValue.byteArray[1+(i*2)];
-      dacBuffer[2] = dacValue.byteArray[0+(i*2)];
-      SPI.transfer(dacBuffer,3);
-      digitalWriteDirect(SyncPin,HIGH);
-      DACFlags[i] = 0;
-    }
-  }
-  #if (HARDWARE_VERSION > 2)
-    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
-  #endif
-  digitalWriteDirect(LDACPin,LOW);
-}
-
-static inline uint16_t clampU16(uint16_t value, int16_t offset)
-{
-    int32_t corrected = (int32_t)value + offset;
-
-    if (corrected < 0) {
-        return 0;
-    }
-
-    if (corrected > UINT16_MAX) {
-        return UINT16_MAX;
-    }
-
-    return (uint16_t)corrected;
-}
-
-void ProgramDAC(byte Data1, byte Data2, byte Data3) {
-  digitalWriteDirect(LDACPin,HIGH);
-  digitalWriteDirect(SyncPin,LOW);
-  SPI.transfer (Data1);
-  SPI.transfer (Data2);
-  SPI.transfer (Data3);
-  digitalWriteDirect(SyncPin,HIGH);
-  digitalWriteDirect(LDACPin,LOW);
-}
-
-void digitalWriteDirect(int pin, boolean val){
-  #if (HARDWARE_VERSION == 2)
-    if(val) g_APinDescription[pin].pPort -> PIO_SODR = g_APinDescription[pin].ulPin;
-    else    g_APinDescription[pin].pPort -> PIO_CODR = g_APinDescription[pin].ulPin;
-  #else
-    digitalWriteFast(pin, val);
-  #endif
-}
-
-byte digitalReadDirect(int pin){
-  #if (HARDWARE_VERSION == 2)
-    return !!(g_APinDescription[pin].pPort -> PIO_PDSR & g_APinDescription[pin].ulPin);
-  #else
-    return digitalReadFast(pin);
-  #endif
-}
-
-void UpdateSettingsMenu() {
-    ClickerX = analogRead(ClickerXLine);
-    ClickerY = analogRead(ClickerYLine);
-    ClickerButtonState = ReadDebouncedButton();
-    if (ClickerButtonState == 1 && LastClickerButtonState == 0) {
-        LastClickerButtonState = 1;
-        switch(inMenu) {
-          case 0: { // Menu top
-            inMenu = 1;
-            SelectedChannel = 1;
-            write2Screen("Output Channels","<  Channel 1  >");
-            NeedUpdate = 1;
-          } break;
-          case 1: { // Channel / Save-Load / Reset Menu
-            switch(SelectedChannel) {
-              case 5:{
-                inMenu = 4; // trigger menu
-                SelectedInputAction = 1;
-                SelectedChannel = 1;
-                write2Screen("< Trigger Now  >"," ");
-              } break;  
-              case 6: {
-                inMenu = 4; // trigger menu
-                SelectedInputAction = 1;
-                SelectedChannel = 2;
-                write2Screen("< Trigger Now  >"," ");
-              } break;
-              case 7: { // Save settings
-                inMenu = 6; // file save menu
-                myFilePos = 1;
-                write2Screen("<   New File   >", "");
-              } break;
-              case 8: { // Load settings
-                inMenu = 5; // file load menu
-                settingsFile.close();
-                rewindDirectory();
-                myFilePos = 1;
-                #if (HARDWARE_VERSION > 2)
-                if (candidateSettingsFile.openNext(&root, O_READ)) {
-                #else
-                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                #endif
-                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                  // Center settings file name
-                  centerText(candidateSettingsFileChar);
-                  for (int i = 0; i < 16; i++) {
-                    candidateSettingsFileChar[i] = centeredText[i];
-                  }
-                  write2Screen("<Click to load >", candidateSettingsFileChar);
-                  candidateSettingsFile.close();
-                } else {
-                  write2Screen("!Error reading", "SD Card!");
-                }
-                settingsFile.open(currentSettingsFileNameChar, O_READ);
-              } break;
-              case 9: { // Delete settings
-                inMenu = 7; 
-                settingsFile.close();
-                rewindDirectory();
-                myFilePos = 1;
-                #if (HARDWARE_VERSION > 2)
-                if (candidateSettingsFile.openNext(&root, O_READ)) {
-                #else
-                if (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-                #endif
-                  for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-                  candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-                  // Center settings file name
-                  centerText(candidateSettingsFileChar);
-                  for (int i = 0; i < 16; i++) {
-                    candidateSettingsFileChar[i] = centeredText[i];
-                  }
-                  write2Screen("<Click to erase>", candidateSettingsFileChar);
-                  candidateSettingsFile.close();
-                } else {
-                  write2Screen("!Error reading", "SD Card!");
-                }
-              } break;
-              case 10: { // Info
-                if (!viewingInfo) {
-                  write2Screen("Hardware v" TOSTRING(HARDWARE_VERSION), "Firmware v" TOSTRING(FIRMWARE_VERSION));
-                  viewingInfo = true;
-                } else {
-                  write2Screen("Device Info","<Click to view>");
-                  viewingInfo = false;
-                }
-              } break;
-              case 11: { // Reset
-              write2Screen(" "," ");
-              delayMicroseconds(1000000);
-                Software_Reset();
-              } break;
-              case 12: {
-                inMenu = 0;
-                write2Screen(CommanderString," Click for menu");
-              } break;
-              
-              default: {
-                inMenu = 2; // output menu
-                SelectedAction = 1;
-                write2Screen("< Trigger Now  >"," ");
-              } break;
-           }
-         } break;
-         case 2: { // Channel menu
-          switch (SelectedAction) {
-            case 1: {
-              inMenu = 3; // soft-trigger menu
-              write2Screen("< Single Train >"," ");
-              SelectedStimMode = 1;
-            } break;
-            case 2: {IsBiphasic[SelectedChannel-1] = ReturnUserValue(0, 1, 1, 3);} break; // biphasic (on /off)
-            case 3: {Phase1Voltage[SelectedChannel-1] = ReturnUserValue(0, 65535, 1, 2);} break; // Get user to input phase 1 voltage
-            case 4: {Phase1Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 1 duration
-            case 5: {InterPhaseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // inter-phase interval
-            case 6: {Phase2Voltage[SelectedChannel-1] = ReturnUserValue(0, 65535, 1, 2);} break; // Get user to input phase 2 voltage
-            case 7: {Phase2Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // phase 2 duration
-            case 8: {InterPulseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // pulse interval
-            case 9: {BurstDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst width
-            case 10: {BurstInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // burst interval
-            case 11: {PulseTrainDelay[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train delay
-            case 12: {PulseTrainDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, 1);} break; // stimulus train duration
-            case 13: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
-                      byte Ch = SelectedChannel-1;
-                      TriggerAddress[0][Ch] = Bit2Write;
-                      } break; // Follow input 1 (on/off)
-            case 14: {byte Bit2Write = ReturnUserValue(0, 1, 1, 3);
-                      byte Ch = SelectedChannel-1;
-                      TriggerAddress[1][Ch] = Bit2Write;
-                      } break; // Follow input 2 (on/off)
-            case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, N_CUSTOM_PULSE_TRAINS, 1, 0);} break; // stimulus train duration
-            case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1,4);} break; // Custom stim target (Pulses / Bursts)
-            case 17: {
-                      RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, 2); // Get user to input resting voltage
-                      dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1]; 
-                      DACFlags[SelectedChannel-1] = 1; 
-                      dacWrite(); // Update DAC
-                      } break; 
-            case 18: {
-              // Exit to channel menu
-            inMenu = 1; RefreshChannelMenu(SelectedChannel);
-            } break;
-           }
-           PulseDuration[SelectedChannel-1] = ComputePulseDuration(IsBiphasic[SelectedChannel-1], Phase1Duration[SelectedChannel-1], InterPhaseInterval[SelectedChannel-1], Phase2Duration[SelectedChannel-1]);
-           if (BurstDuration[SelectedChannel-1] == 0) {UsesBursts[SelectedChannel-1] = false;} else {UsesBursts[SelectedChannel-1] = true;}
-           if ((SelectedAction > 1) && (SelectedAction < 18)) {
-            //SaveCurrentProgram2SD();             
-           }
-          } break;
-          case 3: { // Trigger menu
-          switch (SelectedStimMode) {
-            case 1: {
-              // Soft-trigger channel
-              write2Screen("< Single Train >","      ZAP!");
-              delayMicroseconds(100000);
-              while (ClickerButtonState == 1) {
-               ClickerButtonState = ReadDebouncedButton();
-              }
-              write2Screen("< Single Train >"," ");
-              SoftTriggerScheduled[SelectedChannel-1] = 1;
-            } break;
-            case 2: { // Single example pulse. Timing for the example pulse is done with micros() instead of the HW timer.
-              write2Screen("< Single Pulse >","      ZAP!");
-              delayMicroseconds(100000);
-              write2Screen("< Single Pulse >"," ");
-              PulseTrainDuration_ExamplePulse[SelectedChannel-1] = PulseTrainDuration[SelectedChannel-1];
-              PulseTrainDuration[SelectedChannel-1] = Phase1Duration[SelectedChannel-1] + InterPhaseInterval[SelectedChannel-1] + Phase2Duration[SelectedChannel-1];
-              SoftTriggerScheduled[SelectedChannel-1] = 1;
-            } break;
-            case 3: {
-              if (ContinuousLoopMode[SelectedChannel-1] == false) {
-                 write2Screen("<  Continuous  >","      On");
-                 delayMicroseconds(200000); // Debounce
-                 ContinuousLoopMode[SelectedChannel-1] = true;
-             } else {
-                 write2Screen("<  Continuous  >","      Off");
-                 ContinuousLoopMode[SelectedChannel-1] = false;
-                 PulseStatus[SelectedChannel-1] = 0;
-                 BurstStatus[SelectedChannel-1] = 0;
-                 StimulusStatus[SelectedChannel-1] = 0;
-                 CustomPulseTimeIndex[SelectedChannel-1] = 0;
-                 dacValue.uint16[SelectedChannel-1] = RestingVoltage[SelectedChannel-1];
-                 dacWrite();
-                 digitalWrite(OutputLEDLines[SelectedChannel-1], LOW);
-               }
-            } break;
-            case 4: {
-              inMenu = 2;
-              SelectedAction = 1;
-              write2Screen("< Trigger Now  >"," ");
-            } break;
-           }
-         } break; 
-         case 4: { // Trigger channel menu
-          switch (SelectedInputAction) {
-            case 1: {
-              // Trigger linked output channels
-              write2Screen("< Trigger Now >","      ZAP!");
-              delayMicroseconds(100000);
-              while (ClickerButtonState == 1) {
-               ClickerButtonState = ReadDebouncedButton();
-              }
-              write2Screen("< Trigger Now >"," ");
-              for (int x = 0; x < 4; x++) {
-                if (TriggerAddress[SelectedChannel-1][x] == 1) {
-                  SoftTriggerScheduled[x] = 1;
-                }
-              }
-            } break;
-            case 2: {
-              // Change mode of selected channel
-              TriggerMode[SelectedChannel-1] = ReturnUserValue(0, 2, 1, 5); // Get user to input trigger mode
-              //Store changes
-              //SaveCurrentProgram2SD();
-            } break;
-            case 3: {
-              inMenu = 1;
-              SelectedAction = 1;
-              write2Screen("Output Channels","<  Channel 1  >");
-              NeedUpdate = 1;
-              SelectedChannel = SelectedChannel + 4;
-            } break;
-          }
-        } break;
-        case 5: { // Handle click in file load/save menu
-          if (myFilePos < 1) {
-            inMenu = 1;
-            SelectedChannel = 8;
-            write2Screen(" LOAD SETTINGS  ","<Click to load >");
-            NeedUpdate = 1;
-            myFilePos = 1;
-          } else {
-            // Load settings file
-            //currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
-            
-            settingsFile.close();
-            settingsFile.open(candidateSettingsFileChar, O_READ);
-            validProgram = RestoreParametersFromSD();
-            if (validProgram != 252) {
-              write2Screen("!ERROR! INVALID ","SETTINGS FILE.");
-              delayMicroseconds(1000000);
-              LoadDefaultParameters();
-            } else {
-              for (int i = 0; i < 16; i++) {
-                currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
-              }
-              write2Screen("Settings loaded."," ");
-              delayMicroseconds(1000000);
-              inMenu = 1;
-              SelectedChannel = 8;
-              write2Screen(" LOAD SETTINGS  ","<Click to load >");
-              NeedUpdate = 1;
-            }
-          }
-        } break;
-        case 6: { // handle click in save menu
-          if (myFilePos < 1) {
-            inMenu = 1;
-            SelectedChannel = 7;
-            write2Screen(" SAVE SETTINGS  ","<Click to save >");
-            NeedUpdate = 1;
-            myFilePos = 1;
-          } else {
-            // save selected or enter file name creation mode
-            if (myFilePos == 1) {
-              // Create file name
-              CursorPos = 0;
-              candidateSettingsFileChar[CursorPos] = 'A';
-              candidateSettingsFileChar[CursorPos+1] = '.';
-              candidateSettingsFileChar[CursorPos+2] = 'p';
-              candidateSettingsFileChar[CursorPos+3] = 'p';
-              candidateSettingsFileChar[CursorPos+4] = 's';
-              for (int i = 5; i<16; i++) {
-                candidateSettingsFileChar[i] = 32;
-              }
-              LCD_noCursor();
-              LCD_setCursor(0, 1); LCD_print("                ");
-              delayMicroseconds(100000);
-              write2Screen("<Click to save >", candidateSettingsFileChar);
-              ChoiceMade = 0;
-              CursorOn = 0;
-              CursorToggleTimer = 0;
-              CursorToggleThreshold = 20000;
-              if (HARDWARE_VERSION == 3) {
-                CursorToggleThreshold = 10000;
-              }
-              while (ChoiceMade == 0) {
-                 CursorToggleTimer++;
-                 if (CursorToggleTimer == CursorToggleThreshold) {
-                   switch (CursorOn) {
-                     case 0: {LCD_setCursor(CursorPos, 1); LCD_cursor(); CursorOn = 1;} break;
-                     case 1: {LCD_noCursor(); CursorOn = 0;} break;
-                   }
-                   CursorToggleTimer = 0;
-                 }
-                 ClickerX = analogRead(ClickerXLine);
-                 ClickerY = analogRead(ClickerYLine);
-                 ClickerButtonState = digitalRead(ClickerButtonLine);
-                 if (ClickerButtonState == 0) {
-                   ChoiceMade = 1;
-                   LCD_noCursor();
-                   LCD_setCursor(0, 1); LCD_print("                ");
-                 }
-                 if (ClickerY > ClickerMaxThreshold) {
-                     if (candidateSettingsFileChar[CursorPos]  == 65) { // Skip from ASCii A to 9
-                      candidateSettingsFileChar[CursorPos] = 57;
-                     } else if (candidateSettingsFileChar[CursorPos]  == 48){ // Wrap from ASCii 0 to underscore
-                      candidateSettingsFileChar[CursorPos] = 95;
-                     } else if (candidateSettingsFileChar[CursorPos]  == 95){ // Skip from ASCii underscore to Z
-                      candidateSettingsFileChar[CursorPos] = 90;
-                     } else {
-                      candidateSettingsFileChar[CursorPos] = candidateSettingsFileChar[CursorPos] - 1;
-                     }
-                     LCD_noCursor();
-                     write2Screen("<Click to save >", candidateSettingsFileChar);
-                     delayMicroseconds(200000); 
-                 } else if (ClickerY < ClickerMinThreshold) {
-                    if (candidateSettingsFileChar[CursorPos]  == 57) { // Skip from ASCii 9 to A
-                      candidateSettingsFileChar[CursorPos] = 65;
-                    } else if (candidateSettingsFileChar[CursorPos]  == 90){ // Wrap from ASCii Z to underscore
-                      candidateSettingsFileChar[CursorPos] = 95;
-                    } else if (candidateSettingsFileChar[CursorPos]  == 95){ // Skip from ASCii underscore to 0
-                      candidateSettingsFileChar[CursorPos] = 48;
-                    } else {
-                    candidateSettingsFileChar[CursorPos] = candidateSettingsFileChar[CursorPos] + 1;
-                    }
-                    LCD_noCursor();
-                    write2Screen("<Click to save >", candidateSettingsFileChar);
-                    delayMicroseconds(200000); 
-                 } else if (ClickerX < ClickerMinThreshold) {
-                    if (CursorPos > 0) {
-                      for (int i = CursorPos; i < 16; i++) {
-                         candidateSettingsFileChar[i] = candidateSettingsFileChar[i+1];
-                      }
-                      CursorPos--;
-                      write2Screen("<Click to save >", candidateSettingsFileChar);
-                      LCD_setCursor(CursorPos, 1); 
-                      delayMicroseconds(300000); 
-                    }
-                 } else if (ClickerX > ClickerMaxThreshold) {
-                    if (CursorPos < 11) {
-                      for (int i = 16; i > CursorPos; i--) {
-                        candidateSettingsFileChar[i] = candidateSettingsFileChar[i-1];
-                      }
-                      CursorPos++;
-                      candidateSettingsFileChar[CursorPos] = 'A';
-                      write2Screen("<Click to save >", candidateSettingsFileChar);
-                      LCD_setCursor(CursorPos, 1); 
-                      delayMicroseconds(300000); 
-                    }
-                 }
-              }
-              currentSettingsFileName = "";
-              for (int i = 0; i < CursorPos+5; i++) {
-                currentSettingsFileName = currentSettingsFileName + candidateSettingsFileChar[i];
-              }
-              settingsFile.close();
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-            } else {
-              for (int i = 0; i < 16; i++) {
-                currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
-              }
-            }
-            SaveCurrentProgram2SD();
-            write2Screen("Settings saved."," ");
-            delayMicroseconds(1000000);
-            inMenu = 1;
-            SelectedChannel = 7;
-            write2Screen(" SAVE SETTINGS  ","<Click to save >");
-            NeedUpdate = 1;
-            myFilePos = 2;
-          }
-        } break;
-        case 7: { // Handle click in delete menu
-          if (myFilePos < 2) {
-            inMenu = 1;
-            SelectedChannel = 9;
-            write2Screen(" ERASE SETTINGS ","<Click to erase>");
-            NeedUpdate = 1;
-            myFilePos = 1;
-          } else {
-            sd.remove(candidateSettingsFileChar);
-            write2Screen("Settings erased."," ");
-            delayMicroseconds(1000000);
-            inMenu = 1;
-            SelectedChannel = 9;
-            write2Screen(" ERASE SETTINGS ","<Click to erase>");
-            NeedUpdate = 1;
-          }
-        } break;
-     }
-    }
-    if (ClickerButtonState == 0 && LastClickerButtonState == 1) {
-      LastClickerButtonState = 0;
-    }
-    if (LastClickerXState != 1 && ClickerX < 200) {
-      LastClickerXState = 1;
-      NeedUpdate = 1;
-      if (inMenu == 1) {SelectedChannel = SelectedChannel - 1;}
-      if (inMenu == 2) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 8)) {
-          SelectedAction = SelectedAction - 4;
-        } else {  
-          SelectedAction = SelectedAction - 1;
-        }
-      }
-      if (inMenu == 3) {SelectedStimMode = SelectedStimMode - 1;}
-      if (inMenu == 4) {SelectedInputAction = SelectedInputAction - 1;}
-      if ((inMenu > 4) && (inMenu < 8)) {
-        if (myFilePos > 0) {myFilePos = myFilePos - 1;}
-      }
-      if (SelectedInputAction == 0) {SelectedInputAction = 3;}
-      if (SelectedChannel == 0) {SelectedChannel = 12;}
-      if (SelectedAction == 0) {SelectedAction = 18;}
-      if (SelectedStimMode == 0) {SelectedStimMode = 4;}
-    }
-    if (LastClickerXState != 2 && ClickerX > ClickerMaxThreshold) {
-      LastClickerXState = 2;
-      NeedUpdate = 1;
-      if (inMenu == 1) {SelectedChannel++;}
-      if (inMenu == 2) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 4)) {
-          SelectedAction = SelectedAction + 4;
-        } else {
-          SelectedAction++;
-        }
-      }
-      if (inMenu == 3) {SelectedStimMode++;}
-      if (inMenu == 4) {SelectedInputAction++;}
-      if (inMenu > 4 && inMenu < 8) {
-        myFilePos++;
-      }
-      if (SelectedInputAction == 4) {SelectedInputAction = 1;}
-      if (SelectedChannel == 13) {SelectedChannel = 1;}
-      if (SelectedAction == 19) {SelectedAction = 1;}
-      if (SelectedStimMode == 5) {SelectedStimMode = 1;}
-    }
-    if (LastClickerXState != 0 && ClickerX < ClickerMaxThreshold && ClickerX > ClickerMinThreshold) {
-      LastClickerXState = 0;
-    }
-    if (NeedUpdate == 1) {
-      switch (inMenu) {
-        case 1: {
-          RefreshChannelMenu(SelectedChannel);
-        } break;
-        case 2: {
-          RefreshActionMenu(SelectedAction);
-        } break; 
-        case 3: {
-          switch (SelectedStimMode) {
-            case 1: {write2Screen("< Single Train >", " ");} break;
-            case 2: {write2Screen("< Single Pulse >", " ");} break;
-            case 3: {
-            if (ContinuousLoopMode[SelectedChannel-1] == false) {
-                 write2Screen("<  Continuous  >","      Off");
-               } else {
-                 write2Screen("<  Continuous  >","      On");
-               }
-            } break;
-            case 4: {write2Screen("<     Exit     >"," ");} break;
-          }
-        } break;
-        case 4: {
-          RefreshTriggerMenu(SelectedInputAction); 
-        } break;
-        case 5: { // Load settings file menu
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else {
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to load >", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
-        } break;
-        case 6: { // Save settings menu
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else if (myFilePos == 1) {
-            write2Screen("<   New File   >", "");
-          } else {
-            
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to save >", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
-        } break;
-        case 7: {
-          if (myFilePos == 0) {
-            write2Screen("<    Cancel    >", " ");
-          } else {
-            candidateSettingsFile.close();
-            if (!skipToFile(myFilePos)) {
-              if (myFilePos > 1) {
-                skipToFile(myFilePos-1);
-                myFilePos = myFilePos - 1;
-              }
-            }
-            for (int i = 0; i < 16; i++) {candidateSettingsFileChar[i] = 0;}
-            candidateSettingsFile.getName(candidateSettingsFileChar, 16);
-            // Center settings file name
-            centerText(candidateSettingsFileChar);
-            for (int i = 0; i < 16; i++) {
-              candidateSettingsFileChar[i] = centeredText[i];
-            }
-            write2Screen("<Click to erase>", candidateSettingsFileChar);
-            candidateSettingsFile.close();
-          }
-        } break;
-    }
-    NeedUpdate = 0;
-  }
-
-}
-
-void centerText(char myText[]) {
-  byte spaceCounter = 0;
-  for (int i = 0; i < 16; i++) {
-    if (myText[i] == 0) {spaceCounter++;}
-    tempText[i] = 32;
-  }
-  fileNameOffset = spaceCounter/2;
-    for (int i = fileNameOffset; i < 16; i++) {
-      tempText[i] = myText[i-fileNameOffset];
-    }
-    for (int i = 0; i < 16; i++) {
-      centeredText[i] = tempText[i];
-    }
-}
-
-byte skipToFile(unsigned int fileNumber) {
-  byte ok = 0;
-  rewindDirectory();
-  for (int i = 0; i < fileNumber; i++) {
-    candidateSettingsFile.close();
-    #if (HARDWARE_VERSION > 2)
-      ok = candidateSettingsFile.openNext(&root, O_READ);
-    #else
-      ok = candidateSettingsFile.openNext(sd.vwd(), O_READ);
-    #endif
-  }
-  return ok;
-}
-
-void RefreshChannelMenu(int ThisChannel) {
-  switch (SelectedChannel) {
-        case 1: {write2Screen("Output Channels","<  Channel 1  >");} break;
-        case 2: {write2Screen("Output Channels","<  Channel 2  >");} break;
-        case 3: {write2Screen("Output Channels","<  Channel 3  >");} break;
-        case 4: {write2Screen("Output Channels","<  Channel 4  >");} break;
-        case 5: {write2Screen("Trigger Channels","<  Channel 1  >");} break;
-        case 6: {write2Screen("Trigger Channels","<  Channel 2  >");} break;
-        case 7: {write2Screen(" SAVE SETTINGS  ","< Select File >");} break;
-        case 8: {write2Screen(" LOAD SETTINGS  ","< Select File >");} break;
-        case 9: {write2Screen(" ERASE SETTINGS ","< Select File >");} break;
-        case 10: {write2Screen("  Device Info  ","<Click to view>");} break;
-        case 11: {write2Screen("    -RESET-       ","<Click to reset>");} break;
-        case 12: {write2Screen("<Click to exit>"," ");} break;
-  }
-}
-void RefreshActionMenu(int ThisAction) {
-    switch (SelectedAction) {
-          case 1: {write2Screen("< Trigger Now  >"," ");} break;
-          case 2: {write2Screen("<Biphasic Pulse>",FormatNumberForDisplay(IsBiphasic[SelectedChannel-1], 3));} break;
-          case 3: {write2Screen("<Phase1 Voltage>",FormatNumberForDisplay(Phase1Voltage[SelectedChannel-1], 2));} break;
-          case 4: {write2Screen("<Phase1Duration>",FormatNumberForDisplay(Phase1Duration[SelectedChannel-1], 1));} break;
-          case 5: {write2Screen("<InterPhaseTime>",FormatNumberForDisplay(InterPhaseInterval[SelectedChannel-1], 1));} break;
-          case 6: {write2Screen("<Phase2 Voltage>",FormatNumberForDisplay(Phase2Voltage[SelectedChannel-1], 2));} break;
-          case 7: {write2Screen("<Phase2Duration>",FormatNumberForDisplay(Phase2Duration[SelectedChannel-1], 1));} break;
-          case 8: {write2Screen("<Pulse Interval>",FormatNumberForDisplay(InterPulseInterval[SelectedChannel-1], 1));} break;
-          case 9: {write2Screen("<Burst Duration>",FormatNumberForDisplay(BurstDuration[SelectedChannel-1], 1));} break;
-          case 10: {write2Screen("<Burst Interval>",FormatNumberForDisplay(BurstInterval[SelectedChannel-1], 1));} break;
-          case 11: {write2Screen("< Train Delay  >",FormatNumberForDisplay(PulseTrainDelay[SelectedChannel-1], 1));} break;
-          case 12: {write2Screen("<Train Duration>",FormatNumberForDisplay(PulseTrainDuration[SelectedChannel-1], 1));} break;
-          case 13: {write2Screen("<Link Trigger 1>",FormatNumberForDisplay(TriggerAddress[0][SelectedChannel-1], 3));} break;
-          case 14: {write2Screen("<Link Trigger 2>",FormatNumberForDisplay(TriggerAddress[1][SelectedChannel-1], 3));} break; 
-          case 15: {write2Screen("<Custom Train# >",FormatNumberForDisplay(CustomTrainID[SelectedChannel-1], 0));} break;
-          case 16: {write2Screen("<Custom Target >",FormatNumberForDisplay(CustomTrainTarget[SelectedChannel-1], 4));} break;
-          case 17: {write2Screen("<RestingVoltage>",FormatNumberForDisplay(RestingVoltage[SelectedChannel-1], 2));} break;
-          case 18: {write2Screen("<     Exit     >"," ");} break;
-     }
-     isNegativeZero = 0;
-}
-void RefreshTriggerMenu(int ThisAction) {
-    switch (SelectedInputAction) {
-          case 1: {write2Screen("< Trigger Now  >"," ");} break;
-          case 2: {write2Screen("< Trigger Mode >",FormatNumberForDisplay(TriggerMode[SelectedChannel-1], 5));} break;
-          case 3: {write2Screen("<     Exit     >"," ");} break;
-     }
-}
-const char* FormatNumberForDisplay(unsigned int InputNumber, int Units) {
-  // Units are: 0 - none, 1 - s/ms, 2 - V
-  // Clear var
-  for (int x = 0; x < 17; x++) {
-    Value2Display[x] = ' ';
-  }
-  // Figure out how many digits
-unsigned int Bits2Display = InputNumber;
-double InputNum = double(InputNumber);
-  if (Units == 1) {
-  InputNum = InputNum/CycleFrequency;
-  }
-if (Units == 2) {
-  // Convert volts from bytes to volts
-  InputNum = (((InputNum/65536)*10)*2 - 10);
-}
-  switch (Units) {
-    case 0: {sprintf (Value2Display, "       %.0f", InputNum);} break;
-    case 1: {
-      if (inMenu == 3) {
-        sprintf (Value2Display, "  %010.5f s ", InputNum);
-      } else {
-        if (InputNum < 100) {
-          sprintf (Value2Display, "    %.5f s ", InputNum);
-        } else {
-          sprintf (Value2Display, "   %.5f s ", InputNum);
-        }
-      }
-    } break;
-    case 2: {
-        if (InputNum == 0) {
-          if (isNegativeZero) {
-            InputNum = InputNum-0.000001;
-          }
-        }
-        if (InputNum >= 0) {
-          sprintf (Value2Display, "     %04.2f V ", InputNum);
-        } else {
-          sprintf (Value2Display, "    %05.2f V ", InputNum);
-        }
-    } break;
-    case 3:{
-      if (InputNum == 0) {
-        sprintf(Value2Display, "      Off");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "       On");
-      } else {
-        sprintf(Value2Display, "Error");
-      }
-    } break;
-    case 4: {
-      if (InputNum == 0) {
-        sprintf(Value2Display, "     Pulses");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "     Bursts");
-      } else {
-        sprintf(Value2Display, "     Error");
-      }
-    } break;
-    case 5: {
-      if (InputNum == 0) {
-        sprintf(Value2Display, "     Normal   ");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "     Toggle   ");
-      } else if (InputNum == 2) {
-        sprintf(Value2Display, "  Pulse Gated  ");
-      } else {
-        sprintf(Value2Display, "     Error   ");
-      }
-    } break;
-  }
-  return Value2Display;
-}
-boolean ReadDebouncedButton() {
-  DebounceTime = millis();
-  ClickerButtonState = digitalRead(ClickerButtonLine);
-    if (ClickerButtonState != lastButtonState) {lastDebounceTime = DebounceTime;}
-    lastButtonState = ClickerButtonState;
-   if (((DebounceTime - lastDebounceTime) > 75) && (ClickerButtonState == 0)) {
-      return 1;
-   } else {
-     return 0;
-   }
-}
-
-unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit, unsigned long StepSize, byte Units) {
-      // This function returns a value that the user chooses by scrolling up and down a number list with the joystick, and clicks to select the desired number.
-      // LowerLimit and UpperLimit are the limits for this selection, StepSize is the smallest step size the system will scroll. Units (as for Write2Screen) codes none=0, time=1, volts=2 True/False=3
-     unsigned long ValueToAdd = 0;
-     CursorPos = 0;
-     isNegativeZero = 0;
-     for (int i = 0; i < 9; i++) {
-       Digits[i] = 0;
-       ValidCursorPositions[i] = 0;
-     }
-      float CandidateVoltage = 0; // used to see if voltage will go over limits for DAC
-      float FractionalVoltage = 0;
-      
-     switch (SelectedAction) {
-       case 2:{UserValue = IsBiphasic[SelectedChannel-1];} break;
-       case 3:{UserValue = Phase1Voltage[SelectedChannel-1];} break;
-       case 4:{UserValue = Phase1Duration[SelectedChannel-1];} break;
-       case 5:{UserValue = InterPhaseInterval[SelectedChannel-1];} break;
-       case 6:{UserValue = Phase2Voltage[SelectedChannel-1];} break;
-       case 7:{UserValue = Phase2Duration[SelectedChannel-1];} break;
-       case 8:{UserValue = InterPulseInterval[SelectedChannel-1];} break;
-       case 9:{UserValue = BurstDuration[SelectedChannel-1];} break;
-       case 10:{UserValue = BurstInterval[SelectedChannel-1];} break;
-       case 11:{UserValue = PulseTrainDelay[SelectedChannel-1];} break;
-       case 12:{UserValue = PulseTrainDuration[SelectedChannel-1];} break;
-       case 13:{UserValue = TriggerAddress[0][SelectedChannel-1];} break;
-       case 14:{UserValue = TriggerAddress[1][SelectedChannel-1];} break;
-       case 15:{UserValue = CustomTrainID[SelectedChannel-1];} break;
-       case 16:{UserValue = CustomTrainTarget[SelectedChannel-1];} break;
-       case 17:{UserValue = RestingVoltage[SelectedChannel-1];} break;        
-     }
-     if (Units == 5) {
-       UserValue = TriggerMode[SelectedChannel-1];
-     }
-     long UVTemp = UserValue;
-     inMenu = 3; // Temporarily goes a menu layer deeper so leading zeros are displayed by FormatNumberForDisplay
-     LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");
-     delayMicroseconds(100000);
-     LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-     ChoiceMade = 0;
-    // Read digits from User Value
-    int x = 0;
-    if (Units == 1) {
-      UVTemp = UVTemp / 2;
-      while (UVTemp > 0) {
-        Digits[7-x] = (UVTemp % 10);
-        UVTemp = UVTemp / 10;
-        x++;
-      }
-    }
-    if (Units == 2) {
-      UVTemp = round(((((float)UVTemp/DACBits)*20) - 10)*100);
-      if (UVTemp < 0) {isNegativeZero = 1;}
-      Digits[2] = (UVTemp % 10);
-      UVTemp = UVTemp/10;
-      Digits[1] = (UVTemp % 10);
-      UVTemp = UVTemp/10;
-      Digits[0] = UVTemp;
-      if (isNegativeZero && (Digits[0] == 0)) {Digits[0] = 255;} // 255 codes for -0, required because interface changes value by digit
-      if (Digits[1] < 0) {Digits[1] = Digits[1]*-1;}
-      if (Digits[2] < 0) {Digits[2] = Digits[2]*-1;}
-    }
-    
-     // Assign valid cursor positions by unit type
-     #if (HARDWARE_VERSION < 3)
-      switch(Units) {
-        case 0: {ValidCursorPositions[0] = 7;} break;
-        case 1: {ValidCursorPositions[0] = 2; ValidCursorPositions[1] = 3; ValidCursorPositions[2] = 4; ValidCursorPositions[3] = 5; ValidCursorPositions[4] = 7; ValidCursorPositions[5] = 8; ValidCursorPositions[6] = 9; ValidCursorPositions[7] = 10; ValidCursorPositions[8] = 11;} break;
-        case 2: {ValidCursorPositions[0] = 5; ValidCursorPositions[1] = 7; ValidCursorPositions[2] = 8;} break;
-        case 3: {ValidCursorPositions[0] = 7;} break;
-        case 4: {ValidCursorPositions[0] = 7;} break;
-        case 5: {ValidCursorPositions[0] = 7;} break;
-      }
-      uint8_t negSignOffset = 0;
-     #else
-      switch(Units) {
-        case 0: {ValidCursorPositions[0] = 0;} break;
-        case 1: {ValidCursorPositions[0] = 0; ValidCursorPositions[1] = 1; ValidCursorPositions[2] = 2; ValidCursorPositions[3] = 3; ValidCursorPositions[4] = 5; ValidCursorPositions[5] = 6; ValidCursorPositions[6] = 7; ValidCursorPositions[7] = 8; ValidCursorPositions[8] = 9;} break;
-        case 2: {ValidCursorPositions[0] = 0; ValidCursorPositions[1] = 2; ValidCursorPositions[2] = 3;} break;
-        case 3: {ValidCursorPositions[0] = 0;} break;
-        case 4: {ValidCursorPositions[0] = 0;} break;
-        case 5: {ValidCursorPositions[0] = 0;} break;
-      }
-      uint8_t negSignOffset = 1;
-     #endif
-     // Initialize cursor starting positions and limits by unit type
-     switch (Units) {
-       case 0: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Index
-       case 1: {CursorPos = 3; CursorPosLeftLimit = 0; CursorPosRightLimit = 7;} break; // Format for seconds
-       case 2: {
-        if (abs(Digits[0]) == 10) {
-          CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
-        } else {
-          CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
-        }
-        } break; // Format for volts
-       case 3: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Off/On
-       case 4: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Pulses/Bursts
-       case 5: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for trigger mode
-       }
-      CursorToggleTimer = 0;
-      CursorOn = 1;   // Cursor starts visible
-      CursorToggleThreshold = 20000;
-
-      if (HARDWARE_VERSION == 3) {
-        CursorToggleThreshold = 10000;
-      }
-
-      // Show cursor immediately on entry
-      if (Digits[0] < 0 || isNegativeZero) {
-        LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-      } else {
-        LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-      }
-
-      LCD_cursor();
-
-      delayMicroseconds(75000);
-     while (ChoiceMade == 0) {
-       CursorToggleTimer++;
-       if (CursorToggleTimer == CursorToggleThreshold) {
-         switch (CursorOn) {
-           case 0: {
-            if (Digits[0] < 0 || isNegativeZero) {
-              LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-            } else {
-              LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-            }
-            LCD_cursor(); CursorOn = 1;
-            } break;
-           case 1: {
-            LCD_noCursor(); CursorOn = 0;
-            } break;
-         }
-         CursorToggleTimer = 0;
-       }
-       ClickerX = analogRead(ClickerXLine);
-       ClickerY = analogRead(ClickerYLine);
-       ClickerButtonState = digitalRead(ClickerButtonLine);
-       if (ClickerButtonState == 0) {
-         ChoiceMade = 1;
-       }       
-       if (ClickerY < ClickerMinThreshold) {
-          switch(Units) {
-            case 0: {
-              if (UserValue < UpperLimit) {
-                UserValue = UserValue + 1;
-              }
-            } break;
-            case 1: {
-                ValueToAdd = 2*(pow(10, ((5-CursorPos)+2)));
-                if ((Digits[CursorPos] < 9) && ((UserValue+ValueToAdd) <= UpperLimit)) {
-                 UserValue = UserValue + ValueToAdd;
-                 Digits[CursorPos] = Digits[CursorPos] + 1;
-                }
-            } break;
-            case 2: {
-                if (((CursorPos > 0) && (Digits[CursorPos] < 9)) || ((CursorPos == 0) && ((Digits[0] < 10) || (Digits[0] == 255)))) {
-                    if (UserValue < DACBits) {
-                      if (Digits[CursorPos] == 255) {Digits[CursorPos] = 0;}
-                      else if (Digits[CursorPos] == -1) {Digits[CursorPos] = 255;}
-                      else {Digits[CursorPos] = Digits[CursorPos] + 1;}
-                      if (abs(Digits[0]) == 10) {
-                        CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
-                      } else {
-                        CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
-                      }
-                      CandidateVoltage = 0;
-                      if (Digits[0] != 255) {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      }
-                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
-                      } else {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
-                      }
-                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
-                        isNegativeZero = 1;
-                      } else {
-                        isNegativeZero = 0;
-                      }
-                      
-                      if (CandidateVoltage > 10) {
-                        Digits[CursorPos] = Digits[CursorPos] - 1;
-                      } else if (CandidateVoltage == 10) {
-                        UserValue = 65535; // Top of DAC range (0-65535; 65536 is out of range)
-                      } else {
-                        CandidateVoltage = ((CandidateVoltage+10)/20)*DACBits;
-                        UserValue = (unsigned int)CandidateVoltage;
-                      }
-                      delayMicroseconds(1000);
-                    }
-                } 
-            } break;
-            default: {
-              if (UserValue < UpperLimit) {
-                UserValue = UserValue + 1;
-              }
-            } break;
-          }
-          ScrollSpeedDelay = 200000;
-          LCD_noCursor();
-          #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); 
-            LCD_print_no_trim_no_render("                ");
-          #endif
-          LCD_setCursor(0, 1); 
-          LCD_print(FormatNumberForDisplay(UserValue, Units));
-          // Restore cursor to the active editable digit immediately.
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-          }
-
-          LCD_cursor();
-          CursorOn = 1;
-       }
-      else if (ClickerY > ClickerMaxThreshold) {
-         switch(Units) {
-            case 0: {
-              if (UserValue > LowerLimit) {
-                UserValue = UserValue - 1;
-              }
-            } break;
-            case 1: {
-                if (Digits[CursorPos] > 0)  {
-                 UserValue = UserValue - 2*(pow(10, ((5-CursorPos)+2)));
-                  Digits[CursorPos] = Digits[CursorPos] - 1;
-                }
-            } break;
-            case 2: {
-              if (((CursorPos > 0) && (Digits[CursorPos] > 0)) || ((CursorPos == 0) && ((Digits[0] > -10) || (Digits[0] == 255)))) {
-                    if (UserValue > 0) {
-                      if (Digits[CursorPos] == 255) {Digits[CursorPos] = -1;}
-                      else if (Digits[CursorPos] == 0) {Digits[CursorPos] = 255;}
-                      else {Digits[CursorPos] = Digits[CursorPos] - 1;}
-                      if (abs(Digits[0]) == 10) {
-                        CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
-                      } else {
-                        CursorPosLeftLimit = 0; CursorPosRightLimit = 2;
-                      }
-                      CandidateVoltage = 0;
-                      if (Digits[0] != 255) {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[0]);
-                      }
-                      if ((Digits[0] < 0) || (Digits[0] == 255)) {
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage - ((float)Digits[2]*0.01);
-                      } else {
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[1]*0.1);
-                        CandidateVoltage = CandidateVoltage + ((float)Digits[2]*0.01);
-                      }
-                      if (((Digits[0] == 255) && (CandidateVoltage == 0)) || (CandidateVoltage < 0)) {
-                        isNegativeZero = 1;
-                      } else {
-                        isNegativeZero = 0;
-                      }
-                      CandidateVoltage = ((CandidateVoltage+10)/20)*DACBits;
-                      UserValue = (unsigned int)CandidateVoltage;
-                      delayMicroseconds(1000);
-//                  }
-                  }
-                } 
-            } break;
-            default: {
-              if (UserValue > LowerLimit) {
-                UserValue = UserValue - 1;
-              }
-            } break;
-          }
-          ScrollSpeedDelay = 200000;
-          LCD_noCursor();
-          #if (HARDWARE_VERSION == 3)
-            LCD_setCursor(0, 1); 
-            LCD_print_no_trim_no_render("                ");
-          #endif
-          LCD_setCursor(0, 1); 
-          LCD_print(FormatNumberForDisplay(UserValue, Units));
-          // Restore cursor to the active editable digit immediately.
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos] + negSignOffset, 1);
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1);
-          }
-          LCD_cursor();
-          CursorOn = 1;
-
-
-       } else {
-         ScrollSpeedDelay = 0;
-       }
-       if ((ClickerX > ClickerMaxThreshold) && (CursorPos < CursorPosRightLimit)) {
-         CursorPos = CursorPos + 1;
-         ScrollSpeedDelay = 200000;
-         LCD_noCursor();
-          LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-          }
-         LCD_cursor(); CursorOn = 1; 
-       }
-       if ((ClickerX < ClickerMinThreshold) && (CursorPos > CursorPosLeftLimit)) {
-         CursorPos = CursorPos - 1;
-         ScrollSpeedDelay = 200000;
-         LCD_noCursor();
-         LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-          if (Digits[0] < 0 || isNegativeZero) {
-            LCD_setCursor(ValidCursorPositions[CursorPos]+negSignOffset, 1); 
-          } else {
-            LCD_setCursor(ValidCursorPositions[CursorPos], 1); 
-          } 
-         LCD_cursor(); CursorOn = 1; 
-       }
-     delayMicroseconds(ScrollSpeedDelay);  
-     }
-     LCD_noCursor();
-     LCD_setCursor(0, 1); 
-     LCD_print_no_trim_no_render("                ");
-     if (Units == 5) {
-       inMenu = 4;
-     } else {
-       inMenu = 2;
-     }
-     delayMicroseconds(200000);
-     LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
-     //LCD_noCursor();
-     return UserValue;
-} 
-
-void LoadDefaultParameters() {
-  // This function is called on boot if the EEPROM has an invalid program (or no program).
-  for (int x = 0; x < 4; x++) {
-      Phase1Duration[x] = 2;
-      InterPhaseInterval[x] = 2;
-      Phase2Duration[x] = 2;
-      InterPulseInterval[x] = 20;
-      BurstDuration[x] = 0;
-      BurstInterval[x] = 0;
-      PulseTrainDuration[x] = 20000;
-      PulseTrainDelay[x] = 0;
-      IsBiphasic[x] = 0;
-      Phase1Voltage[x] = 49152;
-      Phase2Voltage[x] = 16384;
-      RestingVoltage[x] = 32768;
-      CustomTrainID[x] = 0;
-      CustomTrainTarget[x] = 0;
-      CustomTrainLoop[x] = 0;
-      UsesBursts[x] = 0;
-    }
-    for (int y = 0; y < 4; y++) {
-      TriggerAddress[0][y] = 1;
-    }
-    for (int y = 0; y < 4; y++) {
-      TriggerAddress[1][y] = 0;
-    }
-   TriggerMode[0] = 0; 
-   TriggerMode[1] = 0;
-   // Store default parameters to SD card
-   SaveCurrentProgram2SD();
-}
-
-byte SerialReadByte(){
-  byte ReturnByte = 0;
-  if (SerialReadTimedout == 0) {
-    SerialReadStartTime = millis();
-    while (PPUSB.available() == 0) {
-        SerialCurrentTime = millis();
-        if ((SerialCurrentTime - SerialReadStartTime) > Timeout) {
-          SerialReadTimedout = 1;
-          return 0;
-        }
-    }
-    ReturnByte = PPUSB.readByte();
-    return ReturnByte;
-  } else {
-    return 0;
-  }
-}
-
-void HandleReadTimeout() {
-  byte FlashState = 0;
-  write2Screen("COMM. FAILURE!","Click joystick->");
-  ClickerButtonState = 1;
-  SerialReadStartTime = millis(); // Reused Serial time vars to conserve memory
-  while (ClickerButtonState != 0) {
-    ClickerButtonState = digitalRead(ClickerButtonLine);
-    SerialCurrentTime = millis();
-    if ((SerialCurrentTime - SerialReadStartTime) > 100) { // Time to flash
-      if (FlashState == 0) {
-        digitalWriteDirect(InputLEDLines[0], LOW);
-        digitalWriteDirect(InputLEDLines[1], LOW);
-        FlashState = 1;
-        SerialReadStartTime = millis();
-      } else {
-        digitalWriteDirect(InputLEDLines[0], HIGH);
-        digitalWriteDirect(InputLEDLines[1], HIGH);
-        FlashState = 0;
-        SerialReadStartTime = millis();
-      }
-    }
-  }
-  digitalWriteDirect(InputLEDLines[0], LOW);
-  digitalWriteDirect(InputLEDLines[1], LOW);
-  write2Screen("Loading default","parameters...");
-  LoadDefaultParameters();
-  delayMicroseconds(2000000);
-  write2Screen(CommanderString," Click for menu");
-}
-
-void AbortAllPulseTrains() {
-    for (int x = 0; x < 4; x++) {
-      killChannel(x);
-    }
-    dacWrite();
-    write2Screen("   PULSE TRAIN","   TERMINATED");
-    delayMicroseconds(1500000);
-    if (inMenu == 0) {
-      write2Screen(CommanderString," Click for menu");
-    } else {
-      inMenu = 1;
-      RefreshChannelMenu(SelectedChannel);
-    }
-}
-
-void ResetSystemTime() {
-  SystemTime = 0;
-}
-
-unsigned long ComputePulseDuration(byte myBiphasic, unsigned long myPhase1, unsigned long myPhaseInterval, unsigned long myPhase2) {
-    unsigned long Duration = 0;
-    if (myBiphasic == 0) {
-       Duration = myPhase1;
-     } else {
-       Duration = myPhase1 + myPhaseInterval + myPhase2;
-     }
-     return Duration;
-}
-
-void write2Screen(const char* Line1, const char* Line2) {
-    LCD_clear(); 
-    #if (HARDWARE_VERSION == 3)
-      trimString(Line1);
-      lcd.print(Line1);
-    #else
-      // In-line LCD_print without render
-      LCD_home();
-      LCD_print(Line1);
-    #endif
-    LCD_setCursor(0, 1); 
-    LCD_print(Line2);
-}
-
-void breakLong(unsigned long LongInt2Break) {
-  //BrokenBytes is a global array for the output of long int break operations
-  BrokenBytes[3] = (byte)(LongInt2Break >> 24);
-  BrokenBytes[2] = (byte)(LongInt2Break >> 16);
-  BrokenBytes[1] = (byte)(LongInt2Break >> 8);
-  BrokenBytes[0] = (byte)LongInt2Break;
-}
-
-void breakShort(word Value2Break) {
-  //BrokenBytes is a global array for the output of long int break operations
-  BrokenBytes[1] = (byte)(Value2Break >> 8);
-  BrokenBytes[0] = (byte)Value2Break;
-}
-
-void writeLong2SD() {
-  settingsFile.write(BrokenBytes[0]);
-  settingsFile.write(BrokenBytes[1]);
-  settingsFile.write(BrokenBytes[2]);
-  settingsFile.write(BrokenBytes[3]);
-}
-void writeShort2SD() {
-  settingsFile.write(BrokenBytes[0]);
-  settingsFile.write(BrokenBytes[1]);
-}
-uint32_t readLongFromSD() {
-  uint32_t output = 0;
-  settingsFile.read(typeCast.byteArray, 4);
-  output = typeCast.uint32;
-  return output;
-}
-uint16_t readShortFromSD() {
-  uint16_t output = 0;
-  settingsFile.read(typeCast.byteArray, 2);
-  output = typeCast.uint16;
-  return output;
-}
-byte readByteFromSD() {
-  byte myByte = 0;
-  settingsFile.read(buf, sizeof(buf));
-  myByte = buf[0];
-  return myByte;
-}
-
-void SaveCurrentProgram2SD() {
-  settingsFile.close();
-  settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR);
-  // This function saves all parameters to the SD card. See the memory map on the PulsePal wiki for a table describing how parameters are organized in memory
-  for (int chan = 0; chan < 4; chan++) {
-    breakLong(Phase1Duration[chan]); writeLong2SD();
-    breakLong(InterPhaseInterval[chan]); writeLong2SD();
-    breakLong(Phase2Duration[chan]); writeLong2SD();
-    breakLong(InterPulseInterval[chan]); writeLong2SD();
-    breakLong(BurstDuration[chan]); writeLong2SD();
-    breakLong(BurstInterval[chan]); writeLong2SD();
-    breakLong(PulseTrainDuration[chan]); writeLong2SD();
-    breakLong(PulseTrainDelay[chan]); writeLong2SD();
-    settingsFile.write(IsBiphasic[chan]);
-    breakShort(Phase1Voltage[chan]); writeShort2SD();
-    breakShort(Phase2Voltage[chan]); writeShort2SD();
-    breakShort(RestingVoltage[chan]); writeShort2SD();
-    settingsFile.write(CustomTrainID[chan]);
-    settingsFile.write(CustomTrainTarget[chan]);
-    settingsFile.write(CustomTrainLoop[chan]);
-  }
-  for (int chan = 0; chan < 2; chan++) {
-    settingsFile.write(TriggerMode[chan]);
-    settingsFile.write(TriggerAddress[chan][0]);
-    settingsFile.write(TriggerAddress[chan][1]);
-    settingsFile.write(TriggerAddress[chan][2]);
-    settingsFile.write(TriggerAddress[chan][3]);
-  }
-  settingsFile.write(252);
-  settingsFile.close();
-  settingsFile.open(currentSettingsFileNameChar, O_READ);
-}
-
-byte RestoreParametersFromSD() {
-  // This function is called on Pulse Pal boot, to make pulse pal auto-load parameters from the previous session.
-  settingsFile.rewind();
-  for (int chan = 0; chan < 4; chan++) {
-    Phase1Duration[chan] = readLongFromSD();
-    InterPhaseInterval[chan] = readLongFromSD();
-    Phase2Duration[chan] = readLongFromSD();
-    InterPulseInterval[chan] = readLongFromSD();
-    BurstDuration[chan] = readLongFromSD();
-    BurstInterval[chan] = readLongFromSD();
-    PulseTrainDuration[chan] = readLongFromSD();
-    PulseTrainDelay[chan] = readLongFromSD();
-    IsBiphasic[chan] = readByteFromSD();
-    Phase1Voltage[chan] = readShortFromSD();
-    Phase2Voltage[chan] = readShortFromSD();
-    RestingVoltage[chan] = readShortFromSD();
-    CustomTrainID[chan] =  readByteFromSD();
-    CustomTrainTarget[chan] = readByteFromSD();
-    CustomTrainLoop[chan] = readByteFromSD();
-  }
-  for (int chan = 0; chan < 2; chan++) {
-    TriggerMode[chan] = readByteFromSD();
-    settingsFile.read(buf4, sizeof(buf4));
-    TriggerAddress[chan][0] = buf4[0];
-    TriggerAddress[chan][1] = buf4[1];
-    TriggerAddress[chan][2] = buf4[2];
-    TriggerAddress[chan][3] = buf4[3];
-  }
-  byte isValidProgram = readByteFromSD();
-  return isValidProgram;
-}
-
-void Software_Reset() {
-  #if (HARDWARE_VERSION < 3)
-    const int RSTC_KEY = 0xA5;
-    RSTC->RSTC_CR = RSTC_CR_KEY(RSTC_KEY) | RSTC_CR_PROCRST | RSTC_CR_PERRST;
-  #else
-      SCB_AIRCR = 0x05FA0004;
-  #endif
-  while (true);  // Wait for reset
-}
-
-void LCD_home() {
-    lcd.home();
-}
-
-void LCD_clear() {
-    lcd.clear();
-}
-
-template <typename T>
-void LCD_print(const T &value) {
-  #if (HARDWARE_VERSION == 3)
-    trimString(value);
-    lcd.print(value);
-    lcd.render();
-  #else
-    lcd.print(value);
-  #endif
-}
-
-template <typename T>
-void LCD_print_no_trim_no_render(const T &value) {
-  lcd.print(value);
-}
-
-void LCD_setCursor(uint8_t col, uint8_t row) {
-    lcd.setCursor(col, row);
-}
-
-void LCD_cursor() {
-  #if (HARDWARE_VERSION == 3)
-    lcd.cursor();
-    lcd.render();
-  #else
-    lcd.cursor();
-  #endif
-}
-
-void LCD_noCursor() {
-  #if (HARDWARE_VERSION == 3)
-    lcd.noCursor();
-    lcd.render();
-  #else
-    lcd.noCursor();
-  #endif
-}
-
-void trimString(char *str) {
-  if (str == nullptr || *str == '\0') {
-    return;
-  }
-  char *end = str + strlen(str) - 1;
-  while (end > str && isspace((unsigned char)*end)) {
-    end--;
-  }
-  *(end + 1) = '\0';
-  char *start = str;
-  while (*start && isspace((unsigned char)*start)) {
-    start++;
-  }
-  if (start != str) {
-    memmove(str, start, strlen(start) + 1);
-  }
-}
-
-void rewindDirectory() {
-  #if (HARDWARE_VERSION > 2)
-    root.rewindDirectory();
-  #else
-    sd.vwd()->rewind();
-  #endif
-}
-
-void runSplashScreen() {
-  #if (HARDWARE_VERSION == 3)
-    // SplashScreen
-      u8g2.clearBuffer();
-      u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_SWlogo);
-      u8g2.sendBuffer();
-      // Twinkling stars
-      uint8_t StarPixelX[25] = {10, 3,  40, 22, 49, 17, 33, 9,  53, 25, 26,  40, 79, 108, 125, 98, 84, 120, 90, 103, 115, 128, 125, 95, 108};
-      uint8_t StarPixelY[25] = {3,  30, 9,  14, 1,  26, 22, 17, 11, 5,  19,  27, 7,  25,  16,  29, 12, 23,  3,  8,   4,   0,   32, 20, 16};
-
-      for (int i = 0; i < 150; i++) {
-        for (int j = 0; j < 25; j++) {
-          if (random(100) < 5) {
-            u8g2.setDrawColor(0);
-          } else {
-            u8g2.setDrawColor(1);
-          }
-          u8g2.drawPixel(StarPixelX[j], StarPixelY[j]);
-        }
-        u8g2.sendBuffer();
-        delay(10);
-      }
-      u8g2.setDrawColor(1);
-
-      u8g2.clearBuffer();
-      u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
-      u8g2.sendBuffer();
-
-      // Loading bar at the bottom of the screen: a fixed rounded outline, filled left to right during the 2s logo display
-      const uint32_t logoDuration = 2000;
-      const uint8_t barHeight = 8;
-      const uint8_t barWidth = 122; // Widest centered bar that stays within the logo text (x = 3 to 125)
-      const uint8_t barX = (u8g2.getDisplayWidth() - barWidth) / 2;
-      const uint8_t barY = u8g2.getDisplayHeight() - barHeight - 6;
-      // Fill sits inside the 1px outline with a 1px blank gap on all sides
-      const uint8_t fillX = barX + 2;
-      const uint8_t fillY = barY + 2;
-      const uint8_t fillWidth = barWidth - 4;
-      const uint8_t fillHeight = barHeight - 4;
-
-      // Outline with rounded ends: the outermost column spans barHeight-4 rows, the next spans barHeight-2
-      u8g2.drawHLine(barX + 2, barY, barWidth - 4);
-      u8g2.drawHLine(barX + 2, barY + barHeight - 1, barWidth - 4);
-      u8g2.drawPixel(barX + 1, barY + 1);
-      u8g2.drawPixel(barX + 1, barY + barHeight - 2);
-      u8g2.drawPixel(barX + barWidth - 2, barY + 1);
-      u8g2.drawPixel(barX + barWidth - 2, barY + barHeight - 2);
-      u8g2.drawVLine(barX, barY + 2, barHeight - 4);
-      u8g2.drawVLine(barX + barWidth - 1, barY + 2, barHeight - 4);
-      u8g2.sendBuffer();
-
-      uint32_t logoStartTime = millis();
-      uint8_t fillLength = 0;
-      while (fillLength < fillWidth) {
-        uint32_t elapsed = millis() - logoStartTime;
-        uint8_t targetLength = (elapsed < logoDuration) ? (fillWidth * elapsed) / logoDuration : fillWidth;
-        if (targetLength > fillLength) {
-          while (fillLength < targetLength) {
-            uint8_t x = fillX + fillLength; // x coordinate of the next fill column
-            if ((fillLength == 0) || (fillLength == fillWidth - 1)) {
-              u8g2.drawVLine(x, fillY + 1, fillHeight - 2); // Rounded ends of the fill
-            } else {
-              u8g2.drawVLine(x, fillY, fillHeight);
-            }
-            fillLength++;
-          }
-          u8g2.sendBuffer();
-        } else {
-          delay(5);
-        }
-      }
-    #endif
-}
-
-void sendCurrentParams() {
-    PPUSB.writeUint32Array(Phase1Duration, 4);
-    PPUSB.writeUint32Array(InterPhaseInterval, 4);
-    PPUSB.writeUint32Array(Phase2Duration, 4);
-    PPUSB.writeUint32Array(InterPulseInterval, 4);
-    PPUSB.writeUint32Array(BurstDuration, 4);
-    PPUSB.writeUint32Array(BurstInterval, 4);
-    PPUSB.writeUint32Array(PulseTrainDuration, 4);
-    PPUSB.writeUint32Array(PulseTrainDelay, 4);
-    PPUSB.writeUint16Array(Phase1Voltage, 4);
-    PPUSB.writeUint16Array(Phase2Voltage, 4);
-    PPUSB.writeUint16Array(RestingVoltage, 4);
-    PPUSB.writeByteArray(IsBiphasic, 4);
-    PPUSB.writeByteArray(CustomTrainID, 4);
-    PPUSB.writeByteArray(CustomTrainTarget, 4);
-    PPUSB.writeByteArray(CustomTrainLoop, 4);
-     for (int x = 0; x < 2; x++) { // Read 8 trigger address bytes
-       for (int y = 0; y < 4; y++) {
-        PPUSB.writeByte(TriggerAddress[x][y]);
-       }
-     }
-     PPUSB.writeByteArray(TriggerMode, 2);
-}
-
-void loadCustomPulseTrain(byte trainID) {
-  CustomTrainNpulses[trainID] = PPUSB.readUint32();
-  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
-    CustomPulseTimes[trainID][x] = PPUSB.readUint32();
-  }
-  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
-    CustomVoltages[trainID][x] = PPUSB.readUint16();
-  }
-  PPUSB.writeByte(1); // Send confirm byte
-}
-
-#if (HARDWARE_VERSION == 3)
-  bool formatCard() {
-    if (candidateSettingsFile) {
-      candidateSettingsFile.close();
-    }
-    Serial.println("STATUS: Starting Format...");
-    FatFormatter formatter;
-    // The formatter needs a 512-byte temporary workspace (cache)
-    uint8_t cache[512];
-
-    if (!formatter.format(sd.card(), cache, &Serial)) {
-      Serial.println("ERROR: Format failed!");
-      return false;
-    }
-    if (!sd.begin(SdioConfig(FIFO_SDIO))) {
-      Serial.println("ERROR: Card re-init failed!");
-      return false;
-    }
-    sd.mkdir("Pulse_Pal");
-    sd.chdir("Pulse_Pal");
-    if (!root.open("/Pulse_Pal")) {
-      Serial.println("ERROR: Card re-init failed!");
-      return false;
-    }
-    currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-    settingsFile.open(currentSettingsFileNameChar, O_READ);
-    Serial.println("SUCCESS: Card format complete!");
-    return true;
-  }
-#endif
