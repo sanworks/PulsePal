@@ -399,7 +399,7 @@ void setup() {
       write2Screen("Startup Error:"," Need SD Format");
     }
   #endif
-  currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+  currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
   settingsFile.open(currentSettingsFileNameChar, O_READ);
   
   
@@ -657,7 +657,7 @@ void loop() {
             currentSettingsFileName = currentSettingsFileName + (char)PPUSB.readByte();
           }
           settingsFile.close();
-          currentSettingsFileName.toCharArray(currentSettingsFileNameChar, settingsFileNameLength+1);
+          currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
           if (settingsOp == 1) { // Save
             SaveCurrentProgram2SD();
           } else if (settingsOp == 2) { // Load
@@ -667,7 +667,7 @@ void loop() {
               LoadDefaultParameters();
               settingsFile.close();
               currentSettingsFileName = "defaultSettings.pps";
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
               settingsFile.open(currentSettingsFileNameChar, O_READ);
               confirmBit = 0;
             }
@@ -675,7 +675,7 @@ void loop() {
             sd.remove(currentSettingsFileNameChar);
           }
           settingsFile.rewind();
-          PPUSB.writeByte(1); // Send confirm byte
+          PPUSB.writeByte(confirmBit); // Send confirm byte (0 if a load failed)
         } break;
 
         case 91: { // Program a parameter on all 4 channels. This method is used by current MATLAB and Python classes. 
@@ -816,10 +816,10 @@ void loop() {
               write2Screen("SD CARD ERROR"," Click for menu");
             }
             currentSettingsFileName = "default.pps";
-            currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+            currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
             LoadDefaultParameters();
           #endif
-        }
+        } break;
         case 98: { // Terminate ongoing stimulation on a specific set of output channels
          inByte = PPUSB.readByte();
          for (int i = 0; i < 4; i++) {
@@ -957,10 +957,10 @@ void handler(void) {
           PulseTrainTimestamps[x] = SystemTime;
           PulseTrainEndTime[x] = SystemTime + PulseTrainDuration[x];
           if (CustomTrainTarget[x] == 1)  {
-            if (CustomTrainID[x] == 1) {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[0][0];
+            if (CustomTrainID[x] > 0) {
+              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0];
             } else {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[1][0];
+              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[1][0]; // Legacy behavior: burst target with no custom train selected
             }
             BurstStatus[x] = 0;
           } else {
@@ -1098,18 +1098,10 @@ void handler(void) {
                  if (CustomTrainID[x] == 0) {
                    dacValue.uint16[x] = Phase2Voltage[x]; DACFlag = 1; DACFlags[x] = 1;  
                  } else {
-                   if (CustomTrainID[x] == 1) {
-                     if (CustomVoltages[0][CustomPulseTimeIndex[x]] < 32768) {
-                       dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[0][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                     } else {
-                       dacValue.uint16[x] = 32768 - (CustomVoltages[0][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
-                     }
+                   if (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] < 32768) {
+                     dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
                    } else {
-                     if (CustomVoltages[1][CustomPulseTimeIndex[x]] < 32768) {
-                       dacValue.uint16[x] = 32768 + (32768 - CustomVoltages[1][CustomPulseTimeIndex[x]]); DACFlag = 1; DACFlags[x] = 1;
-                     } else {
-                       dacValue.uint16[x] = 32768 - (CustomVoltages[1][CustomPulseTimeIndex[x]]-32768); DACFlag = 1; DACFlags[x] = 1;
-                     } 
+                     dacValue.uint16[x] = 32768 - (CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]] - 32768); DACFlag = 1; DACFlags[x] = 1;
                    }
                    if (CustomTrainTarget[x] == 0) {
                        CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
@@ -1121,24 +1113,15 @@ void handler(void) {
               if (SystemTime == NextPulseTransitionTime[x]) {
                   if (CustomTrainID[x] == 0) {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                  } else if (CustomTrainID[x] == 1) {  
+                  } else {
                     if (CustomTrainTarget[x] == 0) {
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[0][CustomPulseTimeIndex[x]];
-                      if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[0])){
+                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
+                      if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
                           killChannel(x);
                      }
                     } else {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                    }  
-                  } else {
-                    if (CustomTrainTarget[x] == 0) {
-                        NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[1][CustomPulseTimeIndex[x]];
-                        if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[1])){
-                         killChannel(x);
-                       }
-                    } else {
-                        NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                    } 
+                    }
                   }
                  if (!((CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0))) { 
                    PulseStatus[x] = 0;
@@ -1163,19 +1146,11 @@ void handler(void) {
                      NextBurstTransitionTime[x] = SystemTime + BurstInterval[x];              
             } else if (CustomTrainTarget[x] == 1) {
               CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-              if (CustomTrainID[x] == 1) {
-                     if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[0])){
-                         killChannel(x);
-                     }
-                     NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[0][CustomPulseTimeIndex[x]];
-                     NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
-              } else if  (CustomTrainID[x] == 2) {
-                      if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[1])){ 
-                          killChannel(x);
-                      }
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[1][CustomPulseTimeIndex[x]];
-                      NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
+              if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
+                  killChannel(x);
               }
+              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
+              NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
             }
               BurstStatus[x] = 0;
               dacValue.uint16[x] = RestingVoltage[x]; DACFlag = 1; DACFlags[x] = 1;
@@ -1184,15 +1159,9 @@ void handler(void) {
             NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
             NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
             PulseStatus[x] = 1;
-            if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {              
-              if (CustomTrainID[x] == 1) {
-                 if (CustomPulseTimeIndex[x] < CustomTrainNpulses[0]){
-                    dacValue.uint16[x] = CustomVoltages[0][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-                 }
-              } else {
-                if (CustomPulseTimeIndex[x] < CustomTrainNpulses[1]){
-                    dacValue.uint16[x] = CustomVoltages[1][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
-                 }
+            if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
+              if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
+                  dacValue.uint16[x] = CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]; DACFlag = 1; DACFlags[x] = 1;
               }
             } else {
                  dacValue.uint16[x] = Phase1Voltage[x]; DACFlag = 1; DACFlags[x] = 1;
@@ -1648,7 +1617,7 @@ void UpdateSettingsMenu() {
                 currentSettingsFileName = currentSettingsFileName + candidateSettingsFileChar[i];
               }
               settingsFile.close();
-              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+              currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
             } else {
               for (int i = 0; i < 16; i++) {
                 currentSettingsFileNameChar[i] = candidateSettingsFileChar[i];
@@ -2771,7 +2740,7 @@ void loadCustomPulseTrain(byte trainID) {
       Serial.println("ERROR: Card re-init failed!");
       return false;
     }
-    currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileName));
+    currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
     settingsFile.open(currentSettingsFileNameChar, O_READ);
     Serial.println("SUCCESS: Card format complete!");
     return true;
