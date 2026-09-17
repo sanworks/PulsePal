@@ -1377,14 +1377,24 @@ class PulsePalDevice:
         return list(values)
 
     def _read_ack(self, context):
-        """Read a one-byte acknowledgement from the device."""
+        """Read a one-byte acknowledgement from the device.
+
+        The device replies 1 if it executed the command, or 0 if it rejected
+        the command because a value was out of range.
+        """
         try:
-            self._read_serial(1, "uint8")
+            acknowledgement = self._read_serial(1, "uint8")
         except PulsePalError as exc:
             raise PulsePalError(
                 "Error: Pulse Pal did not return an acknowledgement byte "
                 f"after a call to {context}."
             ) from exc
+        if acknowledgement != 1:
+            raise PulsePalError(
+                f"Error: Pulse Pal rejected the command sent by {context}. "
+                "This usually means that a channel number, parameter code or "
+                "value was out of range for the connected device."
+            )
 
     def _pack_values(self, values, datatype):
         """Pack scalar, list/tuple, or NumPy array values into bytes."""

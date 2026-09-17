@@ -40,7 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // This sketch is split into tabs (the .ino files in this folder). Before compiling, Arduino joins them into a single
 // file (this file first, then the others in alphabetical order), so all tabs share the constants and global
 // variables defined in this file.
-//   PulsePal_3.ino   Build configuration, pin maps, named constants, global variables, setup() and loop()
+//   PulsePal3.ino   Build configuration, pin maps, named constants, global variables, setup() and loop()
 //   Playback.ino     Pulse train playback in the hardware timer callback, handler(). Start here for timing questions.
 //   USBOps.ino       Commands from the PC, processUSBCommands()
 //   Menu.ino         Thumb joystick menu, UpdateSettingsMenu(), with a map of all menu options, and the editor
@@ -53,10 +53,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-#define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+// Both macros can also be set on the compiler command line, e.g. for automated builds:
+// arduino-cli compile --build-property compiler.cpp.extra_flags=-DHARDWARE_VERSION=2 ...
+#ifndef HARDWARE_VERSION
+  #define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+#endif
 
-#define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+ 
-                          // PIN_MAP_VERSION Does not affect hardware v2.X.
+#ifndef PIN_MAP_VERSION
+  #define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+
+                            // PIN_MAP_VERSION Does not affect hardware v2.X.
+#endif
 
 // Validate setup macros
 #if (HARDWARE_VERSION < 2) || (HARDWARE_VERSION > 3)
@@ -414,6 +420,7 @@ boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (fo
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
 volatile byte usbLoadTarget = 0;
 volatile boolean usbLoadFlag = 0;
+volatile boolean abortRequested = 0; // Set by handler() when the joystick button stops playback. loop() then shows the message.
 union { // typeCast converts bytes read from the microSD card to 16 and 32-bit integers
     byte byteArray[4];
     uint16_t uint16;
@@ -523,6 +530,10 @@ void loop() {
     loadCustomPulseTrain(usbLoadTarget);
   }
   usbLoadFlag = false;
+  if (abortRequested) { // handler() stopped playback because the joystick button was pressed
+    abortRequested = false;
+    ShowAbortMessage();
+  }
   if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
     stopHardwareTimer();
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.

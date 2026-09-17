@@ -418,19 +418,15 @@ void killChannel(byte outputChannel) {
   digitalWriteDirect(OutputLEDLines[outputChannel], LOW);
 }
 
+// Stops playback on all output channels. Called from handler() when the joystick button is pressed.
+// The screen message is shown by loop(), because writing to the screen from the timer interrupt could interrupt
+// a screen write already in progress in loop(), leaving both stuck (see the note above dacWrite()).
 void AbortAllPulseTrains() {
     for (int x = 0; x < 4; x++) {
       killChannel(x);
     }
     dacWrite();
-    write2Screen("   PULSE TRAIN","   TERMINATED");
-    delayMicroseconds(1500000);
-    if (inMenu == MENU_TOP) {
-      write2Screen(CommanderString," Click for menu");
-    } else {
-      inMenu = MENU_CHANNEL_LIST;
-      RefreshChannelMenu(SelectedChannel);
-    }
+    abortRequested = true;
 }
 
 // Sets UsesBursts for an output channel (0-3) from its parameters. Call after any output channel parameter changes.

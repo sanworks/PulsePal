@@ -21,18 +21,104 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 // USB communication with the PC (MATLAB, Python and other clients). Op codes are listed in enum OpCode
-// in PulsePal_3.ino.
+// in PulsePal3.ino.
 //
 // Functions in this file:
+//   paramValueBytes()
+//   isValidOutputChannel()
+//   isValidTriggerChannel()
+//   validateOutputParams()
+//   discardBytes()
+//   discardUntilQuiet()
 //   processUSBCommands()
 //   SerialReadByte()
 //   HandleReadTimeout()
 //   sendCurrentParams()
 //   loadCustomPulseTrain()
+//
+// Note on reads: PPUSB.readByte() waits indefinitely for data. PPUSB.readUint16(), readUint32() and the array reads
+// give up after 1s and return whatever they last read, without reporting an error. SerialReadByte() times out after
+// 500ms and sets SerialReadTimedout, which loop() handles by showing an error and loading default parameters.
+//
+// Note on confirm bytes: ops that reply send 1 if the command was executed, or 0 if it was rejected. A command is
+// rejected when a channel number, parameter code or data length is out of range. The data of a rejected command is
+// read and discarded, so that it is not interpreted as the next command. MATLAB and Python raise an error on 0.
+
+// Returns the number of bytes that follow a parameter code in ops 74 and 91, per channel, or 0 if the code is unknown
+byte paramValueBytes(byte paramCode) {
+  switch (paramCode) {
+    case PARAM_PHASE1_VOLTAGE:
+    case PARAM_PHASE2_VOLTAGE:
+    case PARAM_RESTING_VOLTAGE: return 2;
+    case PARAM_PHASE1_DURATION:
+    case PARAM_INTER_PHASE_INTERVAL:
+    case PARAM_PHASE2_DURATION:
+    case PARAM_INTER_PULSE_INTERVAL:
+    case PARAM_BURST_DURATION:
+    case PARAM_BURST_INTERVAL:
+    case PARAM_PULSE_TRAIN_DURATION:
+    case PARAM_PULSE_TRAIN_DELAY: return 4;
+    case PARAM_IS_BIPHASIC:
+    case PARAM_LINK_TRIGGER1:
+    case PARAM_LINK_TRIGGER2:
+    case PARAM_CUSTOM_TRAIN_ID:
+    case PARAM_CUSTOM_TRAIN_TARGET:
+    case PARAM_CUSTOM_TRAIN_LOOP:
+    case PARAM_CONTINUOUS_LOOP:
+    case PARAM_TRIGGER_MODE: return 1;
+  }
+  return 0; // Unknown parameter code
+}
+
+// Channel numbers in USB commands are 1-indexed
+bool isValidOutputChannel(byte channel) {
+  return (channel >= 1) && (channel <= 4);
+}
+
+bool isValidTriggerChannel(byte channel) {
+  return (channel >= 1) && (channel <= 2);
+}
+
+// Checks the parameters that would otherwise make handler() read outside its arrays, and resets any that are invalid.
+// Returns 1 if every parameter was valid, or 0 if any was reset.
+byte validateOutputParams() {
+  byte allValid = 1;
+  for (int i = 0; i < 4; i++) {
+    if (CustomTrainID[i] > N_CUSTOM_PULSE_TRAINS) {CustomTrainID[i] = 0; allValid = 0;}
+    if (CustomTrainTarget[i] > 1) {CustomTrainTarget[i] = 0; allValid = 0;}
+    if (CustomTrainLoop[i] > 1) {CustomTrainLoop[i] = 0; allValid = 0;}
+    if (IsBiphasic[i] > 1) {IsBiphasic[i] = 0; allValid = 0;}
+  }
+  for (int i = 0; i < 2; i++) {
+    if (TriggerMode[i] > TRIGGER_MODE_GATED) {TriggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
+  }
+  return allValid;
+}
+
+// Reads and discards the data of a command that cannot be executed. SerialReadByte() is used so that a message
+// shorter than expected times out instead of waiting forever.
+void discardBytes(uint64_t nBytes) {
+  for (uint64_t i = 0; i < nBytes; i++) {
+    SerialReadByte();
+    if (SerialReadTimedout) {
+      return;
+    }
+  }
+}
+
+// Reads and discards bytes until the USB port has been quiet for 100ms. Used when a command is rejected before its
+// data length is known, so that its data is not interpreted as new commands.
+void discardUntilQuiet() {
+  uint32_t lastByteTime = millis();
+  while ((millis() - lastByteTime) < 100) {
+    if (PPUSB.available()) {
+      PPUSB.readByte();
+      lastByteTime = millis();
+    }
+  }
+}
 
 // Reads one command from the USB serial port (if available) and executes it. See enum OpCode for the list of ops.
-// Note on reads: PPUSB.read...() functions wait indefinitely for data. SerialReadByte() times out after 500ms and
-// sets SerialReadTimedout, which loop() handles by showing an error and loading default parameters.
 void processUSBCommands() {
     if (PPUSB.available()) { // If bytes are available in the serial port buffer and a custom pulse train transfer is not ongoing
     CommandByte = PPUSB.readByte(); // Read a byte
@@ -73,17 +159,29 @@ void processUSBCommands() {
          }
          TriggerMode[0] = PPUSB.readByte(); // Read bytes that set interpretation of trigger channel voltage
          TriggerMode[1] = PPUSB.readByte();
-         PPUSB.writeByte(1); // Send confirm byte
+         byte paramsValid = validateOutputParams();
          for (int x = 0; x < 4; x++) {
            updateUsesBursts(x);
            setDAC(x, RestingVoltage[x]);
          }
+         PPUSB.writeByte(paramsValid); // Send confirm byte (0 if any parameter was out of range)
         } break;
         
         case OP_PROGRAM_ONE_PARAM: { // Op 74. Program one parameter on one channel. Used by the Python class to set one channel, by the MATLAB class
                                      // with firmware v21, and by the legacy MATLAB interface. See op 91 to set one parameter on all channels.
-          inByte2 = PPUSB.readByte();
-          inByte3 = PPUSB.readByte(); // inByte3 = channel (1-4)
+          inByte2 = PPUSB.readByte(); // Parameter code
+          inByte3 = PPUSB.readByte(); // Channel: 1-4, or 1-2 for trigger channel parameters
+          byte nValueBytes = paramValueBytes(inByte2);
+          if (nValueBytes == 0) { // Unknown parameter code, so the length of the value that follows is unknown
+            discardUntilQuiet();
+            PPUSB.writeByte(0);
+            break;
+          }
+          if ((inByte2 == PARAM_TRIGGER_MODE) ? !isValidTriggerChannel(inByte3) : !isValidOutputChannel(inByte3)) {
+            discardBytes(nValueBytes);
+            PPUSB.writeByte(0);
+            break;
+          }
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
           ContinuousLoopModeOriginal[inByte3] = ContinuousLoopMode[inByte3];
           switch (inByte2) { 
@@ -107,6 +205,7 @@ void processUSBCommands() {
              case PARAM_CONTINUOUS_LOOP: {ContinuousLoopMode[inByte3] = PPUSB.readByte();} break;
              case PARAM_TRIGGER_MODE: {TriggerMode[inByte3] = PPUSB.readByte();} break;
           }
+          byte paramValid = validateOutputParams();
           updateUsesBursts(inByte3);
           if (inByte2 == PARAM_RESTING_VOLTAGE) {
             setDAC(inByte3, RestingVoltage[inByte3]);
@@ -116,7 +215,7 @@ void processUSBCommands() {
               killChannel(inByte3);
             }
           }
-          PPUSB.writeByte(1); // Send confirm byte
+          PPUSB.writeByte(paramValid); // Send confirm byte (0 if the value was out of range)
         } break;
   
         case OP_LOAD_CUSTOM_TRAIN1_LEGACY: { // Op 75. Legacy op to program custom pulse train 1. Used by the MATLAB and Python classes with firmware v21. Otherwise they use op 95
@@ -158,8 +257,13 @@ void processUSBCommands() {
           #endif
         } break;
         case OP_SET_FIXED_VOLTAGE: { // Op 79. Write specific voltage to an output channel (not a pulse train) 
-          uint8_t myChannel = SerialReadByte() - 1; // Convert for zero-indexing
+          uint8_t myChannel = SerialReadByte();
           uint16_t val = PPUSB.readUint16();
+          if (!isValidOutputChannel(myChannel)) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          myChannel = myChannel - 1; // Convert for zero-indexing
           setDAC(myChannel, val);
           if (val == RestingVoltage[myChannel]) {
             digitalWriteDirect(OutputLEDLines[myChannel], LOW);
@@ -185,8 +289,12 @@ void processUSBCommands() {
          } break;
         case OP_SET_CONTINUOUS_LOOP: { // Op 82. Set Continuous Loop mode (play the current parametric pulse train indefinitely)
           inByte2 = SerialReadByte(); // Channel
-          inByte2 = inByte2 - 1; // Convert for zero-indexing
           inByte3 = SerialReadByte(); // State (0 = off, 1 = on)
+          if (!isValidOutputChannel(inByte2) || (inByte3 > 1)) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          inByte2 = inByte2 - 1; // Convert for zero-indexing
           ContinuousLoopMode[inByte2] = inByte3;
           if (!inByte3) {
             killChannel(inByte2);
@@ -234,6 +342,10 @@ void processUSBCommands() {
             while (PPUSB.available()==0){}
             currentSettingsFileName = currentSettingsFileName + (char)PPUSB.readByte();
           }
+          if ((settingsOp < 1) || (settingsOp > 3) || (settingsFileNameLength == 0)) {
+            PPUSB.writeByte(0); // Unknown file operation, or empty file name
+            break;
+          }
           settingsFile.close();
           currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
           if (settingsOp == 1) { // Save
@@ -260,8 +372,13 @@ void processUSBCommands() {
           for (int i = 0; i < 4; i++) {
             ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
           }
-          inByte2 = PPUSB.readByte();
-          switch (inByte2) { 
+          inByte2 = PPUSB.readByte(); // Parameter code
+          if (paramValueBytes(inByte2) == 0) { // Unknown parameter code, so the length of the values that follow is unknown
+            discardUntilQuiet();
+            PPUSB.writeByte(0);
+            break;
+          }
+          switch (inByte2) {
              case PARAM_IS_BIPHASIC: {PPUSB.readByteArray(IsBiphasic, 4);} break;
              case PARAM_PHASE1_VOLTAGE: {PPUSB.readUint16Array(Phase1Voltage, 4);} break;
              case PARAM_PHASE2_VOLTAGE: {PPUSB.readUint16Array(Phase2Voltage, 4);} break;
@@ -288,6 +405,7 @@ void processUSBCommands() {
              case PARAM_CONTINUOUS_LOOP: {PPUSB.readByteArray(ContinuousLoopMode, 4);} break;
              case PARAM_TRIGGER_MODE: {PPUSB.readByteArray(TriggerMode, 2);} break;
           }
+          byte paramsValid = validateOutputParams();
           for (int iChan = 0; iChan < 4; iChan++) {
             updateUsesBursts(iChan);
             if (inByte2 == PARAM_RESTING_VOLTAGE) {
@@ -299,10 +417,10 @@ void processUSBCommands() {
               }
             }
           }
-          PPUSB.writeByte(1); // Send confirm byte
+          PPUSB.writeByte(paramsValid); // Send confirm byte (0 if any value was out of range)
         } break;
 
-        case OP_PROGRAM_ALL_PARAMS: { // Op 92. Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
+        case OP_PROGRAM_ALL_PARAMS: {// Op 92. Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
           for (int i = 0; i < 4; i++) {
             ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
           }
@@ -328,7 +446,7 @@ void processUSBCommands() {
            }
          }
          PPUSB.readByteArray(TriggerMode, 2);
-         PPUSB.writeByte(1); // Send confirm byte
+         byte allParamsValid = validateOutputParams();
          for (int x = 0; x < 4; x++) {
            updateUsesBursts(x);
            setDAC(x, RestingVoltage[x]);
@@ -336,6 +454,7 @@ void processUSBCommands() {
             killChannel(x);
            }
          }
+         PPUSB.writeByte(allParamsValid); // Send confirm byte (0 if any parameter was out of range)
         } break;
         case OP_SEND_CURRENT_PARAMS: { // Op 93. Send all current parameters
           sendCurrentParams();
@@ -351,8 +470,13 @@ void processUSBCommands() {
           usbLoadFlag = true;
         } break;
         case OP_SET_ZERO_CODE_CALIBRATION: { // Op 96. Set Calibration to offset DAC Zero Code Error on a single channel
-          inByte = PPUSB.readByte();
-          ZeroCodeCalibration[inByte] = PPUSB.readUint16();
+          inByte = PPUSB.readByte(); // Output channel, zero-indexed
+          uint16_t calibrationValue = PPUSB.readUint16();
+          if (inByte > 3) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          ZeroCodeCalibration[inByte] = calibrationValue;
           PPUSB.writeByte(1); // Send confirm byte
           #if (HARDWARE_VERSION > 2)
             EEPROM.put(0, ZeroCodeCalibration);
@@ -455,12 +579,20 @@ void sendCurrentParams() {
      PPUSB.writeByteArray(TriggerMode, 2);
 }
 
+// Loads a custom pulse train from the USB serial port (ops 75, 76 and 95). trainID is zero-indexed.
+// Each pulse has a 4-byte time and a 2-byte voltage, so the data after the pulse count is nPulses*6 bytes.
 void loadCustomPulseTrain(byte trainID) {
-  CustomTrainNpulses[trainID] = PPUSB.readUint32();
-  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
+  uint32_t nPulses = PPUSB.readUint32();
+  if ((trainID >= N_CUSTOM_PULSE_TRAINS) || (nPulses > MAX_CUSTOM_PULSES)) {
+    discardBytes((uint64_t)nPulses * 6);
+    PPUSB.writeByte(0); // Unknown custom train, or more pulses than the device can store
+    return;
+  }
+  CustomTrainNpulses[trainID] = nPulses;
+  for (uint32_t x = 0; x < nPulses; x++) {
     CustomPulseTimes[trainID][x] = PPUSB.readUint32();
   }
-  for (int x = 0; x < CustomTrainNpulses[trainID]; x++) {
+  for (uint32_t x = 0; x < nPulses; x++) {
     CustomVoltages[trainID][x] = PPUSB.readUint16();
   }
   PPUSB.writeByte(1); // Send confirm byte

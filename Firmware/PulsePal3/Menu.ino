@@ -30,6 +30,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   RefreshActionMenu()
 //   RefreshTriggerMenu()
 //   RefreshFileMenu()
+//   ShowAbortMessage()
 //   ReadDebouncedButton()
 //   FormatNumberForDisplay()
 //   placeEditCursor()
@@ -609,6 +610,19 @@ void RefreshFileMenu() {
     write2Screen("<    Cancel    >", " ");
   } else {
     write2Screen("<   New File   >", ""); // Position 1 of the save menu
+  }
+}
+
+// Shows the message for playback stopped with the joystick button, and returns to the menu. Called from loop()
+// after handler() has stopped playback and set abortRequested.
+void ShowAbortMessage() {
+  write2Screen("   PULSE TRAIN","   TERMINATED");
+  delayMicroseconds(1500000);
+  if (inMenu == MENU_TOP) {
+    write2Screen(CommanderString," Click for menu");
+  } else {
+    inMenu = MENU_CHANNEL_LIST;
+    RefreshChannelMenu(SelectedChannel);
   }
 }
 
