@@ -31,14 +31,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   discardBytes()
 //   discardUntilQuiet()
 //   processUSBCommands()
-//   SerialReadByte()
 //   HandleReadTimeout()
 //   sendCurrentParams()
 //   loadCustomPulseTrain()
 //
-// Note on reads: PPUSB.readByte() waits indefinitely for data. PPUSB.readUint16(), readUint32() and the array reads
-// give up after 1s and return whatever they last read, without reporting an error. SerialReadByte() times out after
-// 500ms and sets SerialReadTimedout, which loop() handles by showing an error and loading default parameters.
+// Note on reads: every PPUSB read gives up if no byte arrives for 100ms, and sets PPUSB.timedOut(). The rest of the
+// command then reads as zeros, and loop() shows a comm failure message and loads the default parameters. See ArCOM.h.
+// Replies are buffered, and sent by the PPUSB.flush() call in loop().
 //
 // Note on confirm bytes: ops that reply send 1 if the command was executed, or 0 if it was rejected. A command is
 // rejected when a channel number, parameter code or data length is out of range. The data of a rejected command is
@@ -95,12 +94,11 @@ byte validateOutputParams() {
   return allValid;
 }
 
-// Reads and discards the data of a command that cannot be executed. SerialReadByte() is used so that a message
-// shorter than expected times out instead of waiting forever.
+// Reads and discards the data of a command that cannot be executed
 void discardBytes(uint64_t nBytes) {
   for (uint64_t i = 0; i < nBytes; i++) {
-    SerialReadByte();
-    if (SerialReadTimedout) {
+    PPUSB.readByte();
+    if (PPUSB.timedOut()) { // The rest of the message never arrived
       return;
     }
   }
@@ -229,7 +227,7 @@ void processUSBCommands() {
         } break;      
         
         case OP_SOFT_TRIGGER: { // Op 77. Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
-          inByte2 = SerialReadByte();
+          inByte2 = PPUSB.readByte();
           for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
             // (albeit at the expense of ~50us latency)
@@ -241,10 +239,10 @@ void processUSBCommands() {
           LCD_home(); 
           byte ByteCount = 0;
           // read all the available characters
-          inByte2 = SerialReadByte(); // Total length of message to follow (including newline)
+          inByte2 = PPUSB.readByte(); // Total length of message to follow (including newline)
           while (ByteCount < inByte2) {
               // display each character to the LCD
-              inByte = SerialReadByte();
+              inByte = PPUSB.readByte();
               if (inByte != 254) {
                 lcd.write(inByte);
               } else {
@@ -257,7 +255,7 @@ void processUSBCommands() {
           #endif
         } break;
         case OP_SET_FIXED_VOLTAGE: { // Op 79. Write specific voltage to an output channel (not a pulse train) 
-          uint8_t myChannel = SerialReadByte();
+          uint8_t myChannel = PPUSB.readByte();
           uint16_t val = PPUSB.readUint16();
           if (!isValidOutputChannel(myChannel)) {
             PPUSB.writeByte(0);
@@ -288,8 +286,8 @@ void processUSBCommands() {
           write2Screen(CommanderString," Click for menu");
          } break;
         case OP_SET_CONTINUOUS_LOOP: { // Op 82. Set Continuous Loop mode (play the current parametric pulse train indefinitely)
-          inByte2 = SerialReadByte(); // Channel
-          inByte3 = SerialReadByte(); // State (0 = off, 1 = on)
+          inByte2 = PPUSB.readByte(); // Channel
+          inByte3 = PPUSB.readByte(); // State (0 = off, 1 = on)
           if (!isValidOutputChannel(inByte2) || (inByte3 > 1)) {
             PPUSB.writeByte(0);
             break;
@@ -305,18 +303,18 @@ void processUSBCommands() {
           settingsFile.rewind();
           for (int i = 0; i < SETTINGS_FILE_N_PARAM_BYTES; i++) {
             settingsFile.read(buf, sizeof(buf));
-            SerialUSB.write(buf[0]);
+            PPUSB.writeByte(buf[0]);
           }
         } break;
         
         case OP_DEBUG_WRITE_PIN: { // Op 86. Override Arduino IO Lines (for development and debugging only - may disrupt normal function)
-          inByte2 = SerialReadByte();
-          inByte3 = SerialReadByte();
+          inByte2 = PPUSB.readByte();
+          inByte3 = PPUSB.readByte();
           pinMode(inByte2, OUTPUT); digitalWrite(inByte2, inByte3);
         } break; 
         
         case OP_DEBUG_READ_PIN: { // Op 87. Direct Read IO Lines (for development and debugging only - may disrupt normal function)
-          inByte2 = SerialReadByte();
+          inByte2 = PPUSB.readByte();
           pinMode(inByte2, INPUT);
           delayMicroseconds(10);
           LogicLevel = digitalRead(inByte2);
@@ -324,7 +322,7 @@ void processUSBCommands() {
         } break; 
         case OP_SET_CLIENT_NAME: { // Op 89. Receive new CommanderString (displayed on top line of OLED, i.e. "MATLAB connected"
           for (int x = 0; x < 6; x++) {
-            CommanderString[x] = SerialReadByte();
+            CommanderString[x] = PPUSB.readByte();
           }
           for (int x = 6; x < 16; x++) {
             CommanderString[x] = ClientStringSuffix[x-6];
@@ -333,13 +331,10 @@ void processUSBCommands() {
         } break;
         case OP_SD_SETTINGS_FILE: { // Op 90. Save, load or delete the current microSD settings file
           byte confirmBit = 1;
-          while (PPUSB.available()==0){}
           settingsOp = PPUSB.readByte();
-          while (PPUSB.available()==0){}
           settingsFileNameLength = PPUSB.readByte();
           currentSettingsFileName = "";
           for (int i = 0; i < settingsFileNameLength; i++) {
-            while (PPUSB.available()==0){}
             currentSettingsFileName = currentSettingsFileName + (char)PPUSB.readByte();
           }
           if ((settingsOp < 1) || (settingsOp > 3) || (settingsFileNameLength == 0)) {
@@ -507,24 +502,6 @@ void processUSBCommands() {
   }
 }
 
-byte SerialReadByte(){
-  byte ReturnByte = 0;
-  if (SerialReadTimedout == 0) {
-    SerialReadStartTime = millis();
-    while (PPUSB.available() == 0) {
-        SerialCurrentTime = millis();
-        if ((SerialCurrentTime - SerialReadStartTime) > Timeout) {
-          SerialReadTimedout = 1;
-          return 0;
-        }
-    }
-    ReturnByte = PPUSB.readByte();
-    return ReturnByte;
-  } else {
-    return 0;
-  }
-}
-
 void HandleReadTimeout() {
   byte FlashState = 0;
   write2Screen("COMM. FAILURE!","Click joystick->");
@@ -589,11 +566,7 @@ void loadCustomPulseTrain(byte trainID) {
     return;
   }
   CustomTrainNpulses[trainID] = nPulses;
-  for (uint32_t x = 0; x < nPulses; x++) {
-    CustomPulseTimes[trainID][x] = PPUSB.readUint32();
-  }
-  for (uint32_t x = 0; x < nPulses; x++) {
-    CustomVoltages[trainID][x] = PPUSB.readUint16();
-  }
+  PPUSB.readUint32Array(CustomPulseTimes[trainID], nPulses); // One block read for the times, and one for the voltages
+  PPUSB.readUint16Array(CustomVoltages[trainID], nPulses);
   PPUSB.writeByte(1); // Send confirm byte
 }

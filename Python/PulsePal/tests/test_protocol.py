@@ -28,17 +28,30 @@ OP_MENU_BYTE = 213
 
 
 class FakePort:
-    """Records written bytes, and replies to acknowledgement reads."""
+    """Records written bytes and read sizes, and replies to reads.
+
+    Bytes placed in `response` are returned first; after that, reads return the
+    acknowledgement byte.
+    """
 
     def __init__(self, ack=1):
         self.writes = []
+        self.reads = []
         self.ack = ack
+        self.response = bytearray()
 
     def write(self, data):
         self.writes.append(bytes(data))
         return len(data)
 
     def read(self, n):
+        self.reads.append(n)
+        if self.response:
+            reply = bytes(self.response[:n])
+            del self.response[:n]
+            if len(reply) < n:
+                reply += bytes([self.ack]) * (n - len(reply))
+            return reply
         return bytes([self.ack]) * n
 
 
@@ -211,6 +224,57 @@ def test_stop_and_trigger_message_bytes():
         bytes([OP_MENU_BYTE, 98, 0b1111]),
         bytes([OP_MENU_BYTE, 98, 0b0010]),
     ]
+
+
+def parameter_message(cycles=200, volt_bits=None, byte_value=1):
+    """Build the 178-byte parameter set that op 93 returns."""
+    if volt_bits is None:
+        volt_bits = volts_to_bits(5)
+    return struct.pack(
+        "<32I12H26B",
+        *([cycles] * 32),
+        *([volt_bits] * 12),
+        *([byte_value] * 26),
+    )
+
+
+def test_sync_from_device_reads_the_message_in_one_read():
+    device = make_device()
+    device.port.response = bytearray(parameter_message())
+    device.sync_from_device()
+    assert device.port.writes == [bytes([OP_MENU_BYTE, 93])]
+    assert device.port.reads == [178], device.port.reads
+    assert device.phase1_duration[1:5] == [0.01] * 4          # 200 cycles at 20 kHz
+    assert device.pulse_train_delay[1:5] == [0.01] * 4        # the last time parameter
+    assert device.phase1_voltage[1:5] == [5.0] * 4
+    assert device.resting_voltage[1:5] == [5.0] * 4           # the last voltage parameter
+    assert device.is_biphasic[1:5] == [1] * 4
+    assert device.link_trigger_channel2[1:5] == [1] * 4       # the last byte array
+    assert device.trigger_mode[1:3] == [1, 1]
+
+
+def test_settings_file_load_does_not_wait_on_current_firmware():
+    """Firmware v22 acknowledges op 90 after the load, so no fixed delay is needed."""
+    sleeps = []
+    original_sleep = PulsePal.time.sleep
+    PulsePal.time.sleep = lambda seconds: sleeps.append(seconds)
+    try:
+        device = make_device()
+        device.port.response = bytearray(bytes([1]) + parameter_message())
+        device.sd_settings("TEST.pps", "load")
+        assert sleeps == [], sleeps
+        assert device.port.reads == [1, 178], device.port.reads
+
+        # Firmware v21 does not acknowledge, so the wait is still used there
+        sleeps.clear()
+        legacy = make_device(firmware_version=21, n_trains=2, max_pulses=5000)
+        try:
+            legacy.sd_settings("TEST.pps", "load")
+        except PulsePal.PulsePalError:
+            pass  # v21 has no op 93, so reading the parameters back is unsupported
+        assert sleeps == [0.1], sleeps
+    finally:
+        PulsePal.time.sleep = original_sleep
 
 
 def main():

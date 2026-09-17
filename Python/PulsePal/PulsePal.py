@@ -329,6 +329,7 @@ class PulsePalDevice:
     _HANDSHAKE_OPCODE = 72
     _HANDSHAKE_RESPONSE = 75
     _DAC_BITMAX = 65535
+    _PARAM_MESSAGE_BYTES = 178  # Length of the parameter set sent by op 93
     _OLDEST_FIRMWARE_SUPPORTED = 21
 
     # Parameter names in order of their parameter codes (code = index + 1),
@@ -806,7 +807,15 @@ class PulsePalDevice:
         """
         self._require_firmware(22, "sync_from_device()")
         self._write_serial((self._OP_MENU_BYTE, 93), "uint8")
-        for attr_name in (
+        # The device sends the whole parameter set as one message, so read it in one go and
+        # unpack it here. See "Op codes", op 93, in /Firmware/PROTOCOL.md.
+        message = self._read_raw(self._PARAM_MESSAGE_BYTES)
+        values = struct.unpack(
+            f"{self._ENDIANNESS}32I12H26B",
+            message,
+        )
+
+        for index, attr_name in enumerate((
                 "phase1_duration",
                 "inter_phase_interval",
                 "phase2_duration",
@@ -815,46 +824,31 @@ class PulsePalDevice:
                 "inter_burst_interval",
                 "pulse_train_duration",
                 "pulse_train_delay",
-        ):
-            setattr(
-                self,
-                attr_name,
-                [float("nan")]
-                + [
-                    self._cycles_to_seconds(x)
-                    for x in self._read_serial(4, "uint32")
-                ],
-            )
+        )):
+            cycles = values[index * 4:index * 4 + 4]
+            setattr(self, attr_name,
+                    [float("nan")] + [self._cycles_to_seconds(x) for x in cycles])
 
-        for attr_name in (
+        for index, attr_name in enumerate((
                 "phase1_voltage",
                 "phase2_voltage",
                 "resting_voltage",
-        ):
-            setattr(
-                self,
-                attr_name,
-                [float("nan")]
-                + [
-                    self._bits_to_volts(x)
-                    for x in self._read_serial(4, "uint16")
-                ],
-            )
+        )):
+            bits = values[32 + index * 4:32 + index * 4 + 4]
+            setattr(self, attr_name,
+                    [float("nan")] + [self._bits_to_volts(x) for x in bits])
 
-        for attr_name in (
+        for index, attr_name in enumerate((
                 "is_biphasic",
                 "custom_train_id",
                 "custom_train_target",
                 "custom_train_loop",
                 "link_trigger_channel1",
                 "link_trigger_channel2",
-        ):
-            setattr(
-                self,
-                attr_name,
-                [float("nan")] + self._read_serial(4, "uint8"),
-            )
-        self.trigger_mode = [float("nan")] + self._read_serial(2, "uint8")
+        )):
+            setattr(self, attr_name,
+                    [float("nan")] + list(values[44 + index * 4:44 + index * 4 + 4]))
+        self.trigger_mode = [float("nan")] + list(values[68:70])
 
     def send_custom_pulse_train(
         self,
@@ -1081,9 +1075,10 @@ class PulsePalDevice:
             "uint8",
         )
         if self.info.firmware_version > 21:
-            self._read_ack("sd_settings()")
+            self._read_ack("sd_settings()")  # Sent after the file operation has finished
+        elif op_byte == 2:
+            time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
         if op_byte == 2:
-            time.sleep(0.1)
             self.sync_from_device()
 
     def stop(self, channels=None):
@@ -1354,12 +1349,8 @@ class PulsePalDevice:
                 f"{len(payload)} byte(s)."
             )
 
-    def _read_serial(self, n_values, datatype):
-        """Read values from the serial port and unpack them with struct."""
-        datatype = self._normalize_datatype(datatype)
-        fmt = self._STRUCT_FORMATS[datatype]
-        n_values = int(n_values)
-        n_bytes = n_values * struct.calcsize(fmt)
+    def _read_raw(self, n_bytes):
+        """Read exactly n_bytes from the serial port."""
         message_bytes = self.port.read(n_bytes)
         if len(message_bytes) < n_bytes:
             raise PulsePalError(
@@ -1367,6 +1358,15 @@ class PulsePalDevice:
                 f"{len(message_bytes)} byte(s) read. "
                 f"Expected {n_bytes} byte(s)."
             )
+        return message_bytes
+
+    def _read_serial(self, n_values, datatype):
+        """Read values from the serial port and unpack them with struct."""
+        datatype = self._normalize_datatype(datatype)
+        fmt = self._STRUCT_FORMATS[datatype]
+        n_values = int(n_values)
+        n_bytes = n_values * struct.calcsize(fmt)
+        message_bytes = self._read_raw(n_bytes)
 
         values = struct.unpack(
             f"{self._ENDIANNESS}{n_values}{fmt}",

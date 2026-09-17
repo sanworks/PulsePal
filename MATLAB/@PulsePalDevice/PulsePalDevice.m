@@ -302,10 +302,11 @@ classdef PulsePalDevice < handle
             obj.Port.write(Message, 'uint8');
             confirmed = 1;
             if obj.firmwareVersion > 21
-                confirmed = obj.confirmWrite();
+                confirmed = obj.confirmWrite(); % Sent after the file operation has finished
+            elseif OpByte == 2
+                pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
             end
             if OpByte == 2
-                pause(.1);
                 obj.importCurrentParamsFromPulsePal;
             end
         end

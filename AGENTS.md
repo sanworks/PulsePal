@@ -47,7 +47,8 @@ cd Python/PulsePal && python tests/test_protocol.py
 ```
 
 Everything else needs hardware: pulse timing, the screen, the joystick menu, the microSD
-card and the trigger inputs. State plainly what was and was not tested, and give the user
+card and the trigger inputs. `Python/PulsePal/tests/benchmark_serial.py` measures USB latency
+and throughput against a connected device, before and after a change. State plainly what was and was not tested, and give the user
 a short list of things to check on the device.
 
 ## Style

@@ -297,10 +297,8 @@ uint8_t TriggerMode[2] = {0}; // Normal, toggle or pulse gated mode. See enum Tr
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
 unsigned long CustomTrainNpulses[N_CUSTOM_PULSE_TRAINS] = {0}; // Stores the total number of pulses in the custom pulse train
-boolean SerialReadTimedout = 0; // Goes to 1 if a serial read timed out, causing all subsequent serial reads to skip until next main loop iteration.
-int SerialCurrentTime = 0; // Current time (millis) for serial read timeout
-int SerialReadStartTime = 0; // Time the serial read was started
-int Timeout = 500; // Times out after 500ms
+int SerialCurrentTime = 0; // Current time (millis), used while flashing the LEDs of a comm failure
+int SerialReadStartTime = 0; // Time the comm failure message started
 
 // Variables used to parse USB commands
 byte inByte; byte inByte2; byte inByte3; byte inByte4; byte CommandByte;
@@ -530,14 +528,15 @@ void loop() {
     loadCustomPulseTrain(usbLoadTarget);
   }
   usbLoadFlag = false;
+  PPUSB.flush(); // Send any reply from this pass as a single USB packet
   if (abortRequested) { // handler() stopped playback because the joystick button was pressed
     abortRequested = false;
     ShowAbortMessage();
   }
-  if (SerialReadTimedout == 1) { // A serial USB message started, but didn't finish as expected
+  if (PPUSB.timedOut()) { // A serial USB message started, but didn't finish as expected
     stopHardwareTimer();
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
-    SerialReadTimedout = 0;
+    PPUSB.clearTimedOut();
     startHardwareTimer();
   }
 }

@@ -64,10 +64,15 @@ read the `--show` output before concluding that something really changed.
 5. **Validate anything that arrives over USB** before it indexes an array, and reply 0 if it
    is out of range. `paramValueBytes()`, `isValidOutputChannel()` and `validateOutputParams()`
    in `USBOps.ino` do this.
-6. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
+6. **Use ArCOM for USB, only from `loop()`.** Its reads give up after 100 ms without a new
+   byte, return zeros and set `PPUSB.timedOut()`, which `loop()` checks once per pass. Replies
+   are buffered until the `PPUSB.flush()` in `loop()` sends them, so do not expect a reply to
+   leave the device inside an op. Array reads and writes are single block transfers that rely
+   on both boards being little-endian, which is also the wire format. See `ArCOM.h`.
+7. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
    `TIMER_PERIOD` (50 µs). The joystick time editor in `Menu.ino` currently assumes 50 µs in
    two places, so changing `TIMER_PERIOD` needs those fixed too.
-7. **Keep the existing names.** The lead developer navigates this code by memory during
+8. **Keep the existing names.** The lead developer navigates this code by memory during
    support calls. Renaming variables or reformatting whole files costs more than it saves.
 
 ## What runs in the timer interrupt
@@ -111,6 +116,8 @@ playback, the menu or the USB ops, ask the user to check:
 - The joystick menu: edit a parameter, save, load and erase a settings file.
 - `stop()` during playback from Python, then trigger again.
 - Custom trains, including trains 3 and 4 on Pulse Pal 3.
+- USB latency and throughput, with `/Python/PulsePal/tests/benchmark_serial.py`, which needs a
+  connected device. Run it before and after a change to the serial code.
 
 Known limits worth remembering: a settings file name of 12 characters plus `.pps` cannot be
 listed by the menu, and `mirrorAboutZero()` maps a −10 V custom pulse's phase 2 to −10 V.

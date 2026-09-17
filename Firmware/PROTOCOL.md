@@ -66,7 +66,7 @@ The MATLAB and Python classes raise an error when they receive 0.
 | 86 | Write a pin (debugging) | Pin number, value | none |
 | 87 | Read a pin (debugging) | Pin number | Pin state (1 byte) |
 | 89 | Set the client name | 6 characters, shown as "NAME Connected" | none |
-| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0 |
+| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0, sent after the file operation has finished |
 | 91 | Program one parameter on all channels | Parameter code, then one value per output channel (4 values), or per trigger channel (2 values) for code 128 | 1 / 0 |
 | 92 | Program all parameters | 8 uint32 arrays of 4 (times), 3 uint16 arrays of 4 (voltages), then byte arrays of 4: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
 | 93 | Send all parameters | none | 178 bytes, in the op 92 order but without the continuous loop bytes |
@@ -133,9 +133,14 @@ Clients read the firmware version from the handshake, and the device properties 
 
 ## Timeouts and error handling
 
-- The firmware waits indefinitely for the first byte of a value (`PPUSB.readByte()`).
-- Multi-byte reads give up after 1 second and keep the bytes they already had.
-- `SerialReadByte()`, used by several ops, times out after 500 ms and makes the device
-  show "COMM. FAILURE!", load the default parameters, and wait for a joystick click.
-- A client that stops mid-message can therefore leave the device waiting. Clients should
-  send each command in one write.
+- Every read gives up if no further byte arrives for 100 ms. The timeout measures the gap
+  between bytes, not the duration of a transfer, so a large custom pulse train is never cut
+  short by it.
+- On a timeout the device shows "COMM. FAILURE!", loads the default parameters, and waits
+  for a joystick click. Its reply, if the op has one, is not sent. This is meant to be
+  noticed: it usually means a faulty cable, hub or client, not a normal condition.
+- The device never waits indefinitely, so a client that stops mid-message cannot hang it.
+- Replies are buffered and sent as one USB packet when the command finishes. A reply therefore
+  means the command is done, so clients do not need to wait before sending the next one. After
+  loading a settings file (op 90), a client can read the parameters back (op 93) immediately.
+- Clients should still send each command in a single write.
