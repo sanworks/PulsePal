@@ -92,13 +92,16 @@ output channel parameters.
 
 **Adding an output channel parameter** (the wire format makes this wide-reaching):
 
-1. `PulsePal3.ino`: the global array, and a `ParamID` entry with the next free code.
-2. `USBOps.ino`: ops 73, 74, 91, 92 (reading), 93 (sending), and `paramValueBytes()`.
-3. `SDSettings.ino`: `SaveCurrentProgram2SD()`, `RestoreParametersFromSD()`, the layout
+1. `PulsePal3.ino`: the global array, a `ParamID` entry with the next free code, and a row in
+   the `outputParams` table (rows are in parameter code order; a `static_assert` checks this).
+2. `PulsePal3.ino`: to put it in the joystick menu, add its code to `menuActionParams`. That is
+   the only change the menu needs: labels, limits, units, storage and the monophasic skip all
+   come from the table.
+3. `USBOps.ino`: ops 73, 74, 91, 92 (reading) and 93 (sending). `paramValueBytes()` reads the
+   table, so it needs no change.
+4. `SDSettings.ino`: `SaveCurrentProgram2SD()`, `RestoreParametersFromSD()`, the layout
    comment, and `SETTINGS_FILE_N_PARAM_BYTES`. Changing the file layout invalidates saved
    files, so consider appending instead.
-4. `Menu.ino`: the click handler, `RefreshActionMenu()`, the scroll wrap-around limits, and
-   `ReturnUserValue()`.
 5. `/Firmware/PROTOCOL.md`, and the Python, MATLAB and C++ clients.
 6. Run `/Python/PulsePal/tests/test_protocol.py`.
 

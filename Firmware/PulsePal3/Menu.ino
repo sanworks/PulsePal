@@ -25,6 +25,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Functions in this file:
 //   UpdateSettingsMenu()
+//   menuActionParam()
+//   getOutputParam()
+//   setOutputParam()
+//   scrollOutputAction()
 //   centerText()
 //   RefreshChannelMenu()
 //   RefreshActionMenu()
@@ -52,11 +56,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            10    Device info
 //                                            11    Reset
 //                                            12    Exit -> MENU_TOP
-// MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now -> MENU_OUTPUT_TRIGGER
-//                                            2-17  Edit a parameter with ReturnUserValue(). Labels are in RefreshActionMenu().
-//                                                  5-7 (inter-phase interval, phase 2 voltage and duration) are
-//                                                  skipped when the channel is monophasic.
-//                                            18    Exit -> MENU_CHANNEL_LIST
+// MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now -> MENU_OUTPUT_TRIGGER (MENU_ACTION_TRIGGER)
+//                                            2-17  Edit a parameter. Which parameters, in which order, and their
+//                                                  labels, limits and storage, all come from menuActionParams and
+//                                                  outputParams in PulsePal3.ino. Parameters marked biphasicOnly
+//                                                  are skipped when the channel is monophasic.
+//                                            18    Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
 // MENU_OUTPUT_TRIGGER   SelectedStimMode     1     Single train
 //                                            2     Single pulse
 //                                            3     Continuous on/off
@@ -77,8 +82,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                       use its name, so the default parameters can always be loaded. File lists come from
 //                       findListedFile(), and are drawn by RefreshFileMenu().
 //
-// To add an option: update the click handler below, the wrap-around limits in the left/right scroll handlers
-// below, the Refresh...Menu() function that draws the option, and ReturnUserValue() if it edits a parameter.
+// To add an output channel parameter to the menu, add its code to menuActionParams in PulsePal3.ino; nothing in
+// this file needs to change. To add an option to any other level: update the click handler below, the wrap-around
+// limits in the left/right scroll handlers below, and the Refresh...Menu() function that draws the option.
 // ---------------------------------------------------------------------------------------------------------------
 void UpdateSettingsMenu() {
     ClickerX = analogRead(ClickerXLine);
@@ -146,49 +152,29 @@ void UpdateSettingsMenu() {
               
               default: {
                 inMenu = MENU_OUTPUT_CHANNEL; // output menu
-                SelectedAction = 1;
+                SelectedAction = MENU_ACTION_TRIGGER;
                 write2Screen("< Trigger Now  >"," ");
               } break;
            }
          } break;
-         case MENU_OUTPUT_CHANNEL: { // Channel menu
-          switch (SelectedAction) {
-            case 1: {
-              inMenu = MENU_OUTPUT_TRIGGER; // soft-trigger menu
-              write2Screen("< Single Train >"," ");
-              SelectedStimMode = 1;
-            } break;
-            case 2: {IsBiphasic[SelectedChannel-1] = ReturnUserValue(0, 1, 1, UNITS_OFF_ON);} break; // biphasic (on /off)
-            case 3: {Phase1Voltage[SelectedChannel-1] = ReturnUserValue(0, 65535, 1, UNITS_VOLTS);} break; // Get user to input phase 1 voltage
-            case 4: {Phase1Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // phase 1 duration
-            case 5: {InterPhaseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // inter-phase interval
-            case 6: {Phase2Voltage[SelectedChannel-1] = ReturnUserValue(0, 65535, 1, UNITS_VOLTS);} break; // Get user to input phase 2 voltage
-            case 7: {Phase2Duration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // phase 2 duration
-            case 8: {InterPulseInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // pulse interval
-            case 9: {BurstDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // burst width
-            case 10: {BurstInterval[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // burst interval
-            case 11: {PulseTrainDelay[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // stimulus train delay
-            case 12: {PulseTrainDuration[SelectedChannel-1] = ReturnUserValue(1, 72000000, 1, UNITS_TIME);} break; // stimulus train duration
-            case 13: {byte Bit2Write = ReturnUserValue(0, 1, 1, UNITS_OFF_ON);
-                      byte Ch = SelectedChannel-1;
-                      TriggerAddress[0][Ch] = Bit2Write;
-                      } break; // Follow input 1 (on/off)
-            case 14: {byte Bit2Write = ReturnUserValue(0, 1, 1, UNITS_OFF_ON);
-                      byte Ch = SelectedChannel-1;
-                      TriggerAddress[1][Ch] = Bit2Write;
-                      } break; // Follow input 2 (on/off)
-            case 15: {CustomTrainID[SelectedChannel-1] = ReturnUserValue(0, N_CUSTOM_PULSE_TRAINS, 1, UNITS_INDEX);} break; // stimulus train duration
-            case 16: {CustomTrainTarget[SelectedChannel-1] = ReturnUserValue(0,1,1, UNITS_PULSES_BURSTS);} break; // Custom stim target (Pulses / Bursts)
-            case 17: {
-                      RestingVoltage[SelectedChannel-1] = ReturnUserValue(0, 255, 1, UNITS_VOLTS); // Get user to input resting voltage
-                      setDAC(SelectedChannel-1, RestingVoltage[SelectedChannel-1]);
-                      } break; 
-            case 18: {
-              // Exit to channel menu
-            inMenu = MENU_CHANNEL_LIST; RefreshChannelMenu(SelectedChannel);
-            } break;
-           }
-           updateUsesBursts(SelectedChannel-1);
+         case MENU_OUTPUT_CHANNEL: { // Output channel menu: trigger the channel, edit a parameter, or exit
+          byte thisChannel = SelectedChannel - 1;
+          if (SelectedAction == MENU_ACTION_TRIGGER) {
+            inMenu = MENU_OUTPUT_TRIGGER; // soft-trigger menu
+            write2Screen("< Single Train >"," ");
+            SelectedStimMode = 1;
+          } else if (SelectedAction == MENU_ACTION_EXIT) {
+            inMenu = MENU_CHANNEL_LIST;
+            RefreshChannelMenu(SelectedChannel);
+          } else { // Edit the parameter this menu action selects
+            const OutputParam &param = menuActionParam(SelectedAction);
+            uint32_t newValue = ReturnUserValue(getOutputParam(param, thisChannel), param.minValue, param.maxValue, param.units);
+            setOutputParam(param, thisChannel, newValue);
+            if (param.values == (void*)RestingVoltage) { // The channel rests at this voltage, so update the output now
+              setDAC(thisChannel, RestingVoltage[thisChannel]);
+            }
+          }
+          updateUsesBursts(thisChannel);
           } break;
           case MENU_OUTPUT_TRIGGER: { // Trigger menu
           switch (SelectedStimMode) {
@@ -223,7 +209,7 @@ void UpdateSettingsMenu() {
             } break;
             case 4: {
               inMenu = MENU_OUTPUT_CHANNEL;
-              SelectedAction = 1;
+              SelectedAction = MENU_ACTION_TRIGGER;
               write2Screen("< Trigger Now  >"," ");
             } break;
            }
@@ -246,13 +232,13 @@ void UpdateSettingsMenu() {
             } break;
             case 2: {
               // Change mode of selected channel
-              TriggerMode[SelectedChannel-1] = ReturnUserValue(0, 2, 1, UNITS_TRIGGER_MODE); // Get user to input trigger mode
+              TriggerMode[SelectedChannel-1] = ReturnUserValue(TriggerMode[SelectedChannel-1], 0, 2, UNITS_TRIGGER_MODE); // Get user to input trigger mode
               //Store changes
               //SaveCurrentProgram2SD();
             } break;
             case 3: {
               inMenu = MENU_CHANNEL_LIST;
-              SelectedAction = 1;
+              SelectedAction = MENU_ACTION_TRIGGER; // The output channel menu opens on its first action
               write2Screen("Output Channels","<  Channel 1  >");
               NeedUpdate = 1;
               SelectedChannel = SelectedChannel + 4;
@@ -437,13 +423,7 @@ void UpdateSettingsMenu() {
       LastClickerXState = 1;
       NeedUpdate = 1;
       if (inMenu == MENU_CHANNEL_LIST) {SelectedChannel = SelectedChannel - 1;}
-      if (inMenu == MENU_OUTPUT_CHANNEL) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 8)) {
-          SelectedAction = SelectedAction - 4;
-        } else {  
-          SelectedAction = SelectedAction - 1;
-        }
-      }
+      if (inMenu == MENU_OUTPUT_CHANNEL) {scrollOutputAction(-1);}
       if (inMenu == MENU_OUTPUT_TRIGGER) {SelectedStimMode = SelectedStimMode - 1;}
       if (inMenu == MENU_TRIGGER_CHANNEL) {SelectedInputAction = SelectedInputAction - 1;}
       if ((inMenu >= MENU_FILE_LOAD) && (inMenu <= MENU_FILE_DELETE)) {
@@ -451,20 +431,13 @@ void UpdateSettingsMenu() {
       }
       if (SelectedInputAction == 0) {SelectedInputAction = 3;}
       if (SelectedChannel == 0) {SelectedChannel = 12;}
-      if (SelectedAction == 0) {SelectedAction = 18;}
       if (SelectedStimMode == 0) {SelectedStimMode = 4;}
     }
     if (LastClickerXState != 2 && ClickerX > ClickerMaxThreshold) {
       LastClickerXState = 2;
       NeedUpdate = 1;
       if (inMenu == MENU_CHANNEL_LIST) {SelectedChannel++;}
-      if (inMenu == MENU_OUTPUT_CHANNEL) {
-        if ((IsBiphasic[SelectedChannel-1] == 0) && (SelectedAction == 4)) {
-          SelectedAction = SelectedAction + 4;
-        } else {
-          SelectedAction++;
-        }
-      }
+      if (inMenu == MENU_OUTPUT_CHANNEL) {scrollOutputAction(1);}
       if (inMenu == MENU_OUTPUT_TRIGGER) {SelectedStimMode++;}
       if (inMenu == MENU_TRIGGER_CHANNEL) {SelectedInputAction++;}
       if ((inMenu >= MENU_FILE_LOAD) && (inMenu <= MENU_FILE_DELETE)) {
@@ -472,7 +445,6 @@ void UpdateSettingsMenu() {
       }
       if (SelectedInputAction == 4) {SelectedInputAction = 1;}
       if (SelectedChannel == 13) {SelectedChannel = 1;}
-      if (SelectedAction == 19) {SelectedAction = 1;}
       if (SelectedStimMode == 5) {SelectedStimMode = 1;}
     }
     if (LastClickerXState != 0 && ClickerX < ClickerMaxThreshold && ClickerX > ClickerMinThreshold) {
@@ -514,6 +486,41 @@ void UpdateSettingsMenu() {
 
 }
 
+// Returns the parameter that an output channel menu action edits. See the parameter table in PulsePal3.ino.
+const OutputParam& menuActionParam(int action) {
+  return outputParams[menuActionParams[action - MENU_ACTION_FIRST_PARAM] - 1];
+}
+
+// Reads one output channel parameter (channel 0-3) through the parameter table
+uint32_t getOutputParam(const OutputParam &param, byte channel) {
+  switch (param.type) {
+    case PARAM_TYPE_BYTE: return ((byte*)param.values)[channel];
+    case PARAM_TYPE_UINT16: return ((uint16_t*)param.values)[channel];
+  }
+  return ((uint32_t*)param.values)[channel];
+}
+
+// Writes one output channel parameter (channel 0-3) through the parameter table
+void setOutputParam(const OutputParam &param, byte channel, uint32_t value) {
+  switch (param.type) {
+    case PARAM_TYPE_BYTE: {((byte*)param.values)[channel] = (byte)value;} break;
+    case PARAM_TYPE_UINT16: {((uint16_t*)param.values)[channel] = (uint16_t)value;} break;
+    default: {((uint32_t*)param.values)[channel] = value;} break;
+  }
+}
+
+// Moves the selection in the output channel menu by one step, wrapping at the ends and skipping the parameters
+// that do not apply to a monophasic channel
+void scrollOutputAction(int8_t direction) {
+  for (byte step = 0; step < MENU_ACTION_EXIT; step++) { // Always ends: at worst it returns to where it started
+    SelectedAction += direction;
+    if (SelectedAction < MENU_ACTION_TRIGGER) {SelectedAction = MENU_ACTION_EXIT;}
+    if (SelectedAction > MENU_ACTION_EXIT) {SelectedAction = MENU_ACTION_TRIGGER;}
+    if ((SelectedAction == MENU_ACTION_TRIGGER) || (SelectedAction == MENU_ACTION_EXIT)) {return;}
+    if (!menuActionParam(SelectedAction).biphasicOnly || IsBiphasic[SelectedChannel-1]) {return;}
+  }
+}
+
 void centerText(char myText[]) {
   byte spaceCounter = 0;
   for (int i = 0; i < 16; i++) {
@@ -546,27 +553,15 @@ void RefreshChannelMenu(int ThisChannel) {
   }
 }
 void RefreshActionMenu(int ThisAction) {
-    switch (SelectedAction) {
-          case 1: {write2Screen("< Trigger Now  >"," ");} break;
-          case 2: {write2Screen("<Biphasic Pulse>",FormatNumberForDisplay(IsBiphasic[SelectedChannel-1], UNITS_OFF_ON));} break;
-          case 3: {write2Screen("<Phase1 Voltage>",FormatNumberForDisplay(Phase1Voltage[SelectedChannel-1], UNITS_VOLTS));} break;
-          case 4: {write2Screen("<Phase1Duration>",FormatNumberForDisplay(Phase1Duration[SelectedChannel-1], UNITS_TIME));} break;
-          case 5: {write2Screen("<InterPhaseTime>",FormatNumberForDisplay(InterPhaseInterval[SelectedChannel-1], UNITS_TIME));} break;
-          case 6: {write2Screen("<Phase2 Voltage>",FormatNumberForDisplay(Phase2Voltage[SelectedChannel-1], UNITS_VOLTS));} break;
-          case 7: {write2Screen("<Phase2Duration>",FormatNumberForDisplay(Phase2Duration[SelectedChannel-1], UNITS_TIME));} break;
-          case 8: {write2Screen("<Pulse Interval>",FormatNumberForDisplay(InterPulseInterval[SelectedChannel-1], UNITS_TIME));} break;
-          case 9: {write2Screen("<Burst Duration>",FormatNumberForDisplay(BurstDuration[SelectedChannel-1], UNITS_TIME));} break;
-          case 10: {write2Screen("<Burst Interval>",FormatNumberForDisplay(BurstInterval[SelectedChannel-1], UNITS_TIME));} break;
-          case 11: {write2Screen("< Train Delay  >",FormatNumberForDisplay(PulseTrainDelay[SelectedChannel-1], UNITS_TIME));} break;
-          case 12: {write2Screen("<Train Duration>",FormatNumberForDisplay(PulseTrainDuration[SelectedChannel-1], UNITS_TIME));} break;
-          case 13: {write2Screen("<Link Trigger 1>",FormatNumberForDisplay(TriggerAddress[0][SelectedChannel-1], UNITS_OFF_ON));} break;
-          case 14: {write2Screen("<Link Trigger 2>",FormatNumberForDisplay(TriggerAddress[1][SelectedChannel-1], UNITS_OFF_ON));} break; 
-          case 15: {write2Screen("<Custom Train# >",FormatNumberForDisplay(CustomTrainID[SelectedChannel-1], UNITS_INDEX));} break;
-          case 16: {write2Screen("<Custom Target >",FormatNumberForDisplay(CustomTrainTarget[SelectedChannel-1], UNITS_PULSES_BURSTS));} break;
-          case 17: {write2Screen("<RestingVoltage>",FormatNumberForDisplay(RestingVoltage[SelectedChannel-1], UNITS_VOLTS));} break;
-          case 18: {write2Screen("<     Exit     >"," ");} break;
-     }
-     isNegativeZero = 0;
+  if (SelectedAction == MENU_ACTION_TRIGGER) {
+    write2Screen("< Trigger Now  >"," ");
+  } else if (SelectedAction == MENU_ACTION_EXIT) {
+    write2Screen("<     Exit     >"," ");
+  } else { // Label and value of the parameter this action edits, from the table in PulsePal3.ino
+    const OutputParam &param = menuActionParam(SelectedAction);
+    write2Screen(param.label, FormatNumberForDisplay(getOutputParam(param, SelectedChannel-1), param.units));
+  }
+  isNegativeZero = 0;
 }
 void RefreshTriggerMenu(int ThisAction) {
     switch (SelectedInputAction) {
@@ -756,10 +751,9 @@ float digitsToVolts() {
   return volts;
 }
 
-unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit, unsigned long StepSize, byte Units) {
+unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, unsigned long UpperLimit, byte Units) {
       // This function returns a value that the user chooses by scrolling up and down a number list with the joystick, and clicks to select the desired number.
-      // LowerLimit and UpperLimit are the limits for this selection, StepSize is the smallest step size the system will scroll. Units: see enum DisplayUnits.
-      // The starting value is read from the parameter selected by SelectedAction and SelectedChannel (or from TriggerMode if Units is UNITS_TRIGGER_MODE).
+      // Editing starts at startValue. LowerLimit and UpperLimit are the limits for this selection. Units: see enum DisplayUnits.
       // This function blocks until the joystick is clicked. It sets inMenu to MENU_OUTPUT_TRIGGER while editing (so times are shown with leading zeros),
       // and to MENU_TRIGGER_CHANNEL or MENU_OUTPUT_CHANNEL on return.
      unsigned long ValueToAdd = 0;
@@ -771,27 +765,7 @@ unsigned int ReturnUserValue(unsigned long LowerLimit, unsigned long UpperLimit,
      }
       float CandidateVoltage = 0; // used to see if voltage will go over limits for DAC
       
-     switch (SelectedAction) {
-       case 2:{UserValue = IsBiphasic[SelectedChannel-1];} break;
-       case 3:{UserValue = Phase1Voltage[SelectedChannel-1];} break;
-       case 4:{UserValue = Phase1Duration[SelectedChannel-1];} break;
-       case 5:{UserValue = InterPhaseInterval[SelectedChannel-1];} break;
-       case 6:{UserValue = Phase2Voltage[SelectedChannel-1];} break;
-       case 7:{UserValue = Phase2Duration[SelectedChannel-1];} break;
-       case 8:{UserValue = InterPulseInterval[SelectedChannel-1];} break;
-       case 9:{UserValue = BurstDuration[SelectedChannel-1];} break;
-       case 10:{UserValue = BurstInterval[SelectedChannel-1];} break;
-       case 11:{UserValue = PulseTrainDelay[SelectedChannel-1];} break;
-       case 12:{UserValue = PulseTrainDuration[SelectedChannel-1];} break;
-       case 13:{UserValue = TriggerAddress[0][SelectedChannel-1];} break;
-       case 14:{UserValue = TriggerAddress[1][SelectedChannel-1];} break;
-       case 15:{UserValue = CustomTrainID[SelectedChannel-1];} break;
-       case 16:{UserValue = CustomTrainTarget[SelectedChannel-1];} break;
-       case 17:{UserValue = RestingVoltage[SelectedChannel-1];} break;        
-     }
-     if (Units == UNITS_TRIGGER_MODE) {
-       UserValue = TriggerMode[SelectedChannel-1];
-     }
+     UserValue = startValue;
      long UVTemp = UserValue;
      inMenu = MENU_OUTPUT_TRIGGER; // Temporarily goes a menu layer deeper so leading zeros are displayed by FormatNumberForDisplay
      LCD_setCursor(0, 1); LCD_print_no_trim_no_render("                ");

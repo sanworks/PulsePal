@@ -32,7 +32,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
 // You can install it from within Arduino IDE by searching for u8g2 in the Library manager. 
 // You can also download it from here: https://github.com/olikraus/U8g2_Arduino
-//
 // !!! To work on Teensy, a mod to u8g2/u8x8lib.cpp is required !!!
 // In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
 
@@ -40,7 +39,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // This sketch is split into tabs (the .ino files in this folder). Before compiling, Arduino joins them into a single
 // file (this file first, then the others in alphabetical order), so all tabs share the constants and global
 // variables defined in this file.
-//   PulsePal3.ino   Build configuration, pin maps, named constants, global variables, setup() and loop()
+//   PulsePal3.ino    Build configuration, pin maps, named constants, global variables, setup() and loop()
 //   Playback.ino     Pulse train playback in the hardware timer callback, handler(). Start here for timing questions.
 //   USBOps.ino       Commands from the PC, processUSBCommands()
 //   Menu.ino         Thumb joystick menu, UpdateSettingsMenu(), with a map of all menu options, and the editor
@@ -291,8 +290,90 @@ uint16_t RestingVoltage[4] = {32768}; // Voltage the system returns to between p
 uint8_t CustomTrainID[4] = {0}; // If 0, uses above params. If 1 to N_CUSTOM_PULSE_TRAINS, pulse times and voltages are played back from that custom train
 uint8_t CustomTrainTarget[4] = {0}; // If 0, custom times define start-times of pulses. If 1, custom times are start-times of bursts.
 uint8_t CustomTrainLoop[4] = {0}; // if 0, custom stim plays once. If 1, custom stim loops until PulseTrainDuration.
+byte IsBiphasic[4] = {0}; // If 0, the pulse has only phase 1. If 1, phase 1 is followed by the inter-phase interval and phase 2
+byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 uint8_t TriggerAddress[2][4] = {0}; // This specifies which output channels get triggered by trigger channel 1 (row 1) or trigger channel 2 (row 2)
 uint8_t TriggerMode[2] = {0}; // Normal, toggle or pulse gated mode. See enum TriggerModeValue
+
+// ---------------------------------------------------------------------------------------------------------------
+// Output channel parameter table
+//
+// One row per output channel parameter, describing where the parameter is stored, how the thumb joystick menu
+// shows and edits it, and (by its position) its USB parameter code. The joystick menu and paramValueBytes() in
+// USBOps.ino both read this table, so a parameter is described in one place.
+//
+// To add a parameter: add its array and its code to enum ParamID above, add a row here in code order, and add the
+// code to menuActionParams below if it should appear in the joystick menu. The USB ops that carry whole parameter
+// sets (73, 92 and 93) and the settings file (SDSettings.ino) still list parameters explicitly, because their byte
+// layouts are fixed by the protocol. See the menu map above UpdateSettingsMenu() and /Firmware/PROTOCOL.md.
+// ---------------------------------------------------------------------------------------------------------------
+
+// Values of OutputParam.type. Each value is the number of bytes the parameter occupies in a USB command.
+enum ParamType {
+  PARAM_TYPE_BYTE = 1,
+  PARAM_TYPE_UINT16 = 2,
+  PARAM_TYPE_UINT32 = 4
+};
+
+struct OutputParam {
+  const char* label;   // Shown on the top line of the screen while the parameter is selected (16 characters)
+  void* values;        // The parameter array, with one element per output channel
+  uint8_t type;        // See enum ParamType
+  uint8_t units;       // Display format, see enum DisplayUnits
+  uint32_t minValue;   // Limits used while editing the parameter with the joystick
+  uint32_t maxValue;
+  bool biphasicOnly;   // The menu skips this parameter when the selected channel is monophasic
+};
+
+// Indexed by USB parameter code - 1, so these rows must stay in the order of enum ParamID
+const OutputParam outputParams[] = {
+  {"<Biphasic Pulse>", IsBiphasic,         PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
+  {"<Phase1 Voltage>", Phase1Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    false},
+  {"<Phase2 Voltage>", Phase2Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    true},
+  {"<Phase1Duration>", Phase1Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<InterPhaseTime>", InterPhaseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, true},
+  {"<Phase2Duration>", Phase2Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, true},
+  {"<Pulse Interval>", InterPulseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<Burst Duration>", BurstDuration,      PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<Burst Interval>", BurstInterval,      PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<Train Duration>", PulseTrainDuration, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"< Train Delay  >", PulseTrainDelay,    PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<Link Trigger 1>", TriggerAddress[0],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
+  {"<Link Trigger 2>", TriggerAddress[1],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
+  {"<Custom Train# >", CustomTrainID,      PARAM_TYPE_BYTE,   UNITS_INDEX,          0, N_CUSTOM_PULSE_TRAINS, false},
+  {"<Custom Target >", CustomTrainTarget,  PARAM_TYPE_BYTE,   UNITS_PULSES_BURSTS,  0, 1,        false},
+  {"< Custom Loop  >", CustomTrainLoop,    PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
+  {"<RestingVoltage>", RestingVoltage,     PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    false},
+  {"<Playback Mode >", ContinuousLoopMode, PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false}
+};
+static_assert(sizeof(outputParams) / sizeof(outputParams[0]) == PARAM_CONTINUOUS_LOOP,
+              "outputParams needs one row per output parameter code, in the order of enum ParamID");
+
+// The parameters the joystick menu offers, in the order they are scrolled through. Menu action 1 triggers the
+// channel and the last action exits, so these are actions 2 to MENU_ACTION_EXIT - 1. Custom train loop and
+// playback mode are left out: they are set from the PC only.
+const byte menuActionParams[] = {
+  PARAM_IS_BIPHASIC,
+  PARAM_PHASE1_VOLTAGE,
+  PARAM_PHASE1_DURATION,
+  PARAM_INTER_PHASE_INTERVAL,
+  PARAM_PHASE2_VOLTAGE,
+  PARAM_PHASE2_DURATION,
+  PARAM_INTER_PULSE_INTERVAL,
+  PARAM_BURST_DURATION,
+  PARAM_BURST_INTERVAL,
+  PARAM_PULSE_TRAIN_DELAY,
+  PARAM_PULSE_TRAIN_DURATION,
+  PARAM_LINK_TRIGGER1,
+  PARAM_LINK_TRIGGER2,
+  PARAM_CUSTOM_TRAIN_ID,
+  PARAM_CUSTOM_TRAIN_TARGET,
+  PARAM_RESTING_VOLTAGE
+};
+
+const byte MENU_ACTION_TRIGGER = 1; // Output channel menu: trigger this channel
+const byte MENU_ACTION_FIRST_PARAM = 2; // First action that edits a parameter from menuActionParams
+const byte MENU_ACTION_EXIT = MENU_ACTION_FIRST_PARAM + sizeof(menuActionParams); // Last action: back to the channel list
 
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
@@ -327,8 +408,6 @@ boolean InputValues[2] = {0}; // The values read directly from the two inputs (f
 boolean InputValuesLastCycle[2] = {0}; // The values on the last cycle. Used to detect low to high transitions.
 byte LineTriggerEvent[2] = {0}; // Trigger line transition detected this cycle. See enum TriggerEventValue
 boolean UsesBursts[4] = {0};
-byte IsBiphasic[4] = {0};
-byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 byte ContinuousLoopModeOriginal[4] = {0}; // Memory for previous continuous loop mode state
 byte StimulatingState = 0; // 1 if ANY channel is stimulating, 2 if this is the first cycle after the system was triggered. 
 byte LastStimulatingState = 0;

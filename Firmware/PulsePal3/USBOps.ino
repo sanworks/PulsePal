@@ -43,28 +43,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // rejected when a channel number, parameter code or data length is out of range. The data of a rejected command is
 // read and discarded, so that it is not interpreted as the next command. MATLAB and Python raise an error on 0.
 
-// Returns the number of bytes that follow a parameter code in ops 74 and 91, per channel, or 0 if the code is unknown
+// Returns the number of bytes that follow a parameter code in ops 74 and 91, per channel, or 0 if the code is unknown.
+// Output channel parameters are described by the parameter table in PulsePal3.ino, where the row for a code is at
+// index code - 1, and the type of a row is its size in bytes.
 byte paramValueBytes(byte paramCode) {
-  switch (paramCode) {
-    case PARAM_PHASE1_VOLTAGE:
-    case PARAM_PHASE2_VOLTAGE:
-    case PARAM_RESTING_VOLTAGE: return 2;
-    case PARAM_PHASE1_DURATION:
-    case PARAM_INTER_PHASE_INTERVAL:
-    case PARAM_PHASE2_DURATION:
-    case PARAM_INTER_PULSE_INTERVAL:
-    case PARAM_BURST_DURATION:
-    case PARAM_BURST_INTERVAL:
-    case PARAM_PULSE_TRAIN_DURATION:
-    case PARAM_PULSE_TRAIN_DELAY: return 4;
-    case PARAM_IS_BIPHASIC:
-    case PARAM_LINK_TRIGGER1:
-    case PARAM_LINK_TRIGGER2:
-    case PARAM_CUSTOM_TRAIN_ID:
-    case PARAM_CUSTOM_TRAIN_TARGET:
-    case PARAM_CUSTOM_TRAIN_LOOP:
-    case PARAM_CONTINUOUS_LOOP:
-    case PARAM_TRIGGER_MODE: return 1;
+  if (paramCode == PARAM_TRIGGER_MODE) {
+    return PARAM_TYPE_BYTE; // A trigger channel parameter, so it is not in the output parameter table
+  }
+  if ((paramCode >= 1) && (paramCode <= PARAM_CONTINUOUS_LOOP)) {
+    return outputParams[paramCode - 1].type;
   }
   return 0; // Unknown parameter code
 }
