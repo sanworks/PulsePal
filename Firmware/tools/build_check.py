@@ -22,9 +22,9 @@ Requirements:
     ships one; set ARDUINO_CLI to its path if it is not on PATH.
   - For the comparison: arm-none-eabi-objdump, which comes with the Teensy core. Set
     OBJDUMP if it is not found automatically.
-  - Pulse Pal 3 needs the U8g2 library, with the modification noted in PulsePal3.ino. Its
-    SdFat comes from the Teensy core, unless a copy installed in /Arduino/libraries takes
-    priority over it.
+  - Pulse Pal 3 needs the U8g2 library (verified with v2.36.19), which no longer has to be
+    edited by hand. Its SdFat comes from the Teensy core, unless a copy installed in
+    /Arduino/libraries takes priority over it.
   - Pulse Pal 2 needs SdFat v2 installed (verified with v2.1.2 and v2.3.0).
   - Pulse Pal 2 also needs the LiquidCrystal library, which this script replaces with the
     compile-only stub in tools/stub_libraries, so that the Pulse Pal 2 build can be checked

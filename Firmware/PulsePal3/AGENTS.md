@@ -42,7 +42,8 @@ python ../tools/build_check.py --compare HEAD --show handler
   that `#define` in a temporary copy of the sketch, which works for both.
 - Pulse Pal 2 needs SdFat v2 installed (verified with v2.1.2 and v2.3.0) and LiquidCrystal.
   Pulse Pal 3 needs no SdFat install: the Teensy core bundles a v2 release. It does need the
-  U8g2 library **with the modification noted at the top of `PulsePal3.ino`**.
+  U8g2 library (verified with v2.36.19), which no longer has to be edited by hand to reach the
+  screen on the second SPI bus. `PulsePal3.ino` has an `#error` that fires if that changes.
 - `build_check.py` substitutes a do-nothing LiquidCrystal stub so the Pulse Pal 2 build can
   be checked without that library. **Never flash a binary built that way.**
 

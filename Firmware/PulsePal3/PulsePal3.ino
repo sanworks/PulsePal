@@ -34,8 +34,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
 // You can install it from within Arduino IDE by searching for u8g2 in the Library manager. 
 // You can also download it from here: https://github.com/olikraus/U8g2_Arduino
-// !!! To work on Teensy, a mod to u8g2/u8x8lib.cpp is required !!!
-// In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
+// Verified with v2.36.19
 
 // CODE MAP
 // This sketch is split into tabs (the .ino files in this folder). Before compiling, Arduino joins them into a single
@@ -90,6 +89,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   #include <LiquidCrystal.h>
 #else
   #include <U8g2lib.h>
+  // The screen is on the Teensy's second SPI bus. u8g2 compiles its second-bus driver only when the core
+  // defines SPI_INTERFACES_COUNT > 1, which Teensyduino does. If that ever stops being true the driver
+  // becomes an empty stub: the sketch still builds, and the screen stays dark. Stop the build instead.
+  #if !defined(U8X8_HAVE_2ND_HW_SPI)
+    #error u8g2 has no second hardware SPI. The Pulse Pal 3 screen will not work.
+  #endif
   #include "LiquidCrystal_U8G2.h"
   #include "GFXData.h"
   #include <EEPROM.h>
@@ -260,8 +265,7 @@ enum TriggerEventValue {
   #endif
 
   // Note: SDChipSelect not required for Pulse Pal v3
-  // NOTE! To work on Teensy, this requires a mod to u8g2/u8x8lib.cpp! 
-  // In function u8x8_byte_arduino_2nd_hw_spi() approx. line 993, add: #define U8X8_HAVE_2ND_HW_SPI 1
+  // 2ND in the constructor name selects the second SPI bus, checked for above with U8X8_HAVE_2ND_HW_SPI
   U8G2_SSD1322_NHD_128X64_F_2ND_4W_HW_SPI u8g2(U8G2_R0, CS, DC, RST);
   LiquidCrystal_U8G2 lcd(u8g2);
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
