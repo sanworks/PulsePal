@@ -24,9 +24,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // ** DEPENDENCIES YOU NEED TO INSTALL FIRST** 
 
 // IF COMPILING FOR PULSE PAL v2 (Also see v3 Dependency Below)
-// Pulse Pal v2 requires the sdFat library v1, developed by Bill Greiman. (Thanks Bill!!)
-// Download it from here: https://github.com/greiman/SdFat/releases/tag/1.1.4
-// and copy it to your /Arduino/libraries folder.
+// Pulse Pal v2 requires the sdFat library v2, developed by Bill Greiman. (Thanks Bill!!)
+// You can install it from within Arduino IDE by searching for SdFat in the Library manager.
+// You can also download it from here: https://github.com/greiman/SdFat
+// Verified with v2.1.2 and v2.3.0. Pulse Pal v2 previously required sdFat v1.1.4, which is no longer supported.
+// Pulse Pal v3 needs no sdFat install: the Teensy core bundles a v2 release.
 
 // IF COMPILING FOR PULSE PAL v3
 // You need the U8g2_Arduino library, developed by Oliver Kraus. (Thanks Oliver!!)
@@ -52,8 +54,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define FIRMWARE_VERSION 22
 
 // SETUP MACROS TO COMPILE FOR TARGET DEVICE:
-// Both macros can also be set on the compiler command line, e.g. for automated builds:
+// When building for Pulse Pal v2, both macros can also be set on the compiler command line, e.g. for
+// automated builds:
 // arduino-cli compile --build-property compiler.cpp.extra_flags=-DHARDWARE_VERSION=2 ...
+// This does not work when building for Pulse Pal v3: the Teensy core's platform.txt has no
+// compiler.cpp.extra_flags, so the flag is accepted and then dropped, and the macros below decide.
+// Edit them instead, as Firmware/tools/build_check.py does in a temporary copy of the sketch.
 #ifndef HARDWARE_VERSION
   #define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 #endif
@@ -418,9 +424,12 @@ byte DefaultInputLevel = 0; // 0 for PulsePal 0.3, 1 for 0.2 and 0.1. Logic is i
 uint8_t buf[1];
 uint8_t buf4[4];
 #if (HARDWARE_VERSION < 3)
-  SdFat sd;
-  SdFile settingsFile;
-  SdFile candidateSettingsFile;
+  // SdFat32 and File32 are the FAT16/FAT32 types. Plain SdFat and SdFile also compile, but on this board they
+  // alias the exFAT-capable classes, costing ~6.7kB of flash that Pulse Pal 2 has no use for.
+  SdFat32 sd;
+  File32 root;
+  File32 settingsFile;
+  File32 candidateSettingsFile;
 #else
   SdFs sd;
   FsFile root;
@@ -577,11 +586,9 @@ void setup() {
     sd.mkdir("Pulse_Pal");
     sd.chdir("Pulse_Pal");
   }
-  #if (HARDWARE_VERSION > 2)
-    if (!root.open("/Pulse_Pal")) {
-      write2Screen("Startup Error:"," Need SD Format");
-    }
-  #endif
+  if (!root.open("/Pulse_Pal")) { // The file lists in the joystick menus are read from this directory handle
+    write2Screen("Startup Error:"," Need SD Format");
+  }
   // Start with default parameters, and write them to the default settings file. The joystick menu cannot overwrite
   // or erase this file, so the default parameters can always be loaded from it.
   LoadDefaultParameters();

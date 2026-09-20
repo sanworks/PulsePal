@@ -22,11 +22,14 @@ Requirements:
     ships one; set ARDUINO_CLI to its path if it is not on PATH.
   - For the comparison: arm-none-eabi-objdump, which comes with the Teensy core. Set
     OBJDUMP if it is not found automatically.
-  - Pulse Pal 3 needs the U8g2 library, with the modification noted in PulsePal3.ino.
-  - Pulse Pal 2 needs SdFat v1.1.4. It also needs the LiquidCrystal library, which this
-    script replaces with the compile-only stub in tools/stub_libraries, so that the
-    Pulse Pal 2 build can be checked on a machine that does not have it. A binary built
-    that way must never be flashed: pass --real-libraries to build one that can be.
+  - Pulse Pal 3 needs the U8g2 library, with the modification noted in PulsePal3.ino. Its
+    SdFat comes from the Teensy core, unless a copy installed in /Arduino/libraries takes
+    priority over it.
+  - Pulse Pal 2 needs SdFat v2 installed (verified with v2.1.2 and v2.3.0).
+  - Pulse Pal 2 also needs the LiquidCrystal library, which this script replaces with the
+    compile-only stub in tools/stub_libraries, so that the Pulse Pal 2 build can be checked
+    on a machine that does not have it. A binary built that way must never be flashed:
+    pass --real-libraries to build one that can be.
 """
 import argparse
 import os
@@ -79,18 +82,42 @@ def find_objdump():
     return find_tool("OBJDUMP", "arm-none-eabi-objdump", guesses)
 
 
+def sketch_with_hardware_version(sketch_dir, hardware_version, destination):
+    """Copy the sketch, with HARDWARE_VERSION set to hardware_version. Returns the copy's folder.
+
+    The macro is set by editing the source, not with -DHARDWARE_VERSION, because the Teensy core's
+    platform.txt has no compiler.cpp.extra_flags: arduino-cli accepts the build property and records it
+    in build.options.json, then the compile recipe drops it. Passing the flag, the Pulse Pal 3 build
+    compiles whichever version the #define in the source names, whatever this script asked for.
+    """
+    sketch = destination / sketch_dir.name  # arduino-cli needs the folder and the main tab to share a name
+    shutil.copytree(sketch_dir, sketch)
+    main_tab = sketch / (sketch_dir.name + ".ino")
+    source = main_tab.read_text(encoding="utf-8")
+    # Matches the bare #define used before the #ifndef guards were added, and the indented one inside them
+    pattern = r"^([ \t]*#define[ \t]+HARDWARE_VERSION[ \t]+)[0-9]+"
+    edited, substitutions = re.subn(pattern, r"\g<1>" + str(hardware_version), source, flags=re.M)
+    if substitutions != 1:
+        print(f"  Expected one '#define HARDWARE_VERSION' in {main_tab.name}, found {substitutions}")
+        return None
+    main_tab.write_text(edited, encoding="utf-8")
+    return sketch
+
+
 def build(arduino_cli, sketch_dir, hardware_version, build_dir, real_libraries):
     """Compile the sketch. Returns the path of the compiled sketch object file."""
     board = BOARDS[hardware_version]
+    sketch = sketch_with_hardware_version(sketch_dir, hardware_version, build_dir / "source")
+    if sketch is None:
+        print(f"  BUILD FAILED for {board['name']}")
+        return None
     command = [
         arduino_cli, "compile",
         "--fqbn", board["fqbn"],
-        "--build-property", f"compiler.cpp.extra_flags=-DHARDWARE_VERSION={hardware_version}",
         "--build-path", str(build_dir / "build"),
-        str(sketch_dir),
+        str(sketch),
     ]
     if hardware_version == 2 and not real_libraries:
-        command[1:1] = []  # keep 'compile' first
         command += ["--libraries", str(STUB_LIBRARIES)]
     print(f"Building {board['name']} ...")
     result = subprocess.run(command, capture_output=True, text=True)
@@ -197,24 +224,9 @@ def checkout(git_reference, destination):
     if extract.returncode != 0:
         print("Could not extract the archive (tar is required for --compare)")
         return None
-    old_sketch = destination / path_in_git.replace("/", os.sep)
-    set_hardware_version_overridable(old_sketch / (old_sketch.name + ".ino"))
-    return old_sketch
-
-
-def set_hardware_version_overridable(main_tab):
-    """Let -DHARDWARE_VERSION win in revisions that pre-date the #ifndef guards."""
-    if not main_tab.exists():
-        return
-    source = main_tab.read_text(encoding="utf-8")
-    if "#ifndef HARDWARE_VERSION" in source:
-        return
-    def guard(match):
-        name, value = match.group(1), match.group(2)
-        return "#ifndef " + name + "\n#define " + name + " " + value + "\n#endif"
-
-    pattern = r"^#define (HARDWARE_VERSION|PIN_MAP_VERSION) ([0-9]+)"
-    main_tab.write_text(re.sub(pattern, guard, source, flags=re.M), encoding="utf-8")
+    # Revisions that pre-date the #ifndef guards need no special handling: sketch_with_hardware_version()
+    # rewrites the #define itself, so it does not matter whether the source lets the command line win.
+    return destination / path_in_git.replace("/", os.sep)
 
 
 def main():

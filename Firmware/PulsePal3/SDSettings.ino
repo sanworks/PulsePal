@@ -184,11 +184,7 @@ byte RestoreParametersFromSD() {
 }
 
 void rewindDirectory() {
-  #if (HARDWARE_VERSION > 2)
-    root.rewindDirectory();
-  #else
-    sd.vwd()->rewind();
-  #endif
+  root.rewindDirectory();
 }
 
 // Returns true if a file name is the default settings file name (not case sensitive, like FAT file names)
@@ -211,11 +207,7 @@ bool findListedFile(uint16_t position, bool includeDefault) {
   candidateSettingsFile.close();
   rewindDirectory();
   uint16_t nListed = 0;
-  #if (HARDWARE_VERSION > 2)
   while (candidateSettingsFile.openNext(&root, O_READ)) {
-  #else
-  while (candidateSettingsFile.openNext(sd.vwd(), O_READ)) {
-  #endif
     candidateSettingsFile.getName(candidateSettingsFileChar, sizeof(candidateSettingsFileChar));
     candidateSettingsFile.close();
     if (!isDefaultSettingsFile(candidateSettingsFileChar)) {

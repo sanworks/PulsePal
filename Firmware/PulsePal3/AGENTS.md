@@ -35,10 +35,14 @@ python ../tools/build_check.py --compare HEAD
 python ../tools/build_check.py --compare HEAD --show handler
 ```
 
-- The hardware version can be set on the command line (`-DHARDWARE_VERSION=2`), so builds
-  do not need the source to be edited. Without it, the `#define` in `PulsePal3.ino` applies.
-- Pulse Pal 3 needs the U8g2 library **with the modification noted at the top of
-  `PulsePal3.ino`**. Pulse Pal 2 needs SdFat v1.1.4 and LiquidCrystal.
+- On Pulse Pal 2 the hardware version can be set on the command line (`-DHARDWARE_VERSION=2`),
+  so builds do not need the source to be edited. This does **not** work on Pulse Pal 3: the
+  Teensy core has no `compiler.cpp.extra_flags`, so arduino-cli accepts the flag and the compile
+  recipe drops it, leaving the `#define` in `PulsePal3.ino` to decide. `build_check.py` rewrites
+  that `#define` in a temporary copy of the sketch, which works for both.
+- Pulse Pal 2 needs SdFat v2 installed (verified with v2.1.2 and v2.3.0) and LiquidCrystal.
+  Pulse Pal 3 needs no SdFat install: the Teensy core bundles a v2 release. It does need the
+  U8g2 library **with the modification noted at the top of `PulsePal3.ino`**.
 - `build_check.py` substitutes a do-nothing LiquidCrystal stub so the Pulse Pal 2 build can
   be checked without that library. **Never flash a binary built that way.**
 
