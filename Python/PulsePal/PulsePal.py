@@ -938,7 +938,9 @@ class PulsePalDevice:
             PulsePalError: If `custom_train_id` is out of range,
                 `pulse_times` and `pulse_voltages` differ in length,
                 there are more pulses than
-                `DeviceInfo.max_custom_pulses`, or the device does not
+                `DeviceInfo.max_custom_pulses`, a pulse time is not
+                later than the one before it (after rounding to the
+                device's timer cycle), or the device does not
                 acknowledge the command.
         """
         pulse_times = self._as_list(pulse_times)
@@ -1002,8 +1004,9 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
-                are more samples than `DeviceInfo.max_custom_pulses`, or
-                the device does not acknowledge the command.
+                are more samples than `DeviceInfo.max_custom_pulses`,
+                `pulse_width` rounds to less than one timer cycle, or the
+                device does not acknowledge the command.
         """
         pulse_voltages = self._as_list(pulse_voltages)
         n_pulses = len(pulse_voltages)
@@ -1365,6 +1368,20 @@ class PulsePalDevice:
                 f"store up to {self.info.max_custom_pulses} pulses per "
                 "custom train."
             )
+        # The device plays each pulse until the next one's time, so a time
+        # that is not later than the one before it would freeze the output
+        # for the rest of the train. The check is on the times the device
+        # will receive, after rounding to its timer cycles.
+        for i in range(1, n_pulses):
+            if pulse_times_cycles[i] <= pulse_times_cycles[i - 1]:
+                raise PulsePalError(
+                    f"{context}: pulse times must increase, by at least one "
+                    f"{self.info.cycle_period_us} us timer cycle. Pulse "
+                    f"{i + 1} is at "
+                    f"{self._cycles_to_seconds(pulse_times_cycles[i])} s, "
+                    f"and pulse {i} is at "
+                    f"{self._cycles_to_seconds(pulse_times_cycles[i - 1])} s."
+                )
 
         if self.info.firmware_version > 21:
             header = (self._OP_MENU_BYTE, 95, train_id - 1)

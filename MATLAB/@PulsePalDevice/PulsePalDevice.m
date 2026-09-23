@@ -758,7 +758,10 @@ classdef PulsePalDevice < handle
             end
             CandidateTimes = uint32(pulseTimes*obj.cycleFrequency);
             CandidateVoltages = voltages;
-            if sum(diff(CandidateTimes) < 0) > 0
+            % The device plays each pulse until the next one's time, so a time that is not later than the one
+            % before it would freeze the output for the rest of the train. diff() is taken on doubles because
+            % uint32 subtraction saturates at 0 in MATLAB, which would hide decreasing times.
+            if any(diff(double(CandidateTimes)) <= 0)
                 error('Error: Custom pulse times must always increase');
             end
             if (CandidateTimes(end) > (3600*obj.cycleFrequency))
@@ -769,9 +772,6 @@ classdef PulsePalDevice < handle
             end
             if (length(CandidateVoltages) ~= length(CandidateTimes))
                 error('Error: There must be a voltage for every timestamp');
-            end
-            if (length(unique(CandidateTimes)) ~= length(CandidateTimes))
-                error('Error: Duplicate custom pulse times detected');
             end
             TimeOutput = CandidateTimes;
             VoltageOutput = obj.volts2Bits(voltages);

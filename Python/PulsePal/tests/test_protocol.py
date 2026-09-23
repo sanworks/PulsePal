@@ -61,6 +61,7 @@ def make_device(firmware_version=22, n_trains=4, max_pulses=10000, ack=1):
     device.info = PulsePal.DeviceInfo()
     device.info.firmware_version = firmware_version
     device.info.cycle_frequency = 20000
+    device.info.cycle_period_us = 50
     device.info.n_custom_pulse_trains = n_trains
     device.info.max_custom_pulses = max_pulses
     device.info.output_parameter_names = list(
@@ -185,6 +186,36 @@ def test_custom_train_rejects_bad_ids_and_oversized_trains():
         raise AssertionError("no error for a train with too many pulses")
     except PulsePal.PulsePalError:
         assert device.port.writes == []
+
+
+def test_custom_train_rejects_times_that_do_not_increase():
+    """A pulse time that is not later than the one before it freezes the device's
+    output for the rest of the train, so the class must not send it."""
+    cases = [
+        [0, 0.2, 0.2],          # Duplicate
+        [0, 0.2, 0.1],          # Decreasing
+        [0, 0.00001],           # Distinct, but both round to cycle 0
+    ]
+    for pulse_times in cases:
+        device = make_device()
+        try:
+            device.send_custom_pulse_train(1, pulse_times, [1] * len(pulse_times))
+            raise AssertionError(f"no error for pulse times {pulse_times}")
+        except PulsePal.PulsePalError as error:
+            assert "must increase" in str(error)
+            assert device.port.writes == []
+
+    device = make_device()
+    try:
+        device.send_custom_waveform(1, 0.00001, [1, 2, 3])  # Under one 50 us cycle
+        raise AssertionError("no error for a waveform period under one cycle")
+    except PulsePal.PulsePalError as error:
+        assert "must increase" in str(error)
+        assert device.port.writes == []
+
+    device = make_device()
+    device.send_custom_pulse_train(1, [0, 0.00005, 0.0001], [1, 2, 3])  # One cycle apart
+    assert len(device.port.writes) == 1
 
 
 def test_waveform_matches_an_equivalent_pulse_train():

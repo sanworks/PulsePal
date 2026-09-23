@@ -280,7 +280,12 @@ void handler(void) {
                             PulseTrainTimestamps[x] = SystemTime;
                      }
                      if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]) {
-                       if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
+                       // The last pulse has no next pulse time: the slot after the train is never loaded, and on Pulse Pal 3
+                       // DMAMEM is not even zeroed at startup. Reading it made the end of the train depend on leftover memory,
+                       // and could freeze the output until the train ended. So the last pulse always lasts Phase1Duration,
+                       // and a looping train then restarts in the PULSE_PHASE1 case below.
+                       if ((CustomPulseTimeIndex[x] + 1 == CustomTrainNpulses[thisTrainIDIndex]) ||
+                           ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x])) {
                          NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
                        } else {
                          NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1];  
@@ -325,12 +330,20 @@ void handler(void) {
                               CustomPulseTimeIndex[x] = 0;
                               PulseTrainTimestamps[x] = SystemTime;
                               setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
-                              if ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x]) {
+                              // Pulse 0 of the next loop plays now. Schedule the next transition as the PULSE_IDLE case does:
+                              // the end of this pulse's phase 1, or pulse 1's own time if pulse 1 starts before phase 1 would
+                              // end. Pulse 1 must not be scheduled at Phase1Duration in that case: later pulses are scheduled
+                              // from their own times, so when Phase1Duration is longer than the gap between pulses (e.g. a
+                              // waveform whose sample period is shorter than Phase1Duration), pulse 2's time would already have
+                              // passed, and the output would freeze until the train ended.
+                              if ((CustomTrainNpulses[thisTrainIDIndex] == 1) || // A one-pulse train has no second time to compare (see above)
+                                  ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x])) {
                                 PulseStatus[x] = PULSE_PHASE1;
+                                NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + Phase1Duration[x];
                               } else {
                                 PulseStatus[x] = PULSE_IDLE;
+                                NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1];
                               }
-                              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + Phase1Duration[x];
                               CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
                       } else {
                         killChannel(x);
