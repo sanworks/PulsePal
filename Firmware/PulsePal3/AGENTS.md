@@ -57,7 +57,8 @@ read the `--show` output before concluding that something really changed.
 1. **After `setup()`, only `handler()` may call `dacWrite()`.** Other code calls `setDAC()`,
    and the next timer tick writes it. An SPI transfer started in `loop()` and interrupted by
    another SPI transfer in the interrupt leaves `loop()` waiting forever. This bug froze the
-   device in the field.
+   device in the field. The one exception is `loop()`'s comm failure handling, which calls it
+   between `stopHardwareTimer()` and `startHardwareTimer()`, when no interrupt can nest.
 2. **`setDAC()` sets `DACFlags[channel]` before `DACFlag`.** In the other order, an interrupt
    landing between the two lines clears `DACFlag` and loses the update.
 3. **Do not write to the screen, wait, or use the microSD card inside the timer interrupt.**
@@ -71,6 +72,9 @@ read the `--show` output before concluding that something really changed.
    in `USBOps.ino` do this. `validateParamBuffer()` applies the same rules to a parameter set
    still in `paramBuffer`, because op 92 has to answer for a set that param sync mode will not
    load until later, in `handler()`, where nothing can be reported. Change the two together.
+   Settings files on the microSD card are checked the same way: `RestoreParametersFromSD()`
+   rejects a file that is missing, short, unterminated or fails `validateOutputParams()`.
+   Anything other than op 92 that sets `TriggerMode` must then call `updateParamSyncPending()`.
 6. **Use ArCOM for USB, only from `loop()`.** Its reads give up after 100 ms without a new
    byte, return zeros and set `PPUSB.timedOut()`, which `loop()` checks once per pass. Replies
    are buffered until the `PPUSB.flush()` in `loop()` sends them, so do not expect a reply to

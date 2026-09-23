@@ -65,6 +65,7 @@ void LoadDefaultParameters() {
     }
    TriggerMode[0] = 0; 
    TriggerMode[1] = 0;
+   updateParamSyncPending(); // Neither trigger channel is in param sync mode now, so a waiting set is discarded
    settingsFile.close();
    strcpy(currentSettingsFileNameChar, DEFAULT_SETTINGS_FILE_NAME);
    settingsFile.open(currentSettingsFileNameChar, O_READ);
@@ -82,20 +83,26 @@ void writeShortToSD(uint16_t value) {
   settingsFile.write((uint8_t)value);
   settingsFile.write((uint8_t)(value >> 8));
 }
+// Read a 32-bit, 16-bit or 8-bit integer from the settings file. Each returns 0 if the read fails: a failed read
+// leaves its buffer untouched, and the buffers are shared, so without clearing them first a read from a missing
+// file would return the bytes of the last file read, including its valid end marker.
 uint32_t readLongFromSD() {
   uint32_t output = 0;
+  typeCast.uint32 = 0;
   settingsFile.read(typeCast.byteArray, 4);
   output = typeCast.uint32;
   return output;
 }
 uint16_t readShortFromSD() {
   uint16_t output = 0;
+  typeCast.uint32 = 0;
   settingsFile.read(typeCast.byteArray, 2);
   output = typeCast.uint16;
   return output;
 }
 byte readByteFromSD() {
   byte myByte = 0;
+  buf[0] = 0;
   settingsFile.read(buf, sizeof(buf));
   myByte = buf[0];
   return myByte;
@@ -149,9 +156,14 @@ void SaveCurrentProgram2SD() {
   settingsFile.open(currentSettingsFileNameChar, O_READ);
 }
 
-// Reads parameters from the current settings file. Returns the last byte read, which is SETTINGS_FILE_END_MARKER if the file is valid.
+// Reads parameters from the current settings file. Returns SETTINGS_FILE_END_MARKER if the file is valid, or 0 if it
+// is missing, too short, has no end marker, or holds a value that would make handler() read outside its arrays
+// (e.g. custom train 3 in a file saved on Pulse Pal 3 and loaded on Pulse Pal 2).
 // If the file is invalid, the caller must load valid parameters (e.g. with LoadDefaultParameters()).
 byte RestoreParametersFromSD() {
+  if (!settingsFile.isOpen() || (settingsFile.fileSize() < SETTINGS_FILE_N_PARAM_BYTES + 1)) {
+    return 0; // The file did not open (e.g. no file of that name), or is too short to hold a program
+  }
   settingsFile.rewind();
   for (int chan = 0; chan < 4; chan++) {
     Phase1Duration[chan] = readLongFromSD();
@@ -180,6 +192,10 @@ byte RestoreParametersFromSD() {
     TriggerAddress[chan][3] = buf4[3];
   }
   byte isValidProgram = readByteFromSD();
+  if (!validateOutputParams()) { // Resets out of range values; the caller then loads defaults in any case
+    isValidProgram = 0;
+  }
+  updateParamSyncPending(); // The file may have taken a trigger channel out of param sync mode
   return isValidProgram;
 }
 

@@ -578,7 +578,7 @@ void setup() {
     setDAC(i, RestingVoltage[i]);
   }
   ProgramDAC(16, 0, 31); // Power up DACs
-  dacWrite(); // Update the DAC. This is the only dacWrite() call outside handler(), because the hardware timer has not started.
+  dacWrite(); // Update the DAC. dacWrite() is called outside handler() only here and in loop()'s comm failure handling, while the hardware timer is not running.
 
   #if (HARDWARE_VERSION == 2)
     SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
@@ -668,6 +668,14 @@ void loop() {
   }
   if (PPUSB.timedOut()) { // A serial USB message started, but didn't finish as expected
     stopHardwareTimer();
+    // Stop playback and return the outputs to their resting voltages before waiting for the user's click. Without
+    // this, a channel stopped mid-pulse holds its pulse voltage for as long as the error message is shown.
+    // dacWrite() is safe here only because the timer is stopped, so handler() cannot interrupt the SPI transfer.
+    for (int i = 0; i < 4; i++) {
+      killChannel(i);
+    }
+    dacWrite();
+    DACFlag = 0;
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
     PPUSB.clearTimedOut();
     startHardwareTimer();

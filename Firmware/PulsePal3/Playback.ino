@@ -67,7 +67,7 @@ static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
 //     parameters it started with, and take the new ones in the cycle it ends. Both happen before step 4, so an edge
 //     on the other trigger channel in the same cycle starts its trains with the new parameters, and a channel
 //     triggered after its train ended plays the whole of the next train with them. A param sync channel starts and
-//     stops nothing itself.
+//     stops nothing itself, even when the set it loads moves it to another trigger mode.
 //  4. For each output channel that is playing: stop it if a linked trigger channel in toggle mode went low to high,
 //     or a linked trigger channel in gated mode went high to low (unless the other trigger channel is also linked,
 //     gated and still high). For each channel that is not playing: start it if a linked trigger went low to high,
@@ -143,11 +143,21 @@ void handler(void) {
     #if (HARDWARE_VERSION > 2)
       // Take the parameter set that op 92 left waiting, if a trigger channel in param sync mode just went high
       if (paramSyncPending) {
+        byte paramSyncEdges = 0; // One bit per trigger channel in param sync mode that went high this cycle
         for (int y = 0; y < 2; y++) {
           if ((TriggerMode[y] == TRIGGER_MODE_PARAM_SYNC) && (LineTriggerEvent[y] == TRIGGER_EVENT_LOW_TO_HIGH)) {
-            paramSyncPending = false;
-            startParamSync();
-            break; // The set may have changed TriggerMode, so this cycle starts at most one param sync
+            bitSet(paramSyncEdges, y);
+          }
+        }
+        if (paramSyncEdges) {
+          paramSyncPending = false;
+          startParamSync();
+          // The set can move a trigger channel out of param sync mode. Its edge was a param sync edge, so it must
+          // not also start or toggle trains below under the new mode.
+          for (int y = 0; y < 2; y++) {
+            if (bitRead(paramSyncEdges, y)) {
+              LineTriggerEvent[y] = TRIGGER_EVENT_NONE;
+            }
           }
         }
       }

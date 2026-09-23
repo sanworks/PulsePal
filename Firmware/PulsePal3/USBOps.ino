@@ -126,10 +126,11 @@ byte validateParamBuffer() {
   }
 #endif
 
-// Discards a parameter set waiting in paramBuffer once no trigger channel is left in param sync mode. Ops 73, 74
-// and 91 call this after validating their parameters, where the trigger modes are final: without it, a channel
-// taken out of param sync mode and later put back would load a set sent long before, instead of waiting for a new
-// one. Op 92 clears the flag itself. Pulse Pal 2 has no param sync mode and nothing to discard.
+// Discards a parameter set waiting in paramBuffer once no trigger channel is left in param sync mode. Everything
+// that sets TriggerMode other than op 92 calls this once the trigger modes are final: ops 73, 74 and 91 after
+// validating, LoadDefaultParameters(), RestoreParametersFromSD() and the joystick menu. Without it, a channel taken
+// out of param sync mode and later put back would load a set sent long before, instead of waiting for a new one.
+// Op 92 clears the flag itself. Pulse Pal 2 has no param sync mode and nothing to discard.
 void updateParamSyncPending() {
   #if (HARDWARE_VERSION > 2)
     if (!paramSyncEnabled()) {
@@ -471,7 +472,9 @@ void processUSBCommands() {
           bool waitForSyncEdge = false;
           #if (HARDWARE_VERSION > 2)
             waitForSyncEdge = paramSyncEnabled(); // A trigger channel is in param sync mode: hold the set for its next rising edge
-            paramSyncPending = waitForSyncEdge; // Set after the read, so that handler() never loads a partly written buffer
+            // Set after the read, so that handler() never loads a partly written buffer. A set whose read timed out is
+            // mostly zeros; it is not held, and loop() loads the default parameters.
+            paramSyncPending = waitForSyncEdge && !PPUSB.timedOut();
           #endif
           if (!waitForSyncEdge) {
             applyParamBuffer(); // No channel is waiting for a TTL, so program the device now

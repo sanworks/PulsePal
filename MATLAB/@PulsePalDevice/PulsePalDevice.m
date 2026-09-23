@@ -371,22 +371,37 @@ classdef PulsePalDevice < handle
             disp('and reset all parameters to defaults.')
             reply = input('Do you want to continue (y/n) > ', 's');
             if lower(reply) == 'y'
-                success = false;
                 obj.Port.write([obj.OpMenuByte 97], 'uint8');
+                % The device replies with lines of status text, the last of which contains '!', and
+                % then a confirm byte (1 if the card was formatted, 0 if not). The confirm byte is sent
+                % after the device has reloaded its default parameters, so it can arrive well after the
+                % text. It must be read here: left in the buffer, it would be taken as the reply to the
+                % next command (the one sent by setDefaultParams() below), and every reply after that
+                % would be read one byte late.
                 tic;
                 msg = [];
-                flagsFound = false;
-                while toc < 30 && flagsFound == false
+                lineEnd = [];
+                replyComplete = false;
+                while toc < 30 && ~replyComplete
                     if obj.Port.NumBytesAvailable > 0
                         msg = [msg obj.Port.read(obj.Port.NumBytesAvailable, 'uint8')];
-                    end
-                    if sum(msg == '!') > 0
-                        flagsFound = true;
+                        flagIndex = find(msg == '!', 1);
+                        if ~isempty(flagIndex)
+                            lineEnd = flagIndex - 1 + find(msg(flagIndex:end) == 10, 1); % 10 = newline
+                        end
+                        replyComplete = ~isempty(lineEnd) && (length(msg) > lineEnd);
                     end
                     pause(.01);
                 end
-                disp(char(msg(1:end-2)));
+                if ~replyComplete
+                    error('Pulse Pal did not report the result of formatting its microSD card within 30 seconds.')
+                end
+                disp(strtrim(char(msg(1:lineEnd))));
+                success = (msg(lineEnd+1) == 1);
                 obj.setDefaultParams();
+                if ~success
+                    error('Pulse Pal could not format its microSD card.')
+                end
             else
                 disp('Choice confirmed - microSD Card NOT formatted.')
             end

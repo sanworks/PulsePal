@@ -277,6 +277,69 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
         PulsePal.time.sleep = original_sleep
 
 
+class ChunkedPort(FakePort):
+    """A FakePort whose reply arrives in separate chunks, as it does from a device
+    that pauses between parts of it. Once the chunks are used up, reads return
+    the acknowledgement byte, like FakePort."""
+
+    def __init__(self, chunks):
+        super().__init__()
+        self.chunks = [bytes(chunk) for chunk in chunks]
+
+    @property
+    def in_waiting(self):
+        return len(self.chunks[0]) if self.chunks else 0
+
+    def read(self, n):
+        if self.chunks:
+            self.reads.append(n)
+            return self.chunks.pop(0)
+        return super().read(n)
+
+
+def format_microsd_with_reply(chunks):
+    """Run format_microsd() against a device that replies with these chunks."""
+    device = make_device()
+    device.info.hardware_version = 3
+    device.port = ChunkedPort(chunks)
+    original_sleep = PulsePal.time.sleep
+    PulsePal.input = lambda prompt="": "y"  # Answers the confirmation prompt
+    PulsePal.time.sleep = lambda seconds: None
+    try:
+        device.format_microsd(timeout=1)
+    finally:
+        del PulsePal.input
+        PulsePal.time.sleep = original_sleep
+    return device
+
+
+def test_format_microsd_reads_the_confirm_byte_sent_after_the_text():
+    """Op 97 sends status text ending in '!', then a confirm byte once the device has
+    reloaded its defaults. Left unread, that byte would be taken as the reply to the
+    next command."""
+    device = format_microsd_with_reply([
+        b"STATUS: Starting Format...\r\n",
+        b"SUCCESS: Card format complete!\r\n",
+        b"\x01",
+    ])
+    assert device.port.writes == [bytes([OP_MENU_BYTE, 97])]
+    assert device.port.chunks == [], "the confirm byte was left unread"
+
+    # The confirm byte can also arrive with the text
+    device = format_microsd_with_reply([
+        b"STATUS: Starting Format...\r\nSUCCESS: Card format complete!\r\n\x01",
+    ])
+    assert device.port.chunks == []
+
+
+def test_format_microsd_raises_when_the_device_reports_failure():
+    try:
+        format_microsd_with_reply([b"ERROR: Format failed!\r\n", b"\x00"])
+        raise AssertionError("a confirm byte of 0 did not raise")
+    except PulsePal.PulsePalError as error:
+        assert "could not format" in str(error)
+
+
 def main():
     tests = [
         value for name, value in sorted(globals().items())

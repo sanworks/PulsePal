@@ -44,7 +44,8 @@ static inline void setDAC(byte channel, uint16_t value) {
   DACFlag = 1;
 }
 
-// Writes flagged channels to the DAC over SPI. Once the hardware timer has started, call this only from handler().
+// Writes flagged channels to the DAC over SPI. Once the hardware timer has started, call this only from handler(),
+// or from loop() while stopHardwareTimer() has it stopped.
 // If a timer interrupt called dacWrite() during an SPI transfer started from loop(), the nested transfer would take the
 // outer transfer's received bytes, and loop() would wait forever inside SPI.transfer(). Use setDAC() instead.
 void dacWrite() {

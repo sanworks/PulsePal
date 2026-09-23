@@ -73,7 +73,7 @@ The MATLAB and Python classes raise an error when they receive 0.
 | 94 | Send hardware info | none | Hardware version (byte), timer period in µs (uint32), number of custom trains (byte), maximum pulses per train (uint32) |
 | 95 | Load a custom train | Train index (0 = train 1), pulse count (uint32), that many uint32 times, that many uint16 voltages | 1 / 0 |
 | 96 | Set DAC calibration | Channel (0-3), zero-code offset (int16) | 1 / 0 |
-| 97 | Format the microSD card | none | 1 / 0 (Pulse Pal 3 only) |
+| 97 | Format the microSD card | none | Pulse Pal 3 only. Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, sent after the default parameters have been reloaded, which can be some time after the text. Clients must read this byte before the next command |
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
 
 ## Parameter codes (ops 74 and 91)
@@ -124,12 +124,16 @@ be sent during the current one and applied the instant it starts.
 - Switching continuous loop mode off in a stored set does not stop a channel that is playing,
   unlike op 92 outside param sync mode. Nothing on this path interrupts a train in progress.
 - A trigger channel in param sync mode starts and stops nothing. Its links to output channels
-  are ignored. To start a train on the same edge, send the TTL to the other trigger channel as
-  well: both edges land in the same timer cycle, and the parameters are loaded first.
+  are ignored. This includes the edge that loads a set moving the channel to another mode: that
+  edge only loads the set, and the new mode applies from the next edge. To start a train on the
+  same edge, send the TTL to the other trigger channel as well: both edges land in the same
+  timer cycle, and the parameters are loaded first.
 - The stored set is discarded when a later op 92 replaces it, so only the most recent set is
-  ever loaded. It is also discarded when the last param sync channel leaves the mode, so that
-  putting a channel back into param sync mode cannot load a set sent long before. A rising
-  edge with nothing stored does nothing.
+  ever loaded. It is also discarded when the last param sync channel leaves the mode, whether
+  by op 73, 74 or 91, the joystick menu, loading a settings file, or the default parameters
+  loaded after a comm failure or an op 97 format. So putting a channel back into param sync
+  mode cannot load a set sent long before. An op 92 whose data does not all arrive is never
+  stored. A rising edge with nothing stored does nothing.
 - A set taken at an edge is copied aside, so a later op 92 can arrive while channels are still
   finishing their trains. If a second edge arrives while they are, it replaces what they are
   waiting for with the newer set.
@@ -161,6 +165,13 @@ End marker: 252                                                            uint8
 
 Continuous loop mode is not saved. `default.pps` is written at startup with the default
 parameters, and the joystick menu cannot overwrite or erase it.
+
+A load (op 90 or the joystick menu) fails, and the device loads the default parameters, if the
+file is missing, shorter than 179 bytes, lacks the end marker, or holds a value the device
+cannot play: a custom train ID above the device's number of custom trains, a custom train
+target, custom train loop or biphasic byte above 1, or a trigger mode the device does not
+have. A file saved on Pulse Pal 3 with custom train 3 or 4, or with param sync mode, therefore
+does not load on Pulse Pal 2.
 
 ## Differences by firmware version
 

@@ -233,6 +233,7 @@ void UpdateSettingsMenu() {
             case 2: {
               // Change mode of selected channel
               TriggerMode[SelectedChannel-1] = ReturnUserValue(TriggerMode[SelectedChannel-1], 0, MAX_TRIGGER_MODE, UNITS_TRIGGER_MODE); // Get user to input trigger mode
+              updateParamSyncPending(); // This may have taken the channel out of param sync mode
               //Store changes
               //SaveCurrentProgram2SD();
             } break;
@@ -294,6 +295,7 @@ void UpdateSettingsMenu() {
               for (int i = 5; i<16; i++) {
                 candidateSettingsFileChar[i] = 32;
               }
+              candidateSettingsFileChar[16] = 0; // Terminates the 16 characters shown. The edits below never move it.
               LCD_noCursor();
               LCD_setCursor(0, 1); LCD_print("                ");
               delayMicroseconds(100000);
@@ -357,7 +359,7 @@ void UpdateSettingsMenu() {
                     }
                  } else if (ClickerX > ClickerMaxThreshold) {
                     if (CursorPos < 11) {
-                      for (int i = 16; i > CursorPos; i--) {
+                      for (int i = 15; i > CursorPos; i--) { // Index 16 is the terminator. Index 15 is a spare space, since CursorPos < 11.
                         candidateSettingsFileChar[i] = candidateSettingsFileChar[i-1];
                       }
                       CursorPos++;

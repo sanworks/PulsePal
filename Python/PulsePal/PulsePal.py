@@ -1188,7 +1188,9 @@ class PulsePalDevice:
             if the user declines the confirmation prompt.
 
         Raises:
-            PulsePalError: If the connected hardware is older than v3.
+            PulsePalError: If the connected hardware is older than v3, if
+                the device reports that formatting failed, or if it does
+                not report a result within `timeout` seconds.
         """
         if self.info.hardware_version < 3:
             raise PulsePalError(
@@ -1208,28 +1210,46 @@ class PulsePalDevice:
 
         self._write_serial((self._OP_MENU_BYTE, 97), "uint8")
 
+        # The device replies with lines of status text, the last of which
+        # contains "!", and then a confirm byte (1 if the card was formatted,
+        # 0 if not). The confirm byte is sent after the device has reloaded
+        # its default parameters, so it can arrive well after the text. It
+        # must be read here: left in the buffer, it would be taken as the
+        # reply to the next command, and every reply after that would be
+        # read one byte late.
         start = time.time()
         message = bytearray()
+        flag_index = -1
+        line_end = -1
 
         while time.time() - start < timeout:
             n_waiting = self.bytes_available()
             if n_waiting:
                 message.extend(self.port.read(n_waiting))
-                if ord("!") in message:
+                flag_index = message.find(b"!")
+                if flag_index >= 0:
+                    line_end = message.find(b"\n", flag_index)
+                if line_end >= 0 and len(message) > line_end + 1:
                     break
             time.sleep(0.01)
-        raw_message = bytes(message)
-        flag_index = raw_message.find(b"!")
-        if flag_index >= 0:
-            displayed_message = raw_message[:flag_index]
-        else:
-            displayed_message = raw_message
+        if line_end < 0 or len(message) <= line_end + 1:
+            raise PulsePalError(
+                "Error: Pulse Pal did not report the result of formatting "
+                f"its microSD card within {timeout} s."
+            )
+        confirm = message[line_end + 1]
 
-        text = displayed_message.decode("ascii", errors="replace").rstrip()
+        text = bytes(message[:flag_index]).decode(
+            "ascii", errors="replace"
+        ).rstrip()
         if text:
             print(text)
 
         self.set_default_params()
+        if confirm != 1:
+            raise PulsePalError(
+                "Error: Pulse Pal could not format its microSD card."
+            )
         return None
 
     def gui(self, block=None, theme=None):
