@@ -30,6 +30,8 @@ See the GNU General Public License for more details.
 //   carries a whole reply, instead of one packet per value. Nothing is sent until flush() is called.
 // - Arrays are read and written as one block. Both supported boards are little-endian, and that is also the wire
 //   format, so the bytes of a uint16 or uint32 array need no rearranging.
+// - readBlock() reads a fixed number of bytes into a buffer of the caller's. An op that reads a known set of values
+//   can use it to take the whole set in one transfer, and unpack the buffer afterwards. Op 92 does this.
 // - This class is only used from loop(). Do not call it from handler() or any other interrupt.
 
 #ifndef ArCOM_h
@@ -101,6 +103,35 @@ class ArCOM
       readBlock(values, nValues * 4);
     }
 
+    // Reads nBytes into target. Kept out of line: inlining this loop at every call site cost several KB of flash.
+    // Returns false if no new byte arrived for ARCOM_READ_TIMEOUT_MS, in which case the
+    // bytes that did not arrive are set to 0, so that a half-read command cannot act on whatever was in memory.
+    // Ops that read a fixed set of values can call this once with a buffer, instead of once per value.
+    __attribute__((noinline)) bool readBlock(void *target, size_t nBytes) {
+      uint8_t *nextByte = (uint8_t*)target;
+      if (readTimedOut) { // A previous read of this command already failed
+        memset(nextByte, 0, nBytes);
+        return false;
+      }
+      size_t nBytesRead = 0;
+      uint32_t lastByteTime = millis();
+      while (nBytesRead < nBytes) {
+        size_t nAvailable = port.available();
+        if (nAvailable > 0) {
+          if (nAvailable > (nBytes - nBytesRead)) {
+            nAvailable = nBytes - nBytesRead;
+          }
+          nBytesRead += port.readBytes((char*)(nextByte + nBytesRead), nAvailable);
+          lastByteTime = millis();
+        } else if ((millis() - lastByteTime) > ARCOM_READ_TIMEOUT_MS) {
+          memset(nextByte + nBytesRead, 0, nBytes - nBytesRead);
+          readTimedOut = true;
+          return false;
+        }
+      }
+      return true;
+    }
+
     // --- Writes. These fill the write buffer; flush() sends it. ---
 
     void writeByte(byte value) {
@@ -144,34 +175,6 @@ class ArCOM
     bool readTimedOut = false;
     size_t nBytesToWrite = 0;
     uint8_t writeBuffer[ARCOM_WRITE_BUFFER_SIZE];
-
-    // Reads nBytes into target. Kept out of line: inlining this loop at every call site cost several KB of flash.
-    // Returns false if no new byte arrived for ARCOM_READ_TIMEOUT_MS, in which case the
-    // bytes that did not arrive are set to 0, so that a half-read command cannot act on whatever was in memory.
-    __attribute__((noinline)) bool readBlock(void *target, size_t nBytes) {
-      uint8_t *nextByte = (uint8_t*)target;
-      if (readTimedOut) { // A previous read of this command already failed
-        memset(nextByte, 0, nBytes);
-        return false;
-      }
-      size_t nBytesRead = 0;
-      uint32_t lastByteTime = millis();
-      while (nBytesRead < nBytes) {
-        size_t nAvailable = port.available();
-        if (nAvailable > 0) {
-          if (nAvailable > (nBytes - nBytesRead)) {
-            nAvailable = nBytes - nBytesRead;
-          }
-          nBytesRead += port.readBytes((char*)(nextByte + nBytesRead), nAvailable);
-          lastByteTime = millis();
-        } else if ((millis() - lastByteTime) > ARCOM_READ_TIMEOUT_MS) {
-          memset(nextByte + nBytesRead, 0, nBytes - nBytesRead);
-          readTimedOut = true;
-          return false;
-        }
-      }
-      return true;
-    }
 
     // Adds bytes to the write buffer, sending it first if it is full
     __attribute__((noinline)) void writeBlock(const void *source, size_t nBytes) {

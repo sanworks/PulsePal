@@ -232,7 +232,7 @@ void UpdateSettingsMenu() {
             } break;
             case 2: {
               // Change mode of selected channel
-              TriggerMode[SelectedChannel-1] = ReturnUserValue(TriggerMode[SelectedChannel-1], 0, 2, UNITS_TRIGGER_MODE); // Get user to input trigger mode
+              TriggerMode[SelectedChannel-1] = ReturnUserValue(TriggerMode[SelectedChannel-1], 0, MAX_TRIGGER_MODE, UNITS_TRIGGER_MODE); // Get user to input trigger mode
               //Store changes
               //SaveCurrentProgram2SD();
             } break;
@@ -692,6 +692,10 @@ if (Units == UNITS_VOLTS) {
         sprintf(Value2Display, "     Toggle   ");
       } else if (InputNum == 2) {
         sprintf(Value2Display, "  Pulse Gated  ");
+      #if (HARDWARE_VERSION > 2)
+      } else if (InputNum == TRIGGER_MODE_PARAM_SYNC) {
+        sprintf(Value2Display, "  Param Sync  ");
+      #endif
       } else {
         sprintf(Value2Display, "     Error   ");
       }

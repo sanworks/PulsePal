@@ -41,7 +41,27 @@ classdef PulsePalDevice < handle
         customTrainTarget
         customTrainLoop
         playbackMode
-        triggerMode
+        triggerMode % Response of each trigger channel to an incoming TTL pulse. Two elements, one per trigger channel.
+                    % 0 = normal: a rising edge starts the pulse train, and edges during the train are ignored.
+                    % 1 = toggle: as 0, but a rising edge during the train stops it.
+                    % 2 = pulse gated: the train runs only while the trigger TTL is high.
+                    % 3 = param sync (Pulse Pal 3 only): a rising edge does not start or stop a train. Instead it
+                    %     loads the parameter set most recently sent by syncToDevice(). This is how the parameters
+                    %     of the next trial are sent during the current trial and applied the instant it starts.
+                    %     An output channel that is idle at the edge takes its new parameters within the timer
+                    %     cycle the edge is detected. One that is playing a pulse train finishes that train on the
+                    %     parameters it started with and takes the new ones the moment it ends, so a train that
+                    %     runs past the end of a trial keeps one shape throughout, and the next trigger plays a
+                    %     whole train with the new parameters. A channel in continuous playbackMode has no train
+                    %     end, so it keeps its parameters until something stops it.
+                    %     While either trigger channel is in param sync mode, ONLY syncToDevice() is held back.
+                    %     Assigning to a parameter property with autoSync on still programs the device immediately.
+                    %     Leaving param sync mode therefore means assigning to triggerMode with autoSync on; a
+                    %     trigger mode sent by syncToDevice() does not take effect until a sync edge arrives.
+                    %     Links to output channels are ignored for a param sync channel. To start a train on the
+                    %     same edge, wire the TTL to the other trigger channel as well.
+                    %     setDefaultParams(), which the constructor calls, takes both trigger channels out of param
+                    %     sync mode, so that the default parameters reach the device instead of waiting for a TTL.
     end
 
     properties (Access = private)
@@ -199,6 +219,9 @@ classdef PulsePalDevice < handle
 
         function confirmed = syncToDevice(obj)
             % If autoSync is off, this will sync all parameters at once.
+            % On Pulse Pal 3, if either trigger channel is in param sync mode (triggerMode 3), the device stores
+            % the parameters instead of programming them, and loads them on the next rising edge of that channel.
+            % The returned confirmation still reports whether every value was in range. See triggerMode above.
             if obj.autoSync
                 error('autoSync is set to ''true''. syncToDevice() may be used when autoSync is off.')
             end
@@ -255,6 +278,14 @@ classdef PulsePalDevice < handle
         function setDefaultParams(obj)
             % Loads default parameters and sends them to the device
             autoSyncState = obj.autoSync;
+            if obj.hardwareVersion > 2
+                % A device left in param sync mode would store the sync below instead of running it,
+                % leaving the device on its old program until a TTL arrived. Assigning triggerMode is
+                % not deferred that way, so take both trigger channels out of param sync mode first.
+                % See the triggerMode property.
+                obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
+                obj.triggerMode = uint8(zeros(1,2));
+            end
             obj.autoSync = false;
             obj.isBiphasic = zeros(1,4);
             obj.phase1Voltage = ones(1,4)*5;
@@ -609,7 +640,11 @@ classdef PulsePalDevice < handle
                         case 18
                             range = [0 1];
                         case 128
-                            range = [0 2];
+                            if obj.hardwareVersion > 2
+                                range = [0 3]; % Param sync mode (3) is Pulse Pal 3 only
+                            else
+                                range = [0 2];
+                            end
                     end
                     obj.checkParamRange(val, 'Byte', range, paramCode);
                     value2send = val;

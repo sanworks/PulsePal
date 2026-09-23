@@ -68,7 +68,9 @@ read the `--show` output before concluding that something really changed.
    rather than changing existing ones.
 5. **Validate anything that arrives over USB** before it indexes an array, and reply 0 if it
    is out of range. `paramValueBytes()`, `isValidOutputChannel()` and `validateOutputParams()`
-   in `USBOps.ino` do this.
+   in `USBOps.ino` do this. `validateParamBuffer()` applies the same rules to a parameter set
+   still in `paramBuffer`, because op 92 has to answer for a set that param sync mode will not
+   load until later, in `handler()`, where nothing can be reported. Change the two together.
 6. **Use ArCOM for USB, only from `loop()`.** Its reads give up after 100 ms without a new
    byte, return zeros and set `PPUSB.timedOut()`, which `loop()` checks once per pass. Replies
    are buffered until the `PPUSB.flush()` in `loop()` sends them, so do not expect a reply to
@@ -84,7 +86,12 @@ read the `--show` output before concluding that something really changed.
 
 `handler()` runs every 50 µs, and calls `killChannel()`, `setDAC()`, `dacWrite()`,
 `mirrorAboutZero()`, `AbortAllPulseTrains()` and `digitalWriteDirect()`. `TC3_Handler()` is
-its entry point on Pulse Pal 2.
+its entry point on Pulse Pal 2. On Pulse Pal 3 it also calls `startParamSync()` when a trigger
+channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on every cycle while
+an output channel is still finishing the pulse train it was playing at that edge. Measured on a
+Teensy 4.1, against the 50 µs cycle: the edge costs 0.74 µs with all four channels idle, which
+is the worst case, and 0.22 µs with all four playing; a channel taking its parameters later
+costs 0.08 µs; and the check that finds nothing waiting, which every cycle pays, costs 0.007 µs.
 
 `loop()` can be interrupted at any point; the interrupt cannot be interrupted by `loop()`.
 So code in `loop()` that updates several shared variables can be seen half-updated by the
@@ -102,8 +109,10 @@ output channel parameters.
 2. `PulsePal3.ino`: to put it in the joystick menu, add its code to `menuActionParams`. That is
    the only change the menu needs: labels, limits, units, storage and the monophasic skip all
    come from the table.
-3. `USBOps.ino`: ops 73, 74, 91, 92 (reading) and 93 (sending). `paramValueBytes()` reads the
-   table, so it needs no change.
+3. `USBOps.ino`: ops 73, 74, 91 and 93. Ops 92 and 93 also fix the layout of `paramBuffer`, so
+   `PARAM_BUFFER_N_BYTES`, `loadChannelParamsFromBuffer()` and the walk in `validateParamBuffer()`
+   all need the new parameter. Those two are the only descriptions of that layout, and op 93 is
+   the wire order they must follow. `paramValueBytes()` reads the table, so it needs no change.
 4. `SDSettings.ino`: `SaveCurrentProgram2SD()`, `RestoreParametersFromSD()`, the layout
    comment, and `SETTINGS_FILE_N_PARAM_BYTES`. Changing the file layout invalidates saved
    files, so consider appending instead.
@@ -121,6 +130,10 @@ playback, the menu or the USB ops, ask the user to check:
 
 - A pulse train on a scope: shape, duration, voltages.
 - Trigger channels in normal, toggle and gated modes.
+- Param sync mode on Pulse Pal 3: `sync_to_device()` during a train does not change the output;
+  the next rising edge on the param sync channel updates idle channels only; and a channel that
+  was playing at that edge finishes its train unchanged, then plays the next one with the new
+  parameters.
 - The joystick menu: edit a parameter, save, load and erase a settings file.
 - `stop()` during playback from Python, then trigger again.
 - Custom trains, including trains 3 and 4 on Pulse Pal 3.

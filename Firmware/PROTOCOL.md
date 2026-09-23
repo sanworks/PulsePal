@@ -68,7 +68,7 @@ The MATLAB and Python classes raise an error when they receive 0.
 | 89 | Set the client name | 6 characters, shown as "NAME Connected" | none |
 | 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0, sent after the file operation has finished |
 | 91 | Program one parameter on all channels | Parameter code, then one value per output channel (4 values), or per trigger channel (2 values) for code 128 | 1 / 0 |
-| 92 | Program all parameters | 8 uint32 arrays of 4 (times), 3 uint16 arrays of 4 (voltages), then byte arrays of 4: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
+| 92 | Program all parameters | 182 bytes: 8 uint32 arrays of 4 (times), 3 uint16 arrays of 4 (voltages), then byte arrays of 4: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes. The device reads them as one block | 1 / 0 |
 | 93 | Send all parameters | none | 178 bytes, in the op 92 order but without the continuous loop bytes |
 | 94 | Send hardware info | none | Hardware version (byte), timer period in µs (uint32), number of custom trains (byte), maximum pulses per train (uint32) |
 | 95 | Load a custom train | Train index (0 = train 1), pulse count (uint32), that many uint32 times, that many uint16 voltages | 1 / 0 |
@@ -98,10 +98,50 @@ The MATLAB and Python classes raise an error when they receive 0.
 | 16 | Custom train loop | 1 byte | 0 or 1 |
 | 17 | Resting voltage | uint16 | DAC code |
 | 18 | Continuous loop mode | 1 byte | 0 or 1 |
-| 128 | Trigger mode | 1 byte | 0 normal, 1 toggle, 2 pulse gated. Addresses trigger channels 1-2 |
+| 128 | Trigger mode | 1 byte | 0 normal, 1 toggle, 2 pulse gated, 3 param sync (Pulse Pal 3 only). Addresses trigger channels 1-2 |
 
 Parameter codes are also the order of the parameter name list in the Python class, where
 a name's position gives its code.
+
+### Param sync mode (Pulse Pal 3, trigger mode 3)
+
+Param sync mode changes when op 92 takes effect, so that the parameters of the next trial can
+be sent during the current one and applied the instant it starts.
+
+- While either trigger channel is in param sync mode, op 92 stores its parameter set in the
+  device and does not program it. The confirm byte still reports whether every value was in
+  range, because the values are checked when they arrive.
+- A rising edge on a trigger channel in param sync mode takes the stored set. An output channel
+  that is idle takes its new parameters in the timer cycle the edge is detected, and goes to its
+  new resting voltage.
+- An output channel that is **playing a pulse train** at the edge finishes that train on the
+  parameters it started with, and takes the new ones in the cycle the train ends. So a train
+  that crosses into the next trial keeps one shape throughout, and the next trigger plays a
+  whole train with the new parameters. A channel in continuous loop mode has no train end, and
+  waits until something stops it.
+- Trigger mode is not an output channel parameter and takes effect at the edge, so a stored set
+  that leaves param sync mode does so straight away.
+- Switching continuous loop mode off in a stored set does not stop a channel that is playing,
+  unlike op 92 outside param sync mode. Nothing on this path interrupts a train in progress.
+- A trigger channel in param sync mode starts and stops nothing. Its links to output channels
+  are ignored. To start a train on the same edge, send the TTL to the other trigger channel as
+  well: both edges land in the same timer cycle, and the parameters are loaded first.
+- The stored set is discarded when a later op 92 replaces it, so only the most recent set is
+  ever loaded. It is also discarded when the last param sync channel leaves the mode, so that
+  putting a channel back into param sync mode cannot load a set sent long before. A rising
+  edge with nothing stored does nothing.
+- A set taken at an edge is copied aside, so a later op 92 can arrive while channels are still
+  finishing their trains. If a second edge arrives while they are, it replaces what they are
+  waiting for with the newer set.
+- **Only op 92 is deferred.** Ops 73, 74 and 91 program the device immediately, in param sync
+  mode as in any other. In the clients, that means only `sync_to_device()` (Python) and
+  `syncToDevice()` (MATLAB) pre-load a parameter set; `set_output_param()`,
+  `set_trigger_param()` and their MATLAB equivalents take effect at once.
+- Leaving param sync mode therefore needs op 74 or 91. A trigger mode sent with op 92 does not
+  take effect until a sync edge.
+- Both clients send op 74 or 91 to clear param sync mode when they connect, before programming
+  their default parameters, so a device left in the mode by an earlier session does not hold
+  those defaults back.
 
 ## Settings file
 
@@ -126,7 +166,7 @@ parameters, and the joystick menu cannot overwrite or erase it.
 
 | Firmware | Notes |
 |---|---|
-| v22 | Current. Adds ops 93-98, and a second trigger-linked custom train pair on Pulse Pal 3 (4 custom trains) |
+| v22 | Current. Adds ops 93-98, a second trigger-linked custom train pair on Pulse Pal 3 (4 custom trains), and param sync trigger mode on Pulse Pal 3 |
 | v21 | No ops 91-98. Clients use ops 73 and 74 to program parameters, and ops 75 and 76 for custom trains |
 
 Clients read the firmware version from the handshake, and the device properties from op 94.

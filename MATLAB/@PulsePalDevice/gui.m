@@ -320,7 +320,16 @@ obj.ui.TriggerModeLabel.Text = 'Trigger Mode';
 % Create DropDown_TriggerMode
 obj.ui.DropDown_TriggerMode = uidropdown(obj.ui.TriggerChannelsPanel);
 obj.ui.DropDown_TriggerMode.Items = {'Normal', 'Toggle', 'Pulse Gated'};
-obj.ui.DropDown_TriggerMode.Tooltip = {'Normal: TTL during pulse train ignored. Toggle: TTL during pulse train stops train. Pulse Gated: Pulse train only runs while trigger is high'};
+triggerModeTooltip = ['Normal: TTL during pulse train ignored. Toggle: TTL during pulse train stops train. '...
+                      'Pulse Gated: Pulse train only runs while trigger is high'];
+if obj.info.hardwareVersion > 2 % Param sync mode is Pulse Pal 3 only
+    obj.ui.DropDown_TriggerMode.Items{end+1} = 'Param Sync';
+    triggerModeTooltip = [triggerModeTooltip '. '...
+                          'Param Sync: TTL starts and stops nothing. It loads the program most recently uploaded, '...
+                          'so the next trial''s program can be uploaded during the current trial and applied the '...
+                          'instant the next one starts'];
+end
+obj.ui.DropDown_TriggerMode.Tooltip = {triggerModeTooltip};
 obj.ui.DropDown_TriggerMode.Position = [96 8 100 22];
 obj.ui.DropDown_TriggerMode.Value = 'Normal';
 obj.ui.DropDown_TriggerMode.ValueChangedFcn = obj.makeCallback(@uiSelectTriggerMode);
@@ -539,6 +548,11 @@ obj.ui.EditField_BurstDuration.Value = params.burstDuration(outChanSelected);
 obj.ui.EditField_InterBurstInterval.Value = params.interBurstInterval(outChanSelected);
 obj.ui.EditField_PulseTrainDuration.Value = params.pulseTrainDuration(outChanSelected);
 obj.ui.EditField_PulseTrainDelay.Value = params.pulseTrainDelay(outChanSelected);
+if params.triggerMode(trigChanSelected) >= numel(obj.ui.DropDown_TriggerMode.Items)
+    % A program saved on Pulse Pal 3 can name Param Sync, which Pulse Pal 2 has no mode for
+    params.triggerMode(trigChanSelected) = 0;
+    obj.ui.params.triggerMode(trigChanSelected) = 0;
+end
 obj.ui.DropDown_TriggerMode.Value = ...
     obj.ui.DropDown_TriggerMode.Items{params.triggerMode(trigChanSelected)+1};
 switch trigChanSelected
@@ -727,11 +741,30 @@ obj.ui.StatusLabel.Text = 'Status: Default Program Restored';
 end
 
 function uploadProgram(obj)
-% Sync paramaters from GUI to user fields
+% Trigger modes are handled on their own, because syncAllParams() is the one thing param sync mode defers.
+% A channel leaving param sync mode is programmed before the sync, so that the sync reaches the device. One
+% entering it is programmed after, so that this program is the one that loads and the next one waits for a TTL.
+paramSyncMode = 3;
 autoSyncState = obj.autoSync;
+newModes = obj.ui.params.triggerMode;
+deviceModes = obj.triggerMode;
+leavingParamSync = (deviceModes == paramSyncMode) & (newModes ~= paramSyncMode);
+enteringParamSync = (deviceModes ~= paramSyncMode) & (newModes == paramSyncMode);
+if any(leavingParamSync)
+    deviceModes(leavingParamSync) = newModes(leavingParamSync);
+    obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
+    obj.triggerMode = deviceModes;
+end
+programBuffered = any(deviceModes == paramSyncMode);
+
+% Sync paramaters from GUI to user fields
 obj.autoSync = false;
 obj.importParams(obj.ui.params);
 obj.syncAllParams;
+if any(enteringParamSync)
+    obj.autoSync = true;
+    obj.triggerMode = newModes;
+end
 obj.autoSync = autoSyncState;
 
 % Sync custom waveforms (if applicable)
@@ -752,7 +785,11 @@ for iTrain = 1:obj.info.nCustomPulseTrains
         end
     end
 end
+if programBuffered
+    obj.ui.StatusLabel.Text = 'Status: Program Buffered for Next Param Sync TTL';
+else
     obj.ui.StatusLabel.Text = 'Status: Program Loaded to Device';
+end
 end
 
 function saveProgram(obj)

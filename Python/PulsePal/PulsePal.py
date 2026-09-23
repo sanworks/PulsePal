@@ -321,6 +321,45 @@ class PulsePalDevice:
       during the train are ignored.
     - `1` (toggle): same as 0 but a TTL rising edge during the train stops it.
     - `2` (pulse gated): the train runs only while the trigger TTL is high.
+    - `3` (param sync, Pulse Pal 3 only): a TTL rising edge starts and
+      stops nothing. It loads the parameter set most recently sent by
+      `PulsePalDevice.sync_to_device`. This is how the next trial's
+      parameters are sent during the current trial and applied the
+      instant it starts.
+
+    An output channel that is idle at a param sync edge takes its new
+    parameters in the 50 us timer cycle the edge is detected. One that is
+    playing a pulse train finishes that train on the parameters it
+    started with, and takes the new ones the moment it ends, so a train
+    that runs past the end of a trial keeps one shape throughout and the
+    next trigger plays a whole train with the new parameters. A channel
+    in continuous playback mode has no train end, so it keeps its
+    parameters until something stops it.
+
+    While either trigger channel is in param sync mode, **only
+    `PulsePalDevice.sync_to_device` is held back**.
+    `PulsePalDevice.set_output_param`, `PulsePalDevice.set_trigger_param`
+    and every other parameter method still program the device
+    immediately. So leaving param sync mode means calling
+    `PulsePalDevice.set_trigger_param`; a trigger mode sent by
+    `PulsePalDevice.sync_to_device` does not take effect until a sync
+    edge arrives.
+
+    A param sync channel's links to output channels are ignored. To
+    start a pulse train on the same edge, wire the TTL to the other
+    trigger channel as well: both edges arrive in the same timer cycle,
+    and the parameters are loaded first.
+
+    Connecting a new `PulsePalDevice` takes both trigger channels out of
+    param sync mode, so that the default parameters it programs reach the
+    device instead of waiting for a TTL.
+
+    ```python
+    P.set_trigger_param("trigger_mode", 2, 3)  # channel 2 does param sync
+    P.phase1_voltage[1:5] = [5] * 4
+    P.sync_to_device()                         # stored, not yet applied
+    # ... the next rising edge on trigger channel 2 applies it ...
+    ```
     """
 
     _CURRENT_FIRMWARE_VERSION = 22
@@ -489,6 +528,14 @@ class PulsePalDevice:
         )
 
         self.set_default_params()
+        if self.info.hardware_version > 2:
+            # A device left in param sync mode by an earlier session would
+            # store the sync below instead of running it, leaving the device
+            # on its old program until a TTL arrived. set_trigger_param is
+            # not deferred that way, so it takes both trigger channels out of
+            # param sync mode first. See PulsePalDevice.trigger_mode.
+            for channel in (1, 2):
+                self.set_trigger_param("trigger_mode", channel, 0)
         self.sync_to_device()
 
     @staticmethod
@@ -778,6 +825,13 @@ class PulsePalDevice:
         P.phase1_voltage[1:5] = [5] * 4
         P.sync_to_device()
         ```
+
+        On Pulse Pal 3, if either trigger channel is in param sync mode
+        (`PulsePalDevice.trigger_mode` 3), the device stores the
+        parameters instead of programming them, and loads them on the
+        next rising edge of that channel. The device still acknowledges
+        whether every value was in range. This is the only method whose
+        effect is deferred that way.
 
         Raises:
             PulsePalError: If the device does not acknowledge the

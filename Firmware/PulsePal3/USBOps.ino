@@ -28,10 +28,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   isValidOutputChannel()
 //   isValidTriggerChannel()
 //   validateOutputParams()
+//   validateParamBuffer()
+//   paramSyncEnabled()
+//   updateParamSyncPending()
 //   discardBytes()
 //   discardUntilQuiet()
 //   processUSBCommands()
 //   HandleReadTimeout()
+//   loadParamsFromBuffer()
+//   loadChannelParamsFromBuffer()
+//   applyParamBuffer()
+//   startParamSync()
+//   loadWaitingParamSyncChannels()
 //   sendCurrentParams()
 //   loadCustomPulseTrain()
 //
@@ -67,6 +75,7 @@ bool isValidTriggerChannel(byte channel) {
 
 // Checks the parameters that would otherwise make handler() read outside its arrays, and resets any that are invalid.
 // Returns 1 if every parameter was valid, or 0 if any was reset.
+// validateParamBuffer() below applies the same rules to a parameter set still in paramBuffer. Change both together.
 byte validateOutputParams() {
   byte allValid = 1;
   for (int i = 0; i < 4; i++) {
@@ -76,9 +85,57 @@ byte validateOutputParams() {
     if (IsBiphasic[i] > 1) {IsBiphasic[i] = 0; allValid = 0;}
   }
   for (int i = 0; i < 2; i++) {
-    if (TriggerMode[i] > TRIGGER_MODE_GATED) {TriggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
+    if (TriggerMode[i] > MAX_TRIGGER_MODE) {TriggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
   }
   return allValid;
+}
+
+// The same checks as validateOutputParams(), applied to a parameter set in paramBuffer and correcting it in place,
+// so that op 92 can answer for a set it has not loaded yet. A set in param sync mode is loaded by handler(), which
+// has no way to report a bad value, so it is checked here instead and is known to be safe by the time it is loaded.
+// The walk below matches loadParamsFromBuffer(), so the fields it skips are the ones no check applies to.
+byte validateParamBuffer() {
+  byte allValid = 1;
+  uint8_t *nextByte = paramBuffer;
+  nextByte += sizeof(Phase1Duration) + sizeof(InterPhaseInterval) + sizeof(Phase2Duration) + sizeof(InterPulseInterval);
+  nextByte += sizeof(BurstDuration) + sizeof(BurstInterval) + sizeof(PulseTrainDuration) + sizeof(PulseTrainDelay);
+  nextByte += sizeof(Phase1Voltage) + sizeof(Phase2Voltage) + sizeof(RestingVoltage); // Times and voltages use their full range
+  uint8_t *isBiphasic = nextByte;         nextByte += sizeof(IsBiphasic);
+  uint8_t *customTrainID = nextByte;      nextByte += sizeof(CustomTrainID);
+  uint8_t *customTrainTarget = nextByte;  nextByte += sizeof(CustomTrainTarget);
+  uint8_t *customTrainLoop = nextByte;    nextByte += sizeof(CustomTrainLoop);
+  nextByte += sizeof(ContinuousLoopMode) + sizeof(TriggerAddress); // Any nonzero value of either is valid
+  uint8_t *triggerMode = nextByte;
+  for (int i = 0; i < 4; i++) {
+    if (customTrainID[i] > N_CUSTOM_PULSE_TRAINS) {customTrainID[i] = 0; allValid = 0;}
+    if (customTrainTarget[i] > 1) {customTrainTarget[i] = 0; allValid = 0;}
+    if (customTrainLoop[i] > 1) {customTrainLoop[i] = 0; allValid = 0;}
+    if (isBiphasic[i] > 1) {isBiphasic[i] = 0; allValid = 0;}
+  }
+  for (int i = 0; i < 2; i++) {
+    if (triggerMode[i] > MAX_TRIGGER_MODE) {triggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
+  }
+  return allValid;
+}
+
+#if (HARDWARE_VERSION > 2)
+  // True if a trigger channel is in param sync mode, in which case op 92 holds its parameter set in paramBuffer
+  // until a rising edge on that channel loads it.
+  bool paramSyncEnabled() {
+    return (TriggerMode[0] == TRIGGER_MODE_PARAM_SYNC) || (TriggerMode[1] == TRIGGER_MODE_PARAM_SYNC);
+  }
+#endif
+
+// Discards a parameter set waiting in paramBuffer once no trigger channel is left in param sync mode. Ops 73, 74
+// and 91 call this after validating their parameters, where the trigger modes are final: without it, a channel
+// taken out of param sync mode and later put back would load a set sent long before, instead of waiting for a new
+// one. Op 92 clears the flag itself. Pulse Pal 2 has no param sync mode and nothing to discard.
+void updateParamSyncPending() {
+  #if (HARDWARE_VERSION > 2)
+    if (!paramSyncEnabled()) {
+      paramSyncPending = false;
+    }
+  #endif
 }
 
 // Reads and discards the data of a command that cannot be executed
@@ -145,6 +202,7 @@ void processUSBCommands() {
          TriggerMode[0] = PPUSB.readByte(); // Read bytes that set interpretation of trigger channel voltage
          TriggerMode[1] = PPUSB.readByte();
          byte paramsValid = validateOutputParams();
+         updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
          for (int x = 0; x < 4; x++) {
            updateUsesBursts(x);
            setDAC(x, RestingVoltage[x]);
@@ -191,6 +249,7 @@ void processUSBCommands() {
              case PARAM_TRIGGER_MODE: {TriggerMode[inByte3] = PPUSB.readByte();} break;
           }
           byte paramValid = validateOutputParams();
+          updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
           updateUsesBursts(inByte3);
           if (inByte2 == PARAM_RESTING_VOLTAGE) {
             setDAC(inByte3, RestingVoltage[inByte3]);
@@ -388,6 +447,7 @@ void processUSBCommands() {
              case PARAM_TRIGGER_MODE: {PPUSB.readByteArray(TriggerMode, 2);} break;
           }
           byte paramsValid = validateOutputParams();
+          updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
           for (int iChan = 0; iChan < 4; iChan++) {
             updateUsesBursts(iChan);
             if (inByte2 == PARAM_RESTING_VOLTAGE) {
@@ -403,40 +463,20 @@ void processUSBCommands() {
         } break;
 
         case OP_PROGRAM_ALL_PARAMS: {// Op 92. Program all parameters. More efficient than op 73. This method is used by current MATLAB and Python classes.
-          for (int i = 0; i < 4; i++) {
-            ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i];
+          #if (HARDWARE_VERSION > 2)
+            paramSyncPending = false; // A set buffered earlier and never loaded is replaced by this one
+          #endif
+          PPUSB.readBlock(paramBuffer, PARAM_BUFFER_N_BYTES); // The whole parameter set arrives as one block
+          byte allParamsValid = validateParamBuffer(); // Checked here, because a set loaded by handler() cannot be reported on
+          bool waitForSyncEdge = false;
+          #if (HARDWARE_VERSION > 2)
+            waitForSyncEdge = paramSyncEnabled(); // A trigger channel is in param sync mode: hold the set for its next rising edge
+            paramSyncPending = waitForSyncEdge; // Set after the read, so that handler() never loads a partly written buffer
+          #endif
+          if (!waitForSyncEdge) {
+            applyParamBuffer(); // No channel is waiting for a TTL, so program the device now
           }
-          PPUSB.readUint32Array(Phase1Duration, 4);
-          PPUSB.readUint32Array(InterPhaseInterval, 4);
-          PPUSB.readUint32Array(Phase2Duration, 4);
-          PPUSB.readUint32Array(InterPulseInterval, 4);
-          PPUSB.readUint32Array(BurstDuration, 4);
-          PPUSB.readUint32Array(BurstInterval, 4);
-          PPUSB.readUint32Array(PulseTrainDuration, 4);
-          PPUSB.readUint32Array(PulseTrainDelay, 4);
-          PPUSB.readUint16Array(Phase1Voltage, 4);
-          PPUSB.readUint16Array(Phase2Voltage, 4);
-          PPUSB.readUint16Array(RestingVoltage, 4);
-          PPUSB.readByteArray(IsBiphasic, 4);
-          PPUSB.readByteArray(CustomTrainID, 4);
-          PPUSB.readByteArray(CustomTrainTarget, 4);
-          PPUSB.readByteArray(CustomTrainLoop, 4);
-          PPUSB.readByteArray(ContinuousLoopMode, 4);
-         for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
-           for (int y = 0; y < 4; y++) {
-             TriggerAddress[x][y] = PPUSB.readByte();
-           }
-         }
-         PPUSB.readByteArray(TriggerMode, 2);
-         byte allParamsValid = validateOutputParams();
-         for (int x = 0; x < 4; x++) {
-           updateUsesBursts(x);
-           setDAC(x, RestingVoltage[x]);
-           if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
-            killChannel(x);
-           }
-         }
-         PPUSB.writeByte(allParamsValid); // Send confirm byte (0 if any parameter was out of range)
+          PPUSB.writeByte(allParamsValid); // Send confirm byte (0 if any parameter was out of range)
         } break;
         case OP_SEND_CURRENT_PARAMS: { // Op 93. Send all current parameters
           sendCurrentParams();
@@ -518,6 +558,103 @@ void HandleReadTimeout() {
   delayMicroseconds(2000000);
   write2Screen(CommanderString," Click for menu");
 }
+
+// Copies a complete parameter set from paramBuffer into the parameter arrays (op 92), by loading each output
+// channel in turn and then the trigger modes. The set must already have been through validateParamBuffer().
+//
+// This is deliberately separate from the USB read: it touches parameters that handler() also reads, and it is short
+// enough to run inside one timer cycle, which is what lets param sync mode load a set at a trial's onset. Keep it
+// free of anything that waits.
+void loadParamsFromBuffer() {
+  for (int x = 0; x < 4; x++) {
+    loadChannelParamsFromBuffer(paramBuffer, x);
+  }
+  memcpy(TriggerMode, paramBuffer + PARAM_BUFFER_TRIGGER_MODE_OFFSET, sizeof(TriggerMode));
+}
+
+// Copies one output channel's parameters out of a buffer holding an op 92 parameter set. The buffer holds the
+// parameters in the order they arrive on the wire, which is the order of the copies below, and is also the order
+// sendCurrentParams() writes them in. Each parameter array in it holds one value per output channel, so this takes
+// only this channel's value from each and steps over the rest. Both supported boards are little-endian, like the
+// wire format, so the multi-byte values need no rearranging. See /Firmware/PROTOCOL.md.
+//
+// This is the only description of the buffer's layout that the loading path has: loadParamsFromBuffer() above is a
+// loop over it, and param sync mode uses it to load one channel at a time. Trigger mode is not an output channel
+// parameter, so it is not copied here. validateParamBuffer() walks the same layout to range-check a set.
+void loadChannelParamsFromBuffer(const uint8_t *buffer, byte channel) {
+  const uint8_t *nextByte = buffer;
+  memcpy(&Phase1Duration[channel], nextByte + channel*sizeof(Phase1Duration[0]), sizeof(Phase1Duration[0])); nextByte += sizeof(Phase1Duration);
+  memcpy(&InterPhaseInterval[channel], nextByte + channel*sizeof(InterPhaseInterval[0]), sizeof(InterPhaseInterval[0])); nextByte += sizeof(InterPhaseInterval);
+  memcpy(&Phase2Duration[channel], nextByte + channel*sizeof(Phase2Duration[0]), sizeof(Phase2Duration[0])); nextByte += sizeof(Phase2Duration);
+  memcpy(&InterPulseInterval[channel], nextByte + channel*sizeof(InterPulseInterval[0]), sizeof(InterPulseInterval[0])); nextByte += sizeof(InterPulseInterval);
+  memcpy(&BurstDuration[channel], nextByte + channel*sizeof(BurstDuration[0]), sizeof(BurstDuration[0])); nextByte += sizeof(BurstDuration);
+  memcpy(&BurstInterval[channel], nextByte + channel*sizeof(BurstInterval[0]), sizeof(BurstInterval[0])); nextByte += sizeof(BurstInterval);
+  memcpy(&PulseTrainDuration[channel], nextByte + channel*sizeof(PulseTrainDuration[0]), sizeof(PulseTrainDuration[0])); nextByte += sizeof(PulseTrainDuration);
+  memcpy(&PulseTrainDelay[channel], nextByte + channel*sizeof(PulseTrainDelay[0]), sizeof(PulseTrainDelay[0])); nextByte += sizeof(PulseTrainDelay);
+  memcpy(&Phase1Voltage[channel], nextByte + channel*sizeof(Phase1Voltage[0]), sizeof(Phase1Voltage[0])); nextByte += sizeof(Phase1Voltage);
+  memcpy(&Phase2Voltage[channel], nextByte + channel*sizeof(Phase2Voltage[0]), sizeof(Phase2Voltage[0])); nextByte += sizeof(Phase2Voltage);
+  memcpy(&RestingVoltage[channel], nextByte + channel*sizeof(RestingVoltage[0]), sizeof(RestingVoltage[0])); nextByte += sizeof(RestingVoltage);
+  IsBiphasic[channel] = nextByte[channel]; nextByte += sizeof(IsBiphasic);
+  CustomTrainID[channel] = nextByte[channel]; nextByte += sizeof(CustomTrainID);
+  CustomTrainTarget[channel] = nextByte[channel]; nextByte += sizeof(CustomTrainTarget);
+  CustomTrainLoop[channel] = nextByte[channel]; nextByte += sizeof(CustomTrainLoop);
+  ContinuousLoopMode[channel] = nextByte[channel]; nextByte += sizeof(ContinuousLoopMode);
+  TriggerAddress[0][channel] = nextByte[channel]; // 8 bytes linking trigger channels to output channels, 4 per trigger channel
+  TriggerAddress[1][channel] = nextByte[channel + sizeof(TriggerAddress[0])];
+}
+
+// Loads the parameter set in paramBuffer and brings the device into line with it: UsesBursts is recomputed, the new
+// resting voltage is sent to the DAC, and a channel whose continuous loop mode was switched off stops. The set must
+// already have been through validateParamBuffer(). Op 92 calls this from loop() when no trigger channel is in param
+// sync mode. A param sync edge takes the other route, through startParamSync().
+void applyParamBuffer() {
+  for (int i = 0; i < 4; i++) {
+    ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i]; // Read before the buffer overwrites it
+  }
+  loadParamsFromBuffer();
+  for (int x = 0; x < 4; x++) {
+    updateUsesBursts(x);
+    setDAC(x, RestingVoltage[x]);
+    if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
+      killChannel(x);
+    }
+  }
+}
+
+#if (HARDWARE_VERSION > 2)
+  // Called by handler() on a rising edge of a trigger channel in param sync mode. The set op 92 left in paramBuffer
+  // is copied to syncedParamBuffer, so that a later op 92 can replace paramBuffer while channels are still waiting,
+  // and every output channel is marked as owing a load. loadWaitingParamSyncChannels() then loads the channels that
+  // are idle, which is usually all of them.
+  //
+  // Trigger mode is not an output channel parameter, and takes effect here: it is what a trigger line does, not part
+  // of a pulse train, and a set that leaves param sync mode has to be able to do so at the edge.
+  void startParamSync() {
+    memcpy(syncedParamBuffer, paramBuffer, PARAM_BUFFER_N_BYTES);
+    memcpy(TriggerMode, syncedParamBuffer + PARAM_BUFFER_TRIGGER_MODE_OFFSET, sizeof(TriggerMode));
+    paramSyncChannelsWaiting = 0x0F; // All four output channels
+    loadWaitingParamSyncChannels();
+  }
+
+  // Loads the synced parameter set into every waiting output channel that is not playing a pulse train, and leaves
+  // the others waiting. handler() calls this at a param sync edge and on every cycle afterwards while any channel is
+  // still waiting, so a channel takes its new parameters in the cycle its pulse train ends, before the next cycle
+  // can trigger it again. A channel in continuous loop mode has no train end, and waits until something stops it.
+  //
+  // Everything here is safe inside the timer callback: it neither waits nor touches the screen, the microSD card or
+  // the USB port, and setDAC() is called by handler() in any case. A waiting channel is idle, so its resting voltage
+  // can be sent without cutting a pulse short.
+  void loadWaitingParamSyncChannels() {
+    for (int x = 0; x < 4; x++) {
+      if (bitRead(paramSyncChannelsWaiting, x) && (StimulusStatus[x] == 0) && (PreStimulusStatus[x] == 0)) {
+        loadChannelParamsFromBuffer(syncedParamBuffer, x);
+        updateUsesBursts(x);
+        setDAC(x, RestingVoltage[x]);
+        bitClear(paramSyncChannelsWaiting, x);
+      }
+    }
+  }
+#endif
 
 void sendCurrentParams() {
     PPUSB.writeUint32Array(Phase1Duration, 4);

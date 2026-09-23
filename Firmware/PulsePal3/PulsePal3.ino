@@ -204,8 +204,19 @@ enum PulseStatusValue {
 enum TriggerModeValue {
   TRIGGER_MODE_NORMAL = 0,           // Low to high transitions start playback, but do not stop it
   TRIGGER_MODE_TOGGLE = 1,           // Low to high transitions start playback, or stop ongoing playback
-  TRIGGER_MODE_GATED = 2             // Low to high starts playback, high to low stops it
+  TRIGGER_MODE_GATED = 2,            // Low to high starts playback, high to low stops it
+  TRIGGER_MODE_PARAM_SYNC = 3        // Pulse Pal 3 only. Low to high loads the parameter set op 92 left in paramBuffer.
+                                     // The channel does not start or stop playback itself. See applyParamBuffer().
 };
+
+// The highest trigger mode this board accepts. Param sync is offered on Pulse Pal 3 only: its USB reads are DMA
+// backed, and the same approach in the Bpod firmware leaves the timer callback undisturbed. Whether a bulk USB
+// read on the Due's USB interface can do the same is untested, so Pulse Pal 2 keeps the original three modes.
+#if (HARDWARE_VERSION > 2)
+  #define MAX_TRIGGER_MODE TRIGGER_MODE_PARAM_SYNC
+#else
+  #define MAX_TRIGGER_MODE TRIGGER_MODE_GATED
+#endif
 
 // Values of LineTriggerEvent[]
 enum TriggerEventValue {
@@ -303,7 +314,39 @@ uint8_t CustomTrainLoop[4] = {0}; // if 0, custom stim plays once. If 1, custom 
 byte IsBiphasic[4] = {0}; // If 0, the pulse has only phase 1. If 1, phase 1 is followed by the inter-phase interval and phase 2
 byte ContinuousLoopMode[4] = {0}; // If true, the channel loops its programmed stimulus train continuously
 uint8_t TriggerAddress[2][4] = {0}; // This specifies which output channels get triggered by trigger channel 1 (row 1) or trigger channel 2 (row 2)
-uint8_t TriggerMode[2] = {0}; // Normal, toggle or pulse gated mode. See enum TriggerModeValue
+uint8_t TriggerMode[2] = {0}; // Normal, toggle, pulse gated or param sync mode. See enum TriggerModeValue
+
+// A complete parameter set, as it arrives from the PC in op 92. processUSBCommands() reads the op's 182 bytes into
+// this buffer with one call to PPUSB.readBlock(), and loadParamsFromBuffer() in USBOps.ino copies them into the
+// parameter arrays above. Keeping the two steps separate lets the copy happen at a chosen moment: with a trigger
+// channel in param sync mode, op 92 leaves the set here and handler() loads it on the next rising edge of that
+// channel, so the parameters of a trial can be sent during the trial before it and applied at its onset.
+#define PARAM_BUFFER_N_BYTES 182 // 8 uint32 arrays of 4, 3 uint16 arrays of 4, 5 byte arrays of 4, 8 + 2 trigger bytes
+uint8_t paramBuffer[PARAM_BUFFER_N_BYTES] = {0};
+static_assert(PARAM_BUFFER_N_BYTES == sizeof(Phase1Duration) + sizeof(InterPhaseInterval) + sizeof(Phase2Duration) +
+                                      sizeof(InterPulseInterval) + sizeof(BurstDuration) + sizeof(BurstInterval) +
+                                      sizeof(PulseTrainDuration) + sizeof(PulseTrainDelay) + sizeof(Phase1Voltage) +
+                                      sizeof(Phase2Voltage) + sizeof(RestingVoltage) + sizeof(IsBiphasic) +
+                                      sizeof(CustomTrainID) + sizeof(CustomTrainTarget) + sizeof(CustomTrainLoop) +
+                                      sizeof(ContinuousLoopMode) + sizeof(TriggerAddress) + sizeof(TriggerMode),
+              "paramBuffer must hold exactly one op 92 parameter set");
+#define PARAM_BUFFER_TRIGGER_MODE_OFFSET (PARAM_BUFFER_N_BYTES - sizeof(TriggerMode)) // Trigger mode is the last parameter in the set
+#if (HARDWARE_VERSION > 2)
+  // Set by op 92 when a trigger channel is in param sync mode, and cleared by handler() once a rising edge on that
+  // channel has loaded the buffer. It is set only after the whole set has been read, so a rising edge arriving while
+  // op 92 is still reading finds it false and loads nothing. Pulse Pal 2 has no param sync mode and no flag.
+  volatile boolean paramSyncPending = false;
+
+  // The parameter set a param sync edge committed to. paramBuffer is copied here at the edge, so that a later op 92
+  // can replace paramBuffer while output channels are still waiting for their pulse trains to end.
+  uint8_t syncedParamBuffer[PARAM_BUFFER_N_BYTES] = {0};
+
+  // One bit per output channel, set at a param sync edge for channels that still owe a load from syncedParamBuffer.
+  // A channel playing a pulse train at the edge keeps the parameters of that train, so that the train finishes the
+  // way it started, and takes the new parameters when it ends. Idle channels take them at the edge and clear their
+  // bit there. See startParamSync() and loadWaitingParamSyncChannels() in USBOps.ino.
+  volatile byte paramSyncChannelsWaiting = 0;
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------
 // Output channel parameter table

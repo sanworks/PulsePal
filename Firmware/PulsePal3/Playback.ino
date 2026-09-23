@@ -61,7 +61,13 @@ static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
 //  1. If any channel is playing: write DAC updates requested on the previous cycle, and abort all playback if the
 //     joystick button is pressed. The final DAC update after playback ends is written on the next idle cycle.
 //  2. Soft triggers scheduled from loop() (op 77 or joystick menu) become active.
-//  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent).
+//  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent). On Pulse Pal 3, a rising
+//     edge on a trigger channel in param sync mode takes the parameter set op 92 left in paramBuffer. Output
+//     channels that are idle take it at the edge; channels playing a pulse train finish that train on the
+//     parameters it started with, and take the new ones in the cycle it ends. Both happen before step 4, so an edge
+//     on the other trigger channel in the same cycle starts its trains with the new parameters, and a channel
+//     triggered after its train ended plays the whole of the next train with them. A param sync channel starts and
+//     stops nothing itself.
 //  4. For each output channel that is playing: stop it if a linked trigger channel in toggle mode went low to high,
 //     or a linked trigger channel in gated mode went high to low (unless the other trigger channel is also linked,
 //     gated and still high). For each channel that is not playing: start it if a linked trigger went low to high,
@@ -133,7 +139,26 @@ void handler(void) {
          }
          InputValuesLastCycle[x] = InputValues[x];
     }
-       
+
+    #if (HARDWARE_VERSION > 2)
+      // Take the parameter set that op 92 left waiting, if a trigger channel in param sync mode just went high
+      if (paramSyncPending) {
+        for (int y = 0; y < 2; y++) {
+          if ((TriggerMode[y] == TRIGGER_MODE_PARAM_SYNC) && (LineTriggerEvent[y] == TRIGGER_EVENT_LOW_TO_HIGH)) {
+            paramSyncPending = false;
+            startParamSync();
+            break; // The set may have changed TriggerMode, so this cycle starts at most one param sync
+          }
+        }
+      }
+      // Channels that were playing at the edge take their new parameters here, once their pulse train has ended.
+      // This runs before the trigger responses below, so a channel triggered after its train ended plays the whole
+      // of the next train with the new parameters.
+      if (paramSyncChannelsWaiting) {
+        loadWaitingParamSyncChannels();
+      }
+    #endif
+
     for (int x = 0; x < 4; x++) {
       byte KillChannel = 0;
        // If trigger channels are in toggle mode and a trigger arrived, or in gated mode and line is low, shut down any governed channels that are playing a pulse train
@@ -160,12 +185,20 @@ void handler(void) {
         
       } else {
        // Adjust StimulusStatus to reflect any new trigger events
-       if ((TriggerAddress[0][x] && (LineTriggerEvent[0] == TRIGGER_EVENT_LOW_TO_HIGH)) || SoftTriggered[x]) {
+       if ((TriggerAddress[0][x] && (LineTriggerEvent[0] == TRIGGER_EVENT_LOW_TO_HIGH)
+            #if (HARDWARE_VERSION > 2)
+              && (TriggerMode[0] != TRIGGER_MODE_PARAM_SYNC) // A param sync channel loads parameters and starts nothing
+            #endif
+            ) || SoftTriggered[x]) {
          if (StimulatingState == 0) {SystemTime = 0; StimulatingState = 2;}
          PreStimulusStatus[x] = 1; BurstStatus[x] = 1; PrePulseTrainTimestamps[x] = SystemTime; PulseStatus[x] = PULSE_IDLE; 
          SoftTriggered[x] = 0;
        }
-       if (TriggerAddress[1][x] && (LineTriggerEvent[1] == TRIGGER_EVENT_LOW_TO_HIGH)) {
+       if (TriggerAddress[1][x] && (LineTriggerEvent[1] == TRIGGER_EVENT_LOW_TO_HIGH)
+           #if (HARDWARE_VERSION > 2)
+             && (TriggerMode[1] != TRIGGER_MODE_PARAM_SYNC) // A param sync channel loads parameters and starts nothing
+           #endif
+           ) {
          if (StimulatingState == 0) {SystemTime = 0; StimulatingState = 2;}
          PreStimulusStatus[x] = 1; BurstStatus[x] = 1; PrePulseTrainTimestamps[x] = SystemTime; PulseStatus[x] = PULSE_IDLE;
        }

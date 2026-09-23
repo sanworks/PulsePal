@@ -322,7 +322,8 @@ class PulsePalGUI:
 
     _PULSE_TYPES = ("Monophasic", "Biphasic")
     _CUSTOM_TRAIN_TARGETS = ("Pulses", "Bursts")
-    _TRIGGER_MODES = ("Normal", "Toggle", "Pulse Gated")
+    _TRIGGER_MODES = ("Normal", "Toggle", "Pulse Gated", "Param Sync")
+    _PARAM_SYNC_MODE = 3  # Index of "Param Sync" above. Pulse Pal 3 only
 
     _DEFAULT_OUTPUT_PARAMS = {
         "is_biphasic": 0,
@@ -448,6 +449,11 @@ class PulsePalGUI:
 
         n_trains = getattr(device.info, "n_custom_pulse_trains", None) or 2
         self._n_custom_trains = int(n_trains)
+        # Param sync mode is offered by Pulse Pal 3 only
+        hardware_version = int(getattr(device.info, "hardware_version", 2) or 2)
+        self._trigger_modes = self._TRIGGER_MODES
+        if hardware_version < 3:
+            self._trigger_modes = self._TRIGGER_MODES[:self._PARAM_SYNC_MODE]
         self._custom_timestamps = [""] * self._n_custom_trains
         self._custom_voltages = [""] * self._n_custom_trains
         # The train the text boxes are showing, which is not always the
@@ -1210,11 +1216,9 @@ class PulsePalGUI:
             0,
             "Trigger Mode",
             lambda parent: self._make_combobox(
-                parent, self._TRIGGER_MODES, self._on_trigger_mode, width=12
+                parent, self._trigger_modes, self._on_trigger_mode, width=12
             ),
-            "Normal: TTL during pulse train ignored. Toggle: TTL during "
-            "pulse train stops train. Pulse Gated: Pulse train only runs "
-            "while trigger is high",
+            self._trigger_mode_tooltip(),
         )
 
         links = ttk.Frame(fields)
@@ -1582,6 +1586,21 @@ class PulsePalGUI:
         index = self._output_channel() - 1
         self._params["custom_train_loop"][index] = self._custom_loop_var.get()
 
+    def _trigger_mode_tooltip(self):
+        text = (
+            "Normal: TTL during pulse train ignored. Toggle: TTL during "
+            "pulse train stops train. Pulse Gated: Pulse train only runs "
+            "while trigger is high"
+        )
+        if len(self._trigger_modes) > self._PARAM_SYNC_MODE:
+            text += (
+                ". Param Sync: TTL starts and stops nothing. It loads the "
+                "program most recently uploaded, so the next trial's "
+                "program can be uploaded during the current trial and "
+                "applied the instant the next one starts"
+            )
+        return text
+
     def _on_trigger_mode(self):
         channel_index = self._trigger_channel() - 1
         self._trigger_mode[channel_index] = self._trigger_mode_box.current()
@@ -1687,15 +1706,51 @@ class PulsePalGUI:
         try:
             for name, values in self._params.items():
                 getattr(device, name)[1:5] = list(values)
+            # Captured before the assignment below overwrites the client's
+            # record of the modes the device was last told
+            device_modes = [int(value) for value in device.trigger_mode[1:3]]
             device.trigger_mode[1:3] = list(self._trigger_mode)
+            buffered = self._program_trigger_modes(device_modes, leaving=True)
             device.sync_to_device()
+            self._program_trigger_modes(device_modes, leaving=False)
             for train_id, times, voltages in custom_trains:
                 device.send_custom_pulse_train(train_id, times, voltages)
         except Exception as exc:
             self._show_error(f"Failed to load the program to the device:\n"
                              f"{exc}")
             return
-        self._set_status("Program Loaded to Device")
+        if buffered:
+            self._set_status("Program Buffered for Next Param Sync TTL")
+        else:
+            self._set_status("Program Loaded to Device")
+
+    def _program_trigger_modes(self, device_modes, leaving):
+        """Program the trigger modes that sync_to_device cannot carry.
+
+        set_trigger_param takes effect at once, while sync_to_device does
+        not once a channel is in param sync mode. So a channel leaving
+        param sync mode is programmed before the sync, which lets the sync
+        reach the device, and a channel entering it is programmed after, so
+        that this program is the one that loads and the next one is the one
+        that waits for a TTL. Every other mode change rides along in the
+        sync, as it always has.
+
+        device_modes is what the device was last told, and is updated in
+        place. Returns whether a channel is in param sync mode, which for
+        the call before the sync is whether the sync was buffered.
+        """
+        device = self._device
+        for channel in (1, 2):
+            new_mode = int(self._trigger_mode[channel - 1])
+            was_param_sync = device_modes[channel - 1] == self._PARAM_SYNC_MODE
+            if leaving:
+                send = was_param_sync and new_mode != self._PARAM_SYNC_MODE
+            else:
+                send = new_mode == self._PARAM_SYNC_MODE and not was_param_sync
+            if send:
+                device.set_trigger_param("trigger_mode", channel, new_mode)
+                device_modes[channel - 1] = new_mode
+        return self._PARAM_SYNC_MODE in device_modes
 
     def _store_train_boxes(self):
         """File what the text boxes hold, without validating it.
@@ -1809,6 +1864,12 @@ class PulsePalGUI:
             if len(trigger_mode) != 2:
                 raise ValueError(
                     "trigger_mode must have one value per trigger channel."
+                )
+            if any(not 0 <= mode < len(self._trigger_modes)
+                   for mode in trigger_mode):
+                # A program saved on Pulse Pal 3 can name Param Sync
+                raise ValueError(
+                    "trigger_mode names a mode this device does not have."
                 )
             timestamps = list(program.get("custom_train_timestamps", []))
             voltages = list(program.get("custom_train_voltages", []))
