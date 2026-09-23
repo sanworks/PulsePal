@@ -748,7 +748,9 @@ classdef PulsePalDevice < handle
             end
             nPulses = length(pulseTimes);
             if nPulses > obj.maxCustomPulses
-                error(['Error: Pulse Pal can only store ' num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
+                error(['Error: Attempted to send ' num2str(nPulses) ' pulses. Pulse Pal '... 
+                    num2str(obj.info.hardwareVersion) ' can only store '... 
+                    num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
             if sum(sum(rem(round(pulseTimes*1000000), obj.cyclePeriod*2))) > 0
                 error(['Non-zero time values for Pulse Pal must be multiples of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
