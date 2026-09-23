@@ -18,6 +18,9 @@ https://sites.google.com/site/pulsepalwiki/
 
 Code contributions are welcome! Please follow guidelines in CONTRIBUTING.md
 
+Developer documentation: AGENTS.md is the guide to this repository (for people and for AI coding agents),
+and Firmware/PROTOCOL.md documents the USB serial protocol.
+
 Preassembled Pulse Pals are available at:
 https://sanworks.io
 

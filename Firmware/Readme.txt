@@ -1,28 +1,31 @@
-Note: This folder contains firmware files that must be compiled and loaded to the device with Arduino.
-https://www.arduino.cc/en/software/#ide
-Support for boards and dependencies must be manually installed, per the code comments.
+This folder contains the Pulse Pal firmware. To load it onto a device you can either compile it
+yourself with Arduino (https://www.arduino.cc/en/software/#ide), or use a firmware loader that
+needs no Arduino setup.
 
-If you would prefer to skip that setup and load the firmware without using Arduino, there are two options:
+Loading firmware without Arduino:
 
-1. If Python is available on your system, a unified firmware loader for all Sanworks devices including Pulse Pal is provided at https://github.com/sanworks/Sanworks-FirmwareLoader
+1. With Python: the firmware loader for all Sanworks devices, including Pulse Pal, at
+   https://github.com/sanworks/Sanworks-FirmwareLoader
+2. With MATLAB: the firmware loading tool in /MATLAB/FirmwareLoader/
 
-2. If MATLAB is available on your system, you can use the firmware loading tool in /PulsePal/MATLAB/FirmwareLoader/
+Compiling it yourself: the board support and libraries must be installed first. They are listed
+at the top of PulsePal3/PulsePal3.ino, and in the "Building" section of PulsePal3/AGENTS.md.
 
-Folders:
+Folders and files:
 
 /PulsePal3
 The current firmware. It compiles for both Pulse Pal 2 (Arduino Due) and Pulse Pal 3 (Teensy 4.1),
-selected with the HARDWARE_VERSION macro at the top of PulsePal3.ino. See AGENTS.md in that folder
-for the code map, build instructions and the rules to follow when modifying the firmware.
+selected with the HARDWARE_VERSION macro at the top of PulsePal3.ino. AGENTS.md in that folder has
+the code map, build instructions and the rules to follow when changing the firmware.
 
 /Old
-Archived firmware for earlier hardware and earlier releases. These are kept for reference and are no
-longer developed.
+Archived firmware for earlier hardware and releases, kept for reference and no longer developed.
 
 /tools
-build_check.py compiles the firmware for both hardware versions, and can compare the compiled code
-with another git revision function by function, to confirm that an edit did not change behavior.
+build_check.py compiles the firmware for both hardware versions. It can also compare the compiled
+code with another git revision, function by function, to confirm that an edit did not change
+behavior.
 
 PROTOCOL.md
-The USB serial protocol used by the Python, MATLAB and C++ interfaces: op codes, parameter codes,
-the settings file layout, and the meaning of the confirm byte returned by the device.
+The USB serial protocol between the device and its Python, MATLAB and C++ clients: op codes,
+parameter codes, replies and the settings file layout.
