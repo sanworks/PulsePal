@@ -35,13 +35,14 @@ Every command from the PC is:
 
 ## Connecting
 
-The Python and MATLAB classes connect in this order:
+The Python, MATLAB and C++ classes connect in this order:
 
 1. Op 72 (handshake). The reply is `75` ('K') and the firmware version.
 2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
-3. Op 89, to show the client's name on the device's screen.
-4. On Pulse Pal 3: set both trigger modes to normal, with op 74 (Python) or op 91 (MATLAB),
-   so that a device left in [param sync mode](#param-sync-mode-pulse-pal-3-trigger-mode-3)
+3. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
+   class leaves this to the program, which calls `setClientIDString()`.
+4. On Pulse Pal 3: set both trigger modes to normal, with op 74 (Python) or op 91 (MATLAB and
+   C++), so that a device left in [param sync mode](#param-sync-mode-pulse-pal-3-trigger-mode-3)
    runs the next step instead of storing it.
 5. Op 92, to program the client's default parameters.
 
@@ -53,7 +54,8 @@ Ops marked "1 / 0" below reply with one byte:
 - **0**: the command was rejected, because a channel number, parameter code, data length or
   value was out of range for the connected device.
 
-The MATLAB and Python classes raise an error when they receive 0.
+The MATLAB and Python classes raise an error when they receive 0, and the C++ class returns
+false.
 
 When the firmware rejects a command, it discards the command's data so that the data is not
 read as the next command. If it cannot tell how long the data is (an unknown parameter
@@ -135,9 +137,9 @@ set, so only the most recent one is ever loaded. An op 92 whose data does not al
 not stored.
 
 **Only op 92 is delayed.** Ops 73, 74 and 91 program the device immediately, in param sync
-mode as in any other. In the clients, only `sync_to_device()` (Python) and `syncToDevice()`
-(MATLAB) store a set; `set_output_param()`, `set_trigger_param()` and their MATLAB
-equivalents take effect at once.
+mode as in any other. In the clients, only `sync_to_device()` (Python), `syncToDevice()`
+(MATLAB) and `syncAllParams()` (C++) store a set; `set_output_param()`,
+`set_trigger_param()` and their MATLAB and C++ equivalents take effect at once.
 
 **At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set.
 With nothing stored, it does nothing.
@@ -174,9 +176,9 @@ the mode cannot load a set sent long before. The routes are ops 73, 74 and 91, t
 menu, loading a settings file, and the default parameters loaded after a comm failure or an
 op 97 format.
 
-Both clients take both trigger channels out of param sync mode when they connect, before
-programming their default parameters. Otherwise a device left in the mode by an earlier
-session would store those defaults instead of running them.
+The Python, MATLAB and C++ classes take both trigger channels out of param sync mode when
+they connect, before programming their default parameters. Otherwise a device left in the
+mode by an earlier session would store those defaults instead of running them.
 
 ## Settings file
 

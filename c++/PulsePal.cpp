@@ -2,7 +2,7 @@
 ----------------------------------------------------------------------------
 
 This file is part of the Pulse Pal Project
-Copyright (C) 2016 Joshua I. Sanders, Sanworks LLC, NY, USA
+Copyright (C) 2026 Sanworks LLC, Rochester, NY, USA
 
 ----------------------------------------------------------------------------
 
@@ -19,52 +19,179 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 // Originally programmed by Josh Seigle as part of the Open Ephys GUI, <http://open-ephys.org>
-// Modified by Joshua Sanders where indicated in comments below)
-#include "stdafx.h"
-#include <vector>
-#include <stdio.h>
-#include <stdint.h>
-#include <math.h>
+// Updated for Pulse Pal 3 and firmware v22 by Sanworks LLC. See PulsePal.h for usage.
+//
+// Note on replies: ops 73, 74, 75, 76, 79, 82, 91, 92 and 95 reply with a confirm byte (1 = executed, 0 = rejected).
+// Each is read before the method returns. A confirm byte left unread would be taken as the reply to the next
+// command, and every reply after that would be read one command late.
+
 #include "PulsePal.h"
 
-#ifdef _WINDOWS_
-#include <windows.h>
-#else
-#include <unistd.h>
-#define Sleep(x) usleep((x)*1000)
-#endif
+#include <cmath>
+#include <iostream>
+#include <sstream>
+#include <vector>
 
-#define CycleFreq (uint32_t) 20000 // Cycle frequency
-#define MAX_Cycles (uint32_t) 36000000
-#define NEWLINE 0xA
-#define RETURN 0xD
-#define makeLong(msb, byte2, byte3, lsb) ((msb << 24) | (byte2 << 16) | (byte3 << 8) | (lsb)) //JS  2/1/2014
+static const uint8_t OpMenuByte = 213; // First byte of every command
+static const uint8_t HandshakeReply = 75; // 'K'
+static const uint32_t OldestFirmwareSupported = 21;
+static const uint32_t CurrentFirmwareVersion = 22;
 
-PulsePal::PulsePal()
+// How long to wait for a reply. The device replies as soon as it has read and executed a command, which takes
+// milliseconds. A missing reply usually means that the device is showing COMM. FAILURE! (see readConfirm()).
+static const unsigned int ReplyTimeoutMs = 2000;
+
+// Parameter ranges, as in the MATLAB class
+static const double MaxVoltage = 10;         // Volts. Voltages are -MaxVoltage to +MaxVoltage
+static const double MinPulseTime = 0.0001;   // Seconds. For phase durations, inter-pulse interval and train duration
+static const double MaxTime = 3600;          // Seconds
+static const uint16_t DACMax = 65535;        // DAC code for +10V. 0 is -10V
+static const uint8_t TriggerModeParamSync = 3; // Pulse Pal 3 only
+
+// Time parameters in the order ops 73 and 92 send them
+static const uint8_t TimeParamCodes[8] = {4, 5, 6, 7, 8, 9, 10, 11};
+
+// Number of bytes in a parameter's value in op 74, as in paramValueBytes() in the firmware
+static uint8_t paramValueBytes(uint8_t paramCode)
+{
+    if ((paramCode == 2) || (paramCode == 3) || (paramCode == 17)) {
+        return 2; // Voltages, as DAC codes
+    }
+    if ((paramCode >= 4) && (paramCode <= 11)) {
+        return 4; // Times, in hardware timer cycles
+    }
+    return 1;
+}
+
+static bool isTimeParam(uint8_t paramCode)
+{
+    return (paramCode >= 4) && (paramCode <= 11);
+}
+
+static bool isVoltageParam(uint8_t paramCode)
+{
+    return (paramCode == 2) || (paramCode == 3) || (paramCode == 17);
+}
+
+// Field name for a parameter code, for error messages
+static const char* paramName(uint8_t paramCode)
+{
+    switch (paramCode) {
+        case 1: return "isBiphasic";
+        case 2: return "phase1Voltage";
+        case 3: return "phase2Voltage";
+        case 4: return "phase1Duration";
+        case 5: return "interPhaseInterval";
+        case 6: return "phase2Duration";
+        case 7: return "interPulseInterval";
+        case 8: return "burstDuration";
+        case 9: return "interBurstInterval";
+        case 10: return "pulseTrainDuration";
+        case 11: return "pulseTrainDelay";
+        case 12: return "linkTriggerChannel1";
+        case 13: return "linkTriggerChannel2";
+        case 14: return "customTrainID";
+        case 15: return "customTrainTarget";
+        case 16: return "customTrainLoop";
+        case 17: return "restingVoltage";
+        case 18: return "continuous loop";
+        case 128: return "triggerMode";
+    }
+    return "unknown parameter";
+}
+
+// Value of an output parameter in the local copy, by parameter code
+static float outputParamValue(const PulsePal::OutputParams& params, uint8_t paramCode)
+{
+    switch (paramCode) {
+        case 1: return (float)params.isBiphasic;
+        case 2: return params.phase1Voltage;
+        case 3: return params.phase2Voltage;
+        case 4: return params.phase1Duration;
+        case 5: return params.interPhaseInterval;
+        case 6: return params.phase2Duration;
+        case 7: return params.interPulseInterval;
+        case 8: return params.burstDuration;
+        case 9: return params.interBurstInterval;
+        case 10: return params.pulseTrainDuration;
+        case 11: return params.pulseTrainDelay;
+        case 12: return (float)params.linkTriggerChannel1;
+        case 13: return (float)params.linkTriggerChannel2;
+        case 14: return (float)params.customTrainID;
+        case 15: return (float)params.customTrainTarget;
+        case 16: return (float)params.customTrainLoop;
+        case 17: return params.restingVoltage;
+    }
+    return 0;
+}
+
+// Multi-byte values are little-endian
+static void appendUint16(std::vector<uint8_t>& message, uint16_t value)
+{
+    message.push_back((uint8_t)(value));
+    message.push_back((uint8_t)(value >> 8));
+}
+
+static void appendUint32(std::vector<uint8_t>& message, uint32_t value)
+{
+    message.push_back((uint8_t)(value));
+    message.push_back((uint8_t)(value >> 8));
+    message.push_back((uint8_t)(value >> 16));
+    message.push_back((uint8_t)(value >> 24));
+}
+
+// Rounds to the nearest integer, and a value exactly halfway between two integers to the even one, as Python's
+// round() does, so that this class sends the same DAC codes and cycle counts as the Python class. Halfway values
+// are common: +4V is DAC code 45874.5. (MATLAB's round() takes the odd one in that case, 1 DAC code = 0.3mV higher.)
+static double roundHalfEven(double value)
+{
+    double rounded = std::floor(value + 0.5);
+    if (((rounded - value) == 0.5) && (std::fmod(rounded, 2.0) != 0)) {
+        rounded -= 1;
+    }
+    return rounded;
+}
+
+static uint32_t readUint32(const uint8_t* bytes)
+{
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+PulsePal::PulsePal() :
+    serial(NULL), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0),
+    cycleFrequency(20000), nCustomTrains(0), maxCustomPulses(0)
+{
+    ownedSerial = new USBSerialPort();
+    serial = ownedSerial;
+    setDefaultParameters();
+}
+
+PulsePal::PulsePal(SerialPort* port) :
+    serial(port), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0),
+    cycleFrequency(20000), nCustomTrains(0), maxCustomPulses(0)
 {
     setDefaultParameters();
-        
 }
 
 PulsePal::~PulsePal()
 {
-    disconnectClient();
-    serial.close();
+    end();
+    delete ownedSerial;
 }
 
 void PulsePal::setDefaultParameters()
 {
-
-    for (int i = 1; i < 5; i++)
+    for (int i = 0; i < 5; i++)
     {
+        // Channel 0 is unused, but is set to the defaults too so that it is never uninitialized
         currentOutputParams[i].isBiphasic = 0;
         currentOutputParams[i].phase1Voltage = 5;
         currentOutputParams[i].phase2Voltage = -5;
-		currentOutputParams[i].restingVoltage = 0;
-        currentOutputParams[i].phase1Duration = 0.001;
-        currentOutputParams[i].interPhaseInterval = 0.001;
-        currentOutputParams[i].phase2Duration = 0.001;
-        currentOutputParams[i].interPulseInterval = 0.01;
+        currentOutputParams[i].restingVoltage = 0;
+        currentOutputParams[i].phase1Duration = 0.001f;
+        currentOutputParams[i].interPhaseInterval = 0.001f;
+        currentOutputParams[i].phase2Duration = 0.001f;
+        currentOutputParams[i].interPulseInterval = 0.01f;
         currentOutputParams[i].burstDuration = 0;
         currentOutputParams[i].interBurstInterval = 0;
         currentOutputParams[i].pulseTrainDuration = 1;
@@ -74,534 +201,723 @@ void PulsePal::setDefaultParameters()
         currentOutputParams[i].customTrainID = 0;
         currentOutputParams[i].customTrainTarget = 0;
         currentOutputParams[i].customTrainLoop = 0;
+        continuousLoop[i] = 0;
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        currentInputParams[i].triggerMode = 0;
     }
 }
 
-void PulsePal::initialize(std::string portString)
+bool PulsePal::initialize(std::string portString)
 {
+    end(); // In case this object is already connected
+    firmwareVersion = 0;
+    hardwareVersion = 0;
 
-    std::cout << "Searching for Pulse Pal..." << std::endl;
+    if (!serial->open(portString)) {
+        reportError(serial->lastError() + ". Check the port name, and that no other program is using the port.");
+        return false;
+    }
+    serial->discardInput(); // Anything left from an earlier session would be read as the handshake reply
 
+    // Op 72: handshake. The reply is 'K', then the firmware version (uint32)
+    const uint8_t handshake[2] = {OpMenuByte, OP_HANDSHAKE};
+    uint8_t reply[5] = {0};
+    if (!serial->write(handshake, 2) || (serial->read(reply, 5, ReplyTimeoutMs) < 5) || (reply[0] != HandshakeReply)) {
+        reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal.");
+        serial->close();
+        return false;
+    }
+    uint32_t version = readUint32(reply + 1);
+    std::ostringstream versionError;
+    if (version < 20) {
+        versionError << "Pulse Pal 1 was found on port " << portString << ". Use the C++ class in /c++/legacy/.";
+    } else if (version < OldestFirmwareSupported) {
+        versionError << "Pulse Pal firmware v" << version << " was found on port " << portString << ". Please update "
+                     << "the firmware: https://sites.google.com/site/pulsepalwiki/updating-firmware";
+    } else if (version > CurrentFirmwareVersion) {
+        versionError << "Pulse Pal firmware v" << version << " was found on port " << portString << ". This C++ class "
+                     << "supports firmware up to v" << CurrentFirmwareVersion << ". Please update it, or downgrade "
+                     << "the firmware to v" << CurrentFirmwareVersion << ".";
+    }
+    if (!versionError.str().empty()) {
+        reportError(versionError.str());
+        serial->close();
+        return false;
+    }
+    if (version < CurrentFirmwareVersion) {
+        std::cout << "PulsePal: Firmware v" << version << " detected. This firmware is supported. Update to v"
+                  << CurrentFirmwareVersion << " is available." << std::endl;
+    }
 
-    //
-    // lsusb shows Device 104: ID 1eaf:0004
-    // updated udev rules file, but still need to run as root -- no idea why
-    //
-    // try this instead: sudo chmod o+rw /dev/ttyACM0
-    //
-    // works fine, but you have to re-do it every time
-    //
+    // Op 94: hardware version, timer period (us, uint32), number of custom trains, maximum pulses per train (uint32).
+    // Firmware v21 does not have op 94, and runs only on Pulse Pal 2.
+    if (version > 21) {
+        const uint8_t request[2] = {OpMenuByte, OP_SEND_HARDWARE_INFO};
+        uint8_t info[10] = {0};
+        if (!serial->write(request, 2) || (serial->read(info, 10, ReplyTimeoutMs) < 10)) {
+            reportError("Pulse Pal on port " + portString + " did not return its hardware information.");
+            serial->close();
+            return false;
+        }
+        uint32_t cyclePeriod = readUint32(info + 1);
+        if (cyclePeriod == 0) {
+            reportError("Pulse Pal on port " + portString + " reported a timer period of 0.");
+            serial->close();
+            return false;
+        }
+        hardwareVersion = info[0];
+        cycleFrequency = 1000000.0 / cyclePeriod;
+        nCustomTrains = info[5];
+        maxCustomPulses = readUint32(info + 6);
+    } else {
+        hardwareVersion = 2;
+        cycleFrequency = 20000;
+        nCustomTrains = 2;
+        maxCustomPulses = 5000;
+    }
+    firmwareVersion = version;
+    connected = true;
 
-   vector<ofSerialDeviceInfo> devices = serial.getDeviceList();
-   uint8_t nDevices = devices.size();
-   bool foundDevice = false;
-   bool foundDeviceIndex = 0;
-   uint8_t deviceIndex = 0;
-   while ((!foundDevice) && (deviceIndex < nDevices)){
-	   string name = devices[deviceIndex].getDeviceName();
-	   if (name == portString) {
-		   foundDevice = true;
-		   foundDeviceIndex = deviceIndex;
-	   }
-	   deviceIndex++;
-   }
-   if (foundDevice) {
-	   int id = devices[foundDeviceIndex].getDeviceID();
-	   string path = devices[foundDeviceIndex].getDevicePath();
-	   string name = devices[foundDeviceIndex].getDeviceName();
-	   serial.setup(id, 115200);
-	   uint8_t responseBytes[5] = { 0 };
-	   uint8_t handshakeMessage[2] = { 213, 72 };
-	   serial.writeBytes(handshakeMessage, 2);
-	   Sleep(100);
-	   serial.readBytes(responseBytes, 5);
-	   if (responseBytes[0] == 75) {
-		   firmwareVersion = makeLong(responseBytes[4], responseBytes[3], responseBytes[2], responseBytes[1]);
-		   if (firmwareVersion < 20) {
-			   std::cout << "Pulse Pal 1 was found on port " << portString << "." << std::endl;
-		   }
-		   else if (firmwareVersion < 40) {
-			   std::cout << "Pulse Pal 2 was found on port " << portString << "." << std::endl;
-		   } else {
-			   std::cout << "Unknown firmware version returned. Please update your Pulse Pal software." << std::endl;
-		   }
-	   } else {
-		   std::cout << "The device on port " << portString << " returned an unexpected handshake byte. It may not be a Pulse Pal." << std::endl;
-	   }
-   } else {
-	   std::cout << "Error: Could not find a device on port " << portString << "." << std::endl;
-   }
-    
+    // Program the defaults, so that the device and the local copy of its parameters agree
+    setDefaultParameters();
+    if (hardwareVersion > 2) {
+        // A device left in param sync mode by an earlier session would store the syncAllParams() below instead of
+        // applying it, and keep its old parameters until a TTL arrived. Op 91 is not deferred that way, so it takes
+        // both trigger channels out of param sync mode first. See "Param sync mode" in /Firmware/PROTOCOL.md.
+        const uint8_t normalMode[5] = {OpMenuByte, OP_PROGRAM_PARAM_ALL_CHANNELS, PARAM_TRIGGER_MODE, 0, 0};
+        if (!sendCommand(normalMode, 5, "initialize()") || !readConfirm("initialize()")) {
+            end();
+            return false;
+        }
+    }
+    if (!syncAllParams()) {
+        end();
+        return false;
+    }
+    return true;
 }
 
 void PulsePal::end()
 {
-	disconnectClient();
-	serial.close();
+    if (connected) {
+        disconnectClient();
+    }
+    serial->close();
+    connected = false;
 }
 
-uint32_t PulsePal::getFirmwareVersion() // JS 1/30/2014
+uint32_t PulsePal::getFirmwareVersion()
 {
     return firmwareVersion;
 }
 
-void PulsePal::setBiphasic(uint8_t channel, bool isBiphasic)
+uint32_t PulsePal::getHardwareVersion()
 {
-    uint8_t command = 0;
+    return hardwareVersion;
+}
 
-    if (isBiphasic)
-    {
-        command = 1;
+void PulsePal::disconnectClient()
+{
+    if (!connected) {
+        return;
     }
-
-    program(channel, 1, command);
-    PulsePal::currentOutputParams[channel].isBiphasic = command; //JS  2/1/2014 (Added this for all single-item programming functions)
+    const uint8_t message[2] = {OpMenuByte, OP_DISCONNECT};
+    sendCommand(message, 2, "disconnectClient()");
 }
 
-void PulsePal::setPhase1Voltage(uint8_t channel, float voltage)
+bool PulsePal::setBiphasic(uint8_t channel, bool isBiphasic)
 {
-	if (firmwareVersion < 20) {
-		program(channel, 2, voltageToByte(voltage));
-	}
-	else {
-		program(channel, 2, voltageToInt16(voltage));
-	}
-    PulsePal::currentOutputParams[channel].phase1Voltage = voltage;
+    uint8_t command = isBiphasic ? 1 : 0;
+    if (!setOutputParam(channel, PARAM_IS_BIPHASIC, command, "setBiphasic()")) {
+        return false;
+    }
+    currentOutputParams[channel].isBiphasic = command;
+    return true;
 }
 
-void PulsePal::setPhase2Voltage(uint8_t channel, float voltage)
+bool PulsePal::setPhase1Voltage(uint8_t channel, float voltage)
 {
-	if (firmwareVersion < 20) {
-		program(channel, 3, voltageToByte(voltage));
-	}
-	else {
-		program(channel, 3, voltageToInt16(voltage));
-	}
-    PulsePal::currentOutputParams[channel].phase2Voltage = voltage;
+    if (!setOutputParam(channel, PARAM_PHASE1_VOLTAGE, voltage, "setPhase1Voltage()")) {
+        return false;
+    }
+    currentOutputParams[channel].phase1Voltage = voltage;
+    return true;
 }
 
-void PulsePal::setRestingVoltage(uint8_t channel, float voltage)
+bool PulsePal::setPhase2Voltage(uint8_t channel, float voltage)
 {
-	if (firmwareVersion < 20) {
-		program(channel, 17, voltageToByte(voltage));
-	}
-	else {
-		program(channel, 17, voltageToInt16(voltage));
-	}
-	PulsePal::currentOutputParams[channel].restingVoltage = voltage;
+    if (!setOutputParam(channel, PARAM_PHASE2_VOLTAGE, voltage, "setPhase2Voltage()")) {
+        return false;
+    }
+    currentOutputParams[channel].phase2Voltage = voltage;
+    return true;
 }
 
-void PulsePal::setPhase1Duration(uint8_t channel, float timeInSeconds)
+bool PulsePal::setRestingVoltage(uint8_t channel, float voltage)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq); //JS  2/1/2014
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 4, timeInCycles);
-    PulsePal::currentOutputParams[channel].phase1Duration = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_RESTING_VOLTAGE, voltage, "setRestingVoltage()")) {
+        return false;
+    }
+    currentOutputParams[channel].restingVoltage = voltage;
+    return true;
 }
 
-void PulsePal::setInterPhaseInterval(uint8_t channel, float timeInSeconds)
+bool PulsePal::setPhase1Duration(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 5, timeInCycles);
-    PulsePal::currentOutputParams[channel].interPhaseInterval = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_PHASE1_DURATION, timeInSeconds, "setPhase1Duration()")) {
+        return false;
+    }
+    currentOutputParams[channel].phase1Duration = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setPhase2Duration(uint8_t channel, float timeInSeconds)
+bool PulsePal::setInterPhaseInterval(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 6, timeInCycles);
-    PulsePal::currentOutputParams[channel].phase2Duration = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_INTER_PHASE_INTERVAL, timeInSeconds, "setInterPhaseInterval()")) {
+        return false;
+    }
+    currentOutputParams[channel].interPhaseInterval = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setInterPulseInterval(uint8_t channel, float timeInSeconds)
+bool PulsePal::setPhase2Duration(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 7, timeInCycles);
-    PulsePal::currentOutputParams[channel].interPhaseInterval = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_PHASE2_DURATION, timeInSeconds, "setPhase2Duration()")) {
+        return false;
+    }
+    currentOutputParams[channel].phase2Duration = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setBurstDuration(uint8_t channel, float timeInSeconds)
+bool PulsePal::setInterPulseInterval(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 0, MAX_Cycles);
-    program(channel, 8, timeInCycles);
-    PulsePal::currentOutputParams[channel].burstDuration = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_INTER_PULSE_INTERVAL, timeInSeconds, "setInterPulseInterval()")) {
+        return false;
+    }
+    currentOutputParams[channel].interPulseInterval = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setBurstInterval(uint8_t channel, float timeInSeconds)
+bool PulsePal::setBurstDuration(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 0, MAX_Cycles);
-    program(channel, 9, timeInCycles);
-    PulsePal::currentOutputParams[channel].interBurstInterval = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_BURST_DURATION, timeInSeconds, "setBurstDuration()")) {
+        return false;
+    }
+    currentOutputParams[channel].burstDuration = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setPulseTrainDuration(uint8_t channel, float timeInSeconds)
+bool PulsePal::setBurstInterval(uint8_t channel, float timeInSeconds)
 {
-	uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 10, timeInCycles);
-    PulsePal::currentOutputParams[channel].pulseTrainDuration = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_BURST_INTERVAL, timeInSeconds, "setBurstInterval()")) {
+        return false;
+    }
+    currentOutputParams[channel].interBurstInterval = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setPulseTrainDelay(uint8_t channel, float timeInSeconds)
+bool PulsePal::setPulseTrainDuration(uint8_t channel, float timeInSeconds)
 {
-    uint32_t timeInCycles = (uint32_t)(timeInSeconds * CycleFreq);
-    constrain(&timeInCycles, 1, MAX_Cycles);
-    program(channel, 11, timeInCycles);
-    PulsePal::currentOutputParams[channel].pulseTrainDelay = timeInSeconds;
+    if (!setOutputParam(channel, PARAM_PULSE_TRAIN_DURATION, timeInSeconds, "setPulseTrainDuration()")) {
+        return false;
+    }
+    currentOutputParams[channel].pulseTrainDuration = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setTrigger1Link(uint8_t channel, uint8_t link_state) // JS 1/30/2014
+bool PulsePal::setPulseTrainDelay(uint8_t channel, float timeInSeconds)
 {
-    program(channel, 12, link_state);
-    PulsePal::currentOutputParams[channel].linkTriggerChannel1 = link_state;
-}
-void PulsePal::setTrigger2Link(uint8_t channel, uint8_t link_state) // JS 1/30/2014
-{
-    program(channel, 13, link_state);
-    PulsePal::currentOutputParams[channel].linkTriggerChannel2 = link_state;
-}
-void PulsePal::setCustomTrainID(uint8_t channel, uint8_t ID) // JS 1/30/2014
-{
-    program(channel, 14, ID);
-    PulsePal::currentOutputParams[channel].customTrainID = ID;
-}
-void PulsePal::setCustomTrainTarget(uint8_t channel, uint8_t target) // JS 1/30/2014
-{
-    program(channel, 15, target);
-    PulsePal::currentOutputParams[channel].customTrainTarget = target;
-}
-void PulsePal::setCustomTrainLoop(uint8_t channel, uint8_t loop_state) // JS 1/30/2014
-{
-    program(channel, 16, loop_state);
-    PulsePal::currentOutputParams[channel].customTrainLoop = loop_state;
+    if (!setOutputParam(channel, PARAM_PULSE_TRAIN_DELAY, timeInSeconds, "setPulseTrainDelay()")) {
+        return false;
+    }
+    currentOutputParams[channel].pulseTrainDelay = timeInSeconds;
+    return true;
 }
 
-void PulsePal::setTriggerMode(uint8_t channel, uint8_t mode) // JS 1/30/2014
+bool PulsePal::setTrigger1Link(uint8_t channel, uint8_t link_state)
 {
-    program(channel, 128, mode);
-    PulsePal::currentInputParams[channel].triggerMode = mode;
+    if (!setOutputParam(channel, PARAM_LINK_TRIGGER1, link_state, "setTrigger1Link()")) {
+        return false;
+    }
+    currentOutputParams[channel].linkTriggerChannel1 = link_state;
+    return true;
 }
 
-
-void PulsePal::program(uint8_t channel, uint8_t paramCode, uint32_t paramValue)
+bool PulsePal::setTrigger2Link(uint8_t channel, uint8_t link_state)
 {
-    //std::cout << "sending 32-bit message" << std::endl;
-    uint8_t message[8] = {213, 74, paramCode, channel, 0, 0, 0, 0};
-    // make sure byte order is little-endian:
-    message[4] = (paramValue & 0xff);
-    message[5] = (paramValue & 0xff00) >> 8;
-    message[6] = (paramValue & 0xff0000) >> 16;
-    message[7] = (paramValue & 0xff00000) >> 24;
-    serial.writeBytes(message, 8);
-    //std::cout << "Message 2: " << (int) message2[0] << " " << (int) message2[1] << " " << (int) message2[2] <<  " " << (int) message2[3] << (int) message2[4] << (int) message2[5] << (int) message2[6] << (int) message2[7] << std::endl;
+    if (!setOutputParam(channel, PARAM_LINK_TRIGGER2, link_state, "setTrigger2Link()")) {
+        return false;
+    }
+    currentOutputParams[channel].linkTriggerChannel2 = link_state;
+    return true;
 }
 
-void PulsePal::program(uint8_t channel, uint8_t paramCode, uint16_t paramValue)
+bool PulsePal::setCustomTrainID(uint8_t channel, uint8_t ID)
 {
-	uint8_t message[6] = { 213, 74, paramCode, channel, 0, 0 };
-	// make sure byte order is little-endian:
-	message[4] = (paramValue & 0xff);
-	message[5] = (paramValue & 0xff00) >> 8;
-	serial.writeBytes(message, 6);
+    if (!setOutputParam(channel, PARAM_CUSTOM_TRAIN_ID, ID, "setCustomTrainID()")) {
+        return false;
+    }
+    currentOutputParams[channel].customTrainID = ID;
+    return true;
 }
 
-
-void PulsePal::program(uint8_t channel, uint8_t paramCode, uint8_t paramValue)
+bool PulsePal::setCustomTrainTarget(uint8_t channel, uint8_t target)
 {
-    uint8_t message[5] = {213, 74, paramCode, channel, paramValue };
-    serial.writeBytes(message, 5);
+    if (!setOutputParam(channel, PARAM_CUSTOM_TRAIN_TARGET, target, "setCustomTrainTarget()")) {
+        return false;
+    }
+    currentOutputParams[channel].customTrainTarget = target;
+    return true;
 }
 
-
-
-void PulsePal::triggerChannel(uint8_t chan)
+bool PulsePal::setCustomTrainLoop(uint8_t channel, uint8_t loop_state)
 {
-    const uint8_t code = 1 << (chan - 1);
-
-    uint8_t bytesToWrite[3] = {213, 77, code};
-
-    serial.writeBytes(bytesToWrite, 3);
+    if (!setOutputParam(channel, PARAM_CUSTOM_TRAIN_LOOP, loop_state, "setCustomTrainLoop()")) {
+        return false;
+    }
+    currentOutputParams[channel].customTrainLoop = loop_state;
+    return true;
 }
 
-void PulsePal::triggerChannels(uint8_t channel1, uint8_t channel2, uint8_t channel3, uint8_t channel4) // JS 1/30/2014
+bool PulsePal::setTriggerMode(uint8_t channel, uint8_t mode)
 {
+    const char* context = "setTriggerMode()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+    if ((channel < 1) || (channel > 2)) {
+        std::ostringstream error;
+        error << context << ": trigger channel " << (int)channel << " does not exist. Use 1 or 2.";
+        reportError(error.str());
+        return false;
+    }
+    if (!checkParam(PARAM_TRIGGER_MODE, mode, channel, context) || !program(channel, PARAM_TRIGGER_MODE, mode, context)) {
+        return false;
+    }
+    currentInputParams[channel].triggerMode = mode;
+    return true;
+}
+
+bool PulsePal::triggerChannel(uint8_t channel)
+{
+    const char* context = "triggerChannel()";
+    if (!checkConnected(context) || !checkOutputChannel(channel, context)) {
+        return false;
+    }
+    // Op 77. One bit per output channel (bit 0 = channel 1)
+    const uint8_t message[3] = {OpMenuByte, OP_SOFT_TRIGGER, (uint8_t)(1 << (channel - 1))};
+    return sendCommand(message, 3, context);
+}
+
+bool PulsePal::triggerChannels(uint8_t channel1, uint8_t channel2, uint8_t channel3, uint8_t channel4)
+{
+    const char* context = "triggerChannels()";
+    if (!checkConnected(context)) {
+        return false;
+    }
     uint8_t code = 0;
-    code = code + 1 * channel1;
-    code = code + 2 * channel2;
-    code = code + 4 * channel3;
-    code = code + 8 * channel4;
-
-    uint8_t bytesToWrite[3] = {213, 77, code };
-
-    serial.writeBytes(bytesToWrite, 3);
+    code |= (channel1 != 0) ? 1 : 0;
+    code |= (channel2 != 0) ? 2 : 0;
+    code |= (channel3 != 0) ? 4 : 0;
+    code |= (channel4 != 0) ? 8 : 0;
+    const uint8_t message[3] = {OpMenuByte, OP_SOFT_TRIGGER, code};
+    return sendCommand(message, 3, context);
 }
 
-void PulsePal::updateDisplay(string line1, string line2)
+bool PulsePal::updateDisplay(const std::string& line1, const std::string& line2)
 {
-    string Prefix;
-    string Message;
-    Message.append(line1);
-    Message += 254;
-    Message.append(line2);
-	Prefix += 213;
-    Prefix += 78;
-    Prefix += Message.size();
-    Prefix.append(Message);
-    serial.writeBytes((unsigned char*)Prefix.data(), Prefix.size());
+    const char* context = "updateDisplay()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+    // Op 78: length byte, then the characters. A character of 254 moves to the second line.
+    size_t messageLength = line1.size() + 1 + line2.size();
+    if (messageLength > 255) {
+        reportError(std::string(context) + ": the two lines are too long. They must total 254 characters or fewer.");
+        return false;
+    }
+    std::vector<uint8_t> message;
+    message.push_back(OpMenuByte);
+    message.push_back(OP_DISPLAY_MESSAGE);
+    message.push_back((uint8_t)messageLength);
+    message.insert(message.end(), line1.begin(), line1.end());
+    message.push_back(254);
+    message.insert(message.end(), line2.begin(), line2.end());
+    return sendCommand(message.data(), message.size(), context);
 }
 
-void PulsePal::setClientIDString(string idString)
+bool PulsePal::setClientIDString(const std::string& idString)
 {
-	string Prefix;
-	Prefix += 213;
-	Prefix += 89;
-	int mSize = idString.size();
-	if (mSize == 6) {
-		Prefix.append(idString);
-		serial.writeBytes((unsigned char*)Prefix.data(), Prefix.size());
-	}
-	else {
-		std::cout << "ClientID must be 6 characters. ClientID NOT set." << std::endl;
-	}
+    const char* context = "setClientIDString()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+    if (idString.size() != 6) {
+        reportError(std::string(context) + ": the client ID must be 6 characters. Client ID NOT set.");
+        return false;
+    }
+    std::vector<uint8_t> message;
+    message.push_back(OpMenuByte);
+    message.push_back(OP_SET_CLIENT_NAME);
+    message.insert(message.end(), idString.begin(), idString.end());
+    return sendCommand(message.data(), message.size(), context);
 }
 
-void PulsePal::setFixedVoltage(uint8_t channel, float voltage) // JS 1/30/2014
+bool PulsePal::setFixedVoltage(uint8_t channel, float voltage)
 {
-	if (firmwareVersion < 20) {
-		uint8_t voltageByte = 0;
-		voltageByte = voltageToByte(voltage);
-		uint8_t message1[4] = { 213, 79, channel, voltageByte };
-		serial.writeBytes(message1, 4);
-	} else {
-		uint16_t voltageBytes = 0;
-		voltageBytes = voltageToInt16(voltage);
-		uint8_t voltageByte2 = (uint8_t)(voltageBytes);
-		uint8_t voltageByte1 = (uint8_t)(voltageBytes >> 8);
-		uint8_t message1[5] = { 213, 79, channel, voltageByte2, voltageByte1 };
-		serial.writeBytes(message1, 5);
-	}
+    const char* context = "setFixedVoltage()";
+    if (!checkConnected(context) || !checkOutputChannel(channel, context)) {
+        return false;
+    }
+    if (!((voltage >= -MaxVoltage) && (voltage <= MaxVoltage))) { // Written this way to also reject NaN
+        std::ostringstream error;
+        error << context << ": the voltage was " << voltage << " V. It must be -10 to 10 V.";
+        reportError(error.str());
+        return false;
+    }
+    uint16_t voltageBits = voltageToInt16(voltage);
+    const uint8_t message[5] = {OpMenuByte, OP_SET_FIXED_VOLTAGE, channel, (uint8_t)(voltageBits), (uint8_t)(voltageBits >> 8)};
+    return sendCommand(message, 5, context) && readConfirm(context);
 }
 
-void PulsePal::abortPulseTrains() // JS 1/30/2014
+bool PulsePal::abortPulseTrains()
 {
-	uint8_t message1[2] = { 213, 80 };
-    serial.writeBytes(message1,2);
+    const char* context = "abortPulseTrains()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+    const uint8_t message[2] = {OpMenuByte, OP_ABORT_ALL};
+    return sendCommand(message, 2, context);
 }
 
-void PulsePal::disconnectClient() // JS 1/30/2014
+bool PulsePal::setContinuousLoop(uint8_t channel, uint8_t state)
 {
-	uint8_t message1[2] = { 213, 81 };
-    serial.writeBytes(message1,2);
+    const char* context = "setContinuousLoop()";
+    if (!checkConnected(context) || !checkOutputChannel(channel, context)
+        || !checkParam(PARAM_CONTINUOUS_LOOP, state, channel, context)) {
+        return false;
+    }
+    const uint8_t message[4] = {OpMenuByte, OP_SET_CONTINUOUS_LOOP, channel, state};
+    if (!sendCommand(message, 4, context) || !readConfirm(context)) {
+        return false;
+    }
+    continuousLoop[channel] = state;
+    return true;
 }
 
-void PulsePal::setContinuousLoop(uint8_t channel, uint8_t state) // JS 1/30/2014
+bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float customPulseTimes[], const float customVoltages[])
 {
-    uint8_t message1[4] = {213, 82, channel, state};
-    serial.writeBytes(message1, 4);
-}
-
-
-void PulsePal::constrain(uint32_t* value, uint32_t min, uint32_t max)
-{
-
-    // value must be a multiple of 1
-    if (*value % 1 > 0)
-    {
-        *value = *value - (*value % 1);
+    const char* context = "sendCustomPulseTrain()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+    std::ostringstream error;
+    error << context << ": ";
+    if ((ID < 1) || (ID > nCustomTrains)) {
+        error << "custom train " << (int)ID << " does not exist. This Pulse Pal has custom trains 1 to " << (int)nCustomTrains << ".";
+        reportError(error.str());
+        return false;
+    }
+    if ((nPulses == 0) || (customPulseTimes == NULL) || (customVoltages == NULL)) {
+        error << "the train must have at least one pulse.";
+        reportError(error.str());
+        return false;
+    }
+    if (nPulses > maxCustomPulses) {
+        error << nPulses << " pulses were given. This Pulse Pal can store up to " << maxCustomPulses << " pulses per custom train.";
+        reportError(error.str());
+        return false;
     }
 
-    if (*value < min)
-    {
-        *value = min;
+    // Check and convert every pulse before sending anything
+    std::vector<uint32_t> pulseCycles(nPulses);
+    for (int i = 0; i < nPulses; i++) {
+        float pulseTime = customPulseTimes[i];
+        if (!((pulseTime >= 0) && (pulseTime <= MaxTime))) { // Written this way to also reject NaN
+            error << "pulse " << (i + 1) << " is at " << pulseTime << " s. Pulse times must be 0 to 3600 s.";
+            reportError(error.str());
+            return false;
+        }
+        pulseCycles[i] = timeToCycles(pulseTime);
+        // The device plays each pulse until the next one's time, so a time that is not later than the one before it
+        // would freeze the output for the rest of the train. The check is on the times the device will receive,
+        // after rounding to its timer cycles.
+        if ((i > 0) && (pulseCycles[i] <= pulseCycles[i - 1])) {
+            error << "pulse times must increase, by at least one " << (1000000.0 / cycleFrequency) << " us timer cycle. "
+                  << "Pulse " << (i + 1) << " is at " << pulseTime << " s, and pulse " << i << " is at "
+                  << customPulseTimes[i - 1] << " s.";
+            reportError(error.str());
+            return false;
+        }
+        float voltage = customVoltages[i];
+        if (!((voltage >= -MaxVoltage) && (voltage <= MaxVoltage))) {
+            error << "pulse " << (i + 1) << " is " << voltage << " V. Voltages must be -10 to 10 V.";
+            reportError(error.str());
+            return false;
+        }
     }
 
-    if (*value > max)
-    {
-        *value = max;
+    // Firmware v22: op 95, train index (0 = train 1). Firmware v21: op 75 for train 1, op 76 for train 2. The legacy
+    // op codes are named, not calculated from ID: op 74 + 3 would be a different command.
+    std::vector<uint8_t> message;
+    message.reserve(7 + (6 * (size_t)nPulses));
+    message.push_back(OpMenuByte);
+    if (firmwareVersion > 21) {
+        message.push_back(OP_LOAD_CUSTOM_TRAIN);
+        message.push_back(ID - 1);
+    } else {
+        message.push_back((ID == 1) ? OP_LOAD_CUSTOM_TRAIN1_LEGACY : OP_LOAD_CUSTOM_TRAIN2_LEGACY);
     }
-
+    appendUint32(message, nPulses);
+    for (int i = 0; i < nPulses; i++) {
+        appendUint32(message, pulseCycles[i]);
+    }
+    for (int i = 0; i < nPulses; i++) {
+        appendUint16(message, voltageToInt16(customVoltages[i]));
+    }
+    return sendCommand(message.data(), message.size(), context) && readConfirm(context);
 }
 
-uint8_t PulsePal::voltageToByte(float voltage)
+bool PulsePal::syncAllParams()
 {
-    // input: -10 to 10 V
-    // output: 0-255
-		uint8_t output = uint8_t(ceil(((voltage + 10) / 20) * 255));
-    return output;
+    const char* context = "syncAllParams()";
+    if (!checkConnected(context)) {
+        return false;
+    }
+
+    // Check every parameter first, so that nothing is sent if any is out of range
+    for (int channel = 1; channel < 5; channel++) {
+        for (uint8_t paramCode = PARAM_IS_BIPHASIC; paramCode <= PARAM_RESTING_VOLTAGE; paramCode++) {
+            if (!checkParam(paramCode, outputParamValue(currentOutputParams[channel], paramCode), channel, context)) {
+                return false;
+            }
+        }
+        if ((currentOutputParams[channel].customTrainTarget == 1) && (timeToCycles(currentOutputParams[channel].burstDuration) == 0)) {
+            std::ostringstream error;
+            error << context << ": output channel " << channel << " has customTrainTarget = 1, so its custom train "
+                  << "times are burst onsets. Its burstDuration must be above 0.";
+            reportError(error.str());
+            return false;
+        }
+    }
+    for (int channel = 1; channel < 3; channel++) {
+        if (!checkParam(PARAM_TRIGGER_MODE, (float)currentInputParams[channel].triggerMode, channel, context)) {
+            return false;
+        }
+    }
+
+    std::vector<uint8_t> message;
+    message.push_back(OpMenuByte);
+    if (firmwareVersion > 21) {
+        // Op 92: grouped by parameter. Each group holds one parameter for output channels 1-4
+        message.push_back(OP_PROGRAM_ALL_PARAMS);
+        for (int i = 0; i < 8; i++) {
+            for (int channel = 1; channel < 5; channel++) {
+                appendUint32(message, timeToCycles(outputParamValue(currentOutputParams[channel], TimeParamCodes[i])));
+            }
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].phase1Voltage));
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].phase2Voltage));
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].restingVoltage));
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            message.push_back((uint8_t)currentOutputParams[channel].isBiphasic);
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainID);
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainTarget);
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainLoop);
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            // Op 92 sets continuous loop mode, and stops a channel whose mode it turns off, so it sends the mode
+            // last set by setContinuousLoop() rather than 0
+            message.push_back(continuousLoop[channel]);
+        }
+    } else {
+        // Op 73 (firmware v21): grouped by channel. It does not set continuous loop mode
+        message.push_back(OP_PROGRAM_ALL_PARAMS_LEGACY);
+        for (int channel = 1; channel < 5; channel++) {
+            for (int i = 0; i < 8; i++) {
+                appendUint32(message, timeToCycles(outputParamValue(currentOutputParams[channel], TimeParamCodes[i])));
+            }
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].phase1Voltage));
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].phase2Voltage));
+            appendUint16(message, voltageToInt16(currentOutputParams[channel].restingVoltage));
+        }
+        for (int channel = 1; channel < 5; channel++) {
+            message.push_back((uint8_t)currentOutputParams[channel].isBiphasic);
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainID);
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainTarget);
+            message.push_back((uint8_t)currentOutputParams[channel].customTrainLoop);
+        }
+    }
+    // Both ops end with the trigger links (trigger channel 1 to output channels 1-4, then trigger channel 2), then
+    // the two trigger modes
+    for (int channel = 1; channel < 5; channel++) {
+        message.push_back((uint8_t)currentOutputParams[channel].linkTriggerChannel1);
+    }
+    for (int channel = 1; channel < 5; channel++) {
+        message.push_back((uint8_t)currentOutputParams[channel].linkTriggerChannel2);
+    }
+    message.push_back((uint8_t)currentInputParams[1].triggerMode);
+    message.push_back((uint8_t)currentInputParams[2].triggerMode);
+
+    return sendCommand(message.data(), message.size(), context) && readConfirm(context);
+}
+
+// Checks, encodes and programs one output channel parameter with op 74
+bool PulsePal::setOutputParam(uint8_t channel, uint8_t paramCode, float value, const char* context)
+{
+    if (!checkConnected(context) || !checkOutputChannel(channel, context) || !checkParam(paramCode, value, channel, context)) {
+        return false;
+    }
+    return program(channel, paramCode, encodeParam(paramCode, value), context);
+}
+
+// Op 74: parameter code, channel, then the value in 1, 2 or 4 bytes. paramValue is already in device units.
+bool PulsePal::program(uint8_t channel, uint8_t paramCode, uint32_t paramValue, const char* context)
+{
+    uint8_t nValueBytes = paramValueBytes(paramCode);
+    uint8_t message[8] = {OpMenuByte, OP_PROGRAM_ONE_PARAM, paramCode, channel, 0, 0, 0, 0};
+    for (int i = 0; i < nValueBytes; i++) {
+        message[4 + i] = (uint8_t)(paramValue >> (8 * i)); // Little-endian
+    }
+    return sendCommand(message, 4 + nValueBytes, context) && readConfirm(context);
+}
+
+// Checks that a parameter value is in range for the connected device. channel is only used in the error message.
+bool PulsePal::checkParam(uint8_t paramCode, float value, int channel, const char* context)
+{
+    std::ostringstream error;
+    error << context << ": " << paramName(paramCode) << " on " << ((paramCode == PARAM_TRIGGER_MODE) ? "trigger" : "output")
+          << " channel " << channel << " was " << value;
+    if (isVoltageParam(paramCode)) {
+        if ((value >= -MaxVoltage) && (value <= MaxVoltage)) { // Written this way to also reject NaN
+            return true;
+        }
+        error << " V. It must be -10 to 10 V.";
+    } else if (isTimeParam(paramCode)) {
+        bool isMinPulseTime = (paramCode == PARAM_PHASE1_DURATION) || (paramCode == PARAM_PHASE2_DURATION)
+                              || (paramCode == PARAM_INTER_PULSE_INTERVAL) || (paramCode == PARAM_PULSE_TRAIN_DURATION);
+        double minTime = isMinPulseTime ? MinPulseTime : 0;
+        if (std::isfinite(value)) {
+            // Compared in timer cycles, as the device will receive it, so that float rounding cannot reject 0.0001
+            double cycles = roundHalfEven((double)value * cycleFrequency);
+            if ((cycles >= roundHalfEven(minTime * cycleFrequency)) && (cycles <= (MaxTime * cycleFrequency))) {
+                return true;
+            }
+        }
+        error << " s. It must be " << minTime << " to " << MaxTime << " s.";
+    } else {
+        int maxValue = 1;
+        if (paramCode == PARAM_CUSTOM_TRAIN_ID) {
+            maxValue = nCustomTrains;
+        } else if (paramCode == PARAM_TRIGGER_MODE) {
+            maxValue = (hardwareVersion > 2) ? TriggerModeParamSync : 2; // Param sync mode is Pulse Pal 3 only
+        }
+        if ((value >= 0) && (value <= (float)maxValue) && (value == std::floor(value))) {
+            return true;
+        }
+        error << ". It must be an integer from 0 to " << maxValue << " on this Pulse Pal.";
+    }
+    reportError(error.str());
+    return false;
+}
+
+// Converts a checked parameter value to the units the device reads: DAC codes, timer cycles, or a byte
+uint32_t PulsePal::encodeParam(uint8_t paramCode, float value)
+{
+    if (isVoltageParam(paramCode)) {
+        return voltageToInt16(value);
+    }
+    if (isTimeParam(paramCode)) {
+        return timeToCycles(value);
+    }
+    return (uint32_t)value;
+}
+
+// Seconds to hardware timer cycles, rounded to the nearest cycle. The value must already be checked.
+uint32_t PulsePal::timeToCycles(float timeInSeconds)
+{
+    return (uint32_t)roundHalfEven((double)timeInSeconds * cycleFrequency);
 }
 
 uint16_t PulsePal::voltageToInt16(float voltage)
 {
-	// input: -10 to 10 V
-	// output: 0-65535
-	uint16_t output = uint16_t(ceil(((voltage + 10) / 20) * 65535));
-	return output;
+    // input: -10 to 10 V
+    // output: 0-65535, rounded to the nearest code as in the Python class
+    double code = roundHalfEven((((double)voltage + MaxVoltage) / (2 * MaxVoltage)) * DACMax);
+    if (code < 0) {
+        code = 0;
+    }
+    if (code > DACMax) {
+        code = DACMax;
+    }
+    return (uint16_t)code;
 }
 
-void PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, float customPulseTimes[], float customVoltages[]){
-	uint16_t byteIndex = 0;
-	uint16_t thisVoltageInt = 0;
-	uint8_t messageBytes[6006] = { 0 }; // Preallocate max
-	messageBytes[byteIndex] = 213; byteIndex++;
-	if (ID == 1) {
-		messageBytes[byteIndex] = 75; byteIndex++; // Op code to program custom train 1
-	}
-	else {
-		messageBytes[byteIndex] = 76; byteIndex++; // Op code to program custom train 2
-	}
-	if (firmwareVersion < 20) {
-		messageBytes[byteIndex] = 0; byteIndex++; // USB packet correction byte
-	}
-	messageBytes[byteIndex] = (uint8_t)(nPulses); byteIndex++;
-	messageBytes[byteIndex] = (uint8_t)(nPulses >> 8); byteIndex++;
-	messageBytes[byteIndex] = (uint8_t)(nPulses >> 16); byteIndex++;
-	messageBytes[byteIndex] = (uint8_t)(nPulses >> 24); byteIndex++;
-	// Times
-	unsigned long pulseTimeMicroseconds;
-	for (int i = 0; i < nPulses; i++) {
-		pulseTimeMicroseconds = (unsigned long)(customPulseTimes[i] * CycleFreq);
-		messageBytes[byteIndex] = (uint8_t)(pulseTimeMicroseconds); byteIndex++;
-		messageBytes[byteIndex] = (uint8_t)(pulseTimeMicroseconds >> 8); byteIndex++;
-		messageBytes[byteIndex] = (uint8_t)(pulseTimeMicroseconds >> 16); byteIndex++;
-		messageBytes[byteIndex] = (uint8_t)(pulseTimeMicroseconds >> 24); byteIndex++;
-	}
-    // Voltages
-    float thisVoltage = 0;
-    for (int i = 0; i < nPulses; i++) {
-        thisVoltage = customVoltages[i];
-		if (firmwareVersion < 20) {
-			messageBytes[byteIndex] = voltageToByte(thisVoltage); byteIndex++;
-		} else {
-			thisVoltageInt = voltageToInt16(thisVoltage);
-			messageBytes[byteIndex] = (uint8_t)(thisVoltageInt); byteIndex++;
-			messageBytes[byteIndex] = (uint8_t)(thisVoltageInt >> 8); byteIndex++;
-		}
+bool PulsePal::checkConnected(const char* context)
+{
+    if (!connected) {
+        reportError(std::string(context) + ": Pulse Pal is not connected. Call initialize() first.");
+        return false;
     }
-    serial.writeBytes(messageBytes, byteIndex);
+    return true;
 }
 
-void PulsePal::syncAllParams() {
-
-	uint8_t messageBytes[180] = { 0 };
-
-	messageBytes[0] = 213;
-    messageBytes[1] = 73;
-    int pos = 2;
-    uint32_t thisTime = 0;
-    float thisVoltage = 0;
-    uint8_t thisVoltageByte = 0;
-	uint16_t thisVoltageInt = 0;
-
-    // add time params
-    for (int i = 1; i < 5; i++){
-		thisTime = (uint32_t)(currentOutputParams[i].phase1Duration * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].interPhaseInterval * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].phase2Duration * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].interPulseInterval * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].burstDuration * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].interBurstInterval * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].pulseTrainDuration * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
-		thisTime = (uint32_t)(currentOutputParams[i].pulseTrainDelay * CycleFreq);
-        messageBytes[pos] = (uint8_t)(thisTime); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 8); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 16); pos++;
-        messageBytes[pos] = (uint8_t)(thisTime >> 24); pos++;
+bool PulsePal::checkOutputChannel(uint8_t channel, const char* context)
+{
+    if ((channel < 1) || (channel > 4)) {
+        std::ostringstream error;
+        error << context << ": output channel " << (int)channel << " does not exist. Use 1 to 4.";
+        reportError(error.str());
+        return false;
     }
+    return true;
+}
 
-	if (firmwareVersion < 20) { // Pulse Pal 1.X
-		// add single-byte params
-		for (int i = 1; i < 5; i++) {
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].isBiphasic; pos++;
-			thisVoltage = PulsePal::currentOutputParams[i].phase1Voltage;
-			thisVoltageByte = voltageToByte(thisVoltage);
-			messageBytes[pos] = thisVoltageByte; pos++;
-			thisVoltage = PulsePal::currentOutputParams[i].phase2Voltage;
-			thisVoltageByte = voltageToByte(thisVoltage);
-			messageBytes[pos] = thisVoltageByte; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainID; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainTarget; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainLoop; pos++;
-			thisVoltage = PulsePal::currentOutputParams[i].restingVoltage;
-			thisVoltageByte = voltageToByte(thisVoltage);
-			messageBytes[pos] = thisVoltageByte; pos++;
-		}
-	}
-	else { // Pulse Pal 2
-		// Add 16-bit voltages
-		for (int i = 1; i < 5; i++) {
-			thisVoltage = PulsePal::currentOutputParams[i].phase1Voltage;
-			thisVoltageInt = voltageToInt16(thisVoltage);
-			messageBytes[pos] = (uint8_t)(thisVoltageInt); pos++;
-			messageBytes[pos] = (uint8_t)(thisVoltageInt >> 8); pos++;
-			thisVoltage = PulsePal::currentOutputParams[i].phase2Voltage;
-			thisVoltageInt = voltageToInt16(thisVoltage);
-			messageBytes[pos] = (uint8_t)(thisVoltageInt); pos++;
-			messageBytes[pos] = (uint8_t)(thisVoltageInt >> 8); pos++;
-			thisVoltage = PulsePal::currentOutputParams[i].restingVoltage;
-			thisVoltageInt = voltageToInt16(thisVoltage);
-			messageBytes[pos] = (uint8_t)(thisVoltageInt); pos++;
-			messageBytes[pos] = (uint8_t)(thisVoltageInt >> 8); pos++;
-		}
-		// Add 8-bit channel params
-		for (int i = 1; i < 5; i++) {
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].isBiphasic; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainID; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainTarget; pos++;
-			messageBytes[pos] = (uint8_t)currentOutputParams[i].customTrainLoop; pos++;
-		}
-	}
-
-    // add trigger channel 1 links
-    for (int i = 1; i < 5; i++){
-        messageBytes[pos] = (uint8_t)currentOutputParams[i].linkTriggerChannel1; pos++; 
+// Sends a whole command in one write, so that a pause in this program cannot split it. The device gives up on a
+// command if its bytes stop arriving for 100ms.
+bool PulsePal::sendCommand(const uint8_t* message, size_t nBytes, const char* context)
+{
+    if (!serial->write(message, nBytes)) {
+        reportError(std::string(context) + ": " + serial->lastError());
+        return false;
     }
-    // add trigger channel 2 links
-    for (int i = 1; i < 5; i++){
-        messageBytes[pos] = (uint8_t)currentOutputParams[i].linkTriggerChannel2; pos++;
+    return true;
+}
+
+bool PulsePal::readConfirm(const char* context)
+{
+    uint8_t confirmByte = 0;
+    if (serial->read(&confirmByte, 1, ReplyTimeoutMs) < 1) {
+        // After a comm failure (an incomplete command), the device reads no commands until its joystick is clicked
+        reportError(std::string(context) + ": Pulse Pal did not confirm the command. If its screen shows "
+                    "COMM. FAILURE!, click its joystick and call initialize() to reconnect.");
+        return false;
     }
+    if (confirmByte != 1) {
+        reportError(std::string(context) + ": Pulse Pal rejected the command. A channel number or value was out of "
+                    "range for this device.");
+        return false;
+    }
+    return true;
+}
 
-    // add trigger channel modes
-        messageBytes[pos] = (uint8_t)currentInputParams[1].triggerMode; pos++;
-        messageBytes[pos] = (uint8_t)currentInputParams[2].triggerMode; pos++;
-
-
-		if (firmwareVersion < 20) {
-			serial.writeBytes(messageBytes, 168);
-		}
-		else {
-			serial.writeBytes(messageBytes, 180);
-		}
+void PulsePal::reportError(const std::string& message)
+{
+    std::cerr << "PulsePal: " << message << std::endl;
 }

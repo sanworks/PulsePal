@@ -16,7 +16,7 @@ files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse 
 | `/Firmware/Old/` | Archived firmware, no longer developed |
 | `/Python/PulsePal/` | Python class, GUI and offline tests |
 | `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/Legacy/` holds the older function-based interface |
-| `/c++/` | C++ class |
+| `/c++/` | C++ class (serial port via libserialport) and offline tests. `/c++/legacy/` holds the previous version, which also supports Pulse Pal 1 |
 | `/CAD/`, `/Drivers/` | Hardware design files and USB drivers |
 
 ## The protocol ties everything together
@@ -50,6 +50,11 @@ python Firmware/tools/build_check.py --compare HEAD
 # Python client: check the bytes it sends, using a fake serial port.
 # uv creates the environment (numpy, pyserial) on first use; see /Python/PulsePal/README.md
 cd Python/PulsePal && uv run python tests/test_protocol.py
+
+# C++ class: the same check, and a byte-for-byte comparison with the Python class's op 92 and
+# op 73 messages. Needs CMake and a C++ compiler; see /c++/README.md
+cmake -S c++ -B c++/build && cmake --build c++/build --config Release
+ctest --test-dir c++/build -C Release --output-on-failure
 ```
 
 Everything else needs a device: pulse timing, the trigger inputs, the screen, the joystick
