@@ -523,11 +523,13 @@ boolean lastButtonState = 0; // last logic state of joystick button
 boolean ChoiceMade = 0; // determines whether user has chosen a value from a list
 boolean viewingInfo = false; // True if viewing system info
 unsigned int UserValue = 0; // The current value displayed on a list of values (written to LCD when choosing parameters)
+// CommanderString holds 16 characters and a terminator: op 89 fills all 16 ("MATLAB Connected"), and index 16 is never
+// written, so it stays 0. With only 16 bytes, the screen code read past the end of the array into the next variable.
 #if (HARDWARE_VERSION == 2)
-  char CommanderString[16] = " PULSE PAL v2.0"; // Displayed at the menu top when disconnected from software
+  char CommanderString[17] = " PULSE PAL v2.0"; // Displayed at the menu top when disconnected from software
   char DefaultCommanderString[16] = " PULSE PAL v2.0"; // The CommanderString can be overwritten. This stores the original.
 #else
-  char CommanderString[16] = " PULSE PAL v3.0"; // Displayed at the menu top when disconnected from software
+  char CommanderString[17] = " PULSE PAL v3.0"; // Displayed at the menu top when disconnected from software
   char DefaultCommanderString[16] = " PULSE PAL v3.0"; // The CommanderString can be overwritten. This stores the original.
 #endif
 char ClientStringSuffix[11] = " Connected"; // Displayed after 6-character client ID string (as in, "MATLAB Connected")
