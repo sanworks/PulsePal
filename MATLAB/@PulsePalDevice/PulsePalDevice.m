@@ -165,6 +165,13 @@ classdef PulsePalDevice < handle
                 obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
                 obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
                 obj.info.maxPulsesPerCustomTrain = obj.maxCustomPulses;
+            elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
+                wavePalVersion = obj.Port.read(1, 'uint32');
+                obj.Port = [];
+                error(['The device at port ' portString ' runs Wave Pal firmware (v' num2str(wavePalVersion) ...
+                       '), not Pulse Pal firmware.' newline 'To use it as a Pulse Pal, load Pulse Pal firmware '...
+                       'onto it with LoadPulsePalFirmware (in /MATLAB/FirmwareLoader).' newline ...
+                       'To use it as a Wave Pal, connect with WavePalDevice.'])
             else
                 obj.Port = [];
                 error(['The device at port ' portString ' returned an unexpected handshake signature.'])

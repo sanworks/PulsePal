@@ -17,6 +17,9 @@ Examples:
     # Only Pulse Pal 3
     python Firmware/tools/build_check.py --hardware 3
 
+    # The Wave Pal firmware (Firmware/WavePal), which runs on Pulse Pal 3 only
+    python Firmware/tools/build_check.py --sketch wavepal --compare HEAD
+
 Requirements:
   - arduino-cli, with the teensy:avr and arduino:sam cores installed. The Arduino IDE
     ships one; set ARDUINO_CLI to its path if it is not on PATH.
@@ -41,10 +44,22 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SKETCH_DIR = REPO_ROOT / "Firmware" / "PulsePal3"
 STUB_LIBRARIES = Path(__file__).resolve().parent / "stub_libraries"
-# Revisions before the folder was renamed from PulsePal_3 to PulsePal3, for --compare
-SKETCH_PATHS_IN_GIT = ["Firmware/PulsePal3", "Firmware/PulsePal_3"]
+
+# The sketches this script builds. paths_in_git lists the folder's names in git history, for --compare
+SKETCHES = {
+    "pulsepal": {
+        "dir": REPO_ROOT / "Firmware" / "PulsePal3",
+        # Revisions before the folder was renamed from PulsePal_3 to PulsePal3
+        "paths_in_git": ["Firmware/PulsePal3", "Firmware/PulsePal_3"],
+        "hardware": [2, 3],
+    },
+    "wavepal": {
+        "dir": REPO_ROOT / "Firmware" / "WavePal",
+        "paths_in_git": ["Firmware/WavePal"],
+        "hardware": [3],
+    },
+}
 
 BOARDS = {
     2: {"fqbn": "arduino:sam:arduino_due_x", "name": "Pulse Pal 2 (Arduino Due)"},
@@ -207,9 +222,9 @@ def compare(objdump, old_object, new_object, show=None):
     return len(changed) + len(added) + len(removed)
 
 
-def checkout(git_reference, destination):
+def checkout(git_reference, destination, paths_in_git):
     """Copy the firmware folder at a git revision into destination."""
-    for path_in_git in SKETCH_PATHS_IN_GIT:  # The folder was renamed, so older revisions differ
+    for path_in_git in paths_in_git:  # A folder that was renamed has a different name in older revisions
         archive = subprocess.run(
             ["git", "archive", git_reference, path_in_git],
             cwd=REPO_ROOT, capture_output=True,
@@ -231,6 +246,9 @@ def checkout(git_reference, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--sketch", choices=sorted(SKETCHES), default="pulsepal",
+                        help="Firmware to build: pulsepal (Firmware/PulsePal3, the default) or wavepal "
+                             "(Firmware/WavePal, Pulse Pal 3 only)")
     parser.add_argument("--hardware", choices=["2", "3", "both"], default="both",
                         help="Hardware version to build for (default: both)")
     parser.add_argument("--compare", metavar="GIT_REF",
@@ -250,17 +268,22 @@ def main():
         print("arm-none-eabi-objdump was not found. Set OBJDUMP to its path.")
         return 2
 
+    sketch = SKETCHES[arguments.sketch]
     versions = [2, 3] if arguments.hardware == "both" else [int(arguments.hardware)]
+    versions = [version for version in versions if version in sketch["hardware"]]
+    if not versions:
+        print(f"{arguments.sketch} does not run on Pulse Pal {arguments.hardware}")
+        return 2
     problems = 0
     with tempfile.TemporaryDirectory(prefix="pulsepal_build_") as temporary:
         temporary = Path(temporary)
         old_sketch = None
         if arguments.compare:
-            old_sketch = checkout(arguments.compare, temporary / "old_source")
+            old_sketch = checkout(arguments.compare, temporary / "old_source", sketch["paths_in_git"])
             if old_sketch is None:
                 return 2
         for version in versions:
-            new_object = build(arduino_cli, SKETCH_DIR, version, temporary / f"new{version}", arguments.real_libraries)
+            new_object = build(arduino_cli, sketch["dir"], version, temporary / f"new{version}", arguments.real_libraries)
             if new_object is None:
                 problems += 1
                 continue

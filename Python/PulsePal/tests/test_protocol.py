@@ -308,6 +308,41 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
         PulsePal.time.sleep = original_sleep
 
 
+class ClosablePort(FakePort):
+    """A FakePort that can be closed, and refuses writes once it is, like a real port."""
+
+    def __init__(self):
+        super().__init__()
+        self.is_open = True
+
+    def close(self):
+        self.is_open = False
+
+    def write(self, data):
+        if not self.is_open:
+            raise OSError("port closed")
+        return super().write(data)
+
+
+def test_connecting_to_a_wave_pal_says_so():
+    """A device running Wave Pal firmware replies 87 ('W') to the handshake. The class must
+    say so, rather than only that the handshake was wrong, and must not send it op 81."""
+    port = ClosablePort()
+    port.response = bytearray([87, 1, 0, 0, 0])  # 'W', then Wave Pal firmware v1
+    original_serial = PulsePal.serial.Serial
+    PulsePal.serial.Serial = lambda *args, **kwargs: port
+    try:
+        PulsePal.PulsePalDevice("COM9")
+        raise AssertionError("connected to a Wave Pal")
+    except PulsePal.PulsePalError as error:
+        assert "runs Wave Pal firmware (v1)" in str(error), error
+        assert "WavePalDevice" in str(error), error
+    finally:
+        PulsePal.serial.Serial = original_serial
+    assert port.writes == [bytes([OP_MENU_BYTE, 72])], port.writes
+    assert not port.is_open
+
+
 class ChunkedPort(FakePort):
     """A FakePort whose reply arrives in separate chunks, as it does from a device
     that pauses between parts of it. Once the chunks are used up, reads return

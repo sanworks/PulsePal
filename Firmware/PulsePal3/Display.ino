@@ -149,7 +149,7 @@ void runSplashScreen() {
       u8g2.drawXBMP(0, 0, GFX_logo_width, GFX_logo_height, GFX_PPlogo);
       u8g2.sendBuffer();
 
-      // Loading bar at the bottom of the screen: a fixed rounded outline, filled left to right during the 2s logo display
+      // Loading bar at the bottom of the screen: a fixed outline, filled left to right during the 2s logo display
       const uint32_t logoDuration = 2000;
       const uint8_t barHeight = 8;
       const uint8_t barWidth = 122; // Widest centered bar that stays within the logo text (x = 3 to 125)
@@ -161,15 +161,7 @@ void runSplashScreen() {
       const uint8_t fillWidth = barWidth - 4;
       const uint8_t fillHeight = barHeight - 4;
 
-      // Outline with rounded ends: the outermost column spans barHeight-4 rows, the next spans barHeight-2
-      u8g2.drawHLine(barX + 2, barY, barWidth - 4);
-      u8g2.drawHLine(barX + 2, barY + barHeight - 1, barWidth - 4);
-      u8g2.drawPixel(barX + 1, barY + 1);
-      u8g2.drawPixel(barX + 1, barY + barHeight - 2);
-      u8g2.drawPixel(barX + barWidth - 2, barY + 1);
-      u8g2.drawPixel(barX + barWidth - 2, barY + barHeight - 2);
-      u8g2.drawVLine(barX, barY + 2, barHeight - 4);
-      u8g2.drawVLine(barX + barWidth - 1, barY + 2, barHeight - 4);
+      u8g2.drawFrame(barX, barY, barWidth, barHeight);
       u8g2.sendBuffer();
 
       uint32_t logoStartTime = millis();
@@ -179,12 +171,7 @@ void runSplashScreen() {
         uint8_t targetLength = (elapsed < logoDuration) ? (fillWidth * elapsed) / logoDuration : fillWidth;
         if (targetLength > fillLength) {
           while (fillLength < targetLength) {
-            uint8_t x = fillX + fillLength; // x coordinate of the next fill column
-            if ((fillLength == 0) || (fillLength == fillWidth - 1)) {
-              u8g2.drawVLine(x, fillY + 1, fillHeight - 2); // Rounded ends of the fill
-            } else {
-              u8g2.drawVLine(x, fillY, fillHeight);
-            }
+            u8g2.drawVLine(fillX + fillLength, fillY, fillHeight);
             fillLength++;
           }
           u8g2.sendBuffer();

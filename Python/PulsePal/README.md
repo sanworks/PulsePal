@@ -4,6 +4,10 @@ Python interface for the [Pulse Pal](https://sites.google.com/site/pulsepalwiki/
 open source pulse train generator. API documentation is published at
 https://sanworks.github.io/PulsePal/Python/.
 
+`WavePal.py` controls a Pulse Pal 3 running Wave Pal firmware
+(`/Firmware/WavePal`), which plays sampled waveforms instead of pulse
+trains. `WavePalExample.py` shows how to use it.
+
 ## Installation
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then open

@@ -367,6 +367,7 @@ class PulsePalDevice:
     _OP_MENU_BYTE = 213
     _HANDSHAKE_OPCODE = 72
     _HANDSHAKE_RESPONSE = 75
+    _WAVE_PAL_HANDSHAKE_RESPONSE = 87  # 'W': the device runs Wave Pal firmware
     _DAC_BITMAX = 65535
     _PARAM_MESSAGE_BYTES = 178  # Length of the parameter set sent by op 93
     _OLDEST_FIRMWARE_SUPPORTED = 21
@@ -476,6 +477,16 @@ class PulsePalDevice:
             "uint8",
         )
         handshake = self._read_serial(1, "uint8")
+        if handshake == self._WAVE_PAL_HANDSHAKE_RESPONSE:
+            wave_pal_version = self._read_serial(1, "uint32")
+            self.close(send_disconnect=False)
+            raise PulsePalError(
+                f"Error: the device on {port_name} runs Wave Pal firmware "
+                f"(v{wave_pal_version}), not Pulse Pal firmware. To use it as "
+                "a Pulse Pal, load Pulse Pal firmware onto it (see "
+                "/Firmware/Readme.txt). To use it as a Wave Pal, connect "
+                "with WavePal.WavePalDevice."
+            )
         if handshake != self._HANDSHAKE_RESPONSE:
             self.close(send_disconnect=False)
             raise PulsePalError(

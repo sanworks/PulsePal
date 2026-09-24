@@ -64,7 +64,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 #ifndef PIN_MAP_VERSION
-  #define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version < 3.0.4 and 1 for 3.0.5+
+  #define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version 3.0.0 and 1 for 3.0.1+
                             // PIN_MAP_VERSION Does not affect hardware v2.X.
 #endif
 
@@ -263,12 +263,12 @@ enum TriggerEventValue {
   byte pcbVersionMap[5] = {18,19,20,21,22}; // Teensy pins that are grounded to encode the PCB minor version in binary
   byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   
-  #if (PIN_MAP_VERSION == 0) // PP3 PCB v 3.0.4 and older
+  #if (PIN_MAP_VERSION == 0) // PP3 PCB v 3.0.0 and older
     byte OutputLEDLines[4] = {24,28,29,30}; // LEDs above output channels 1-4
     byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
     byte SyncPin=14; // AD5724 Pin 7 (Sync)
     byte LDACPin=39; // AD5724 Pin 10 (LDAC)
-  #elif (PIN_MAP_VERSION == 1) // PP3 PCB v 3.0.5 and newer
+  #elif (PIN_MAP_VERSION == 1) // PP3 PCB v 3.0.1 and newer
     byte OutputLEDLines[4] = {24,32,33,35}; // LEDs above output channels 1-4
     byte ClickerButtonLine = 36; // Digital line that reports the thumb joystick click state
     byte SyncPin=34; // AD5724 Pin 7 (Sync)

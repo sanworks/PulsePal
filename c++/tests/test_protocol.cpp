@@ -302,6 +302,7 @@ static void test_connect_fails_on_a_bad_handshake_or_unsupported_firmware()
     struct Case { uint8_t replyByte; uint32_t firmwareVersion; const char* message; };
     const Case cases[] = {
         {74, 22, "did not return the Pulse Pal handshake"},
+        {87, 1, "runs Wave Pal firmware (v1)"}, // Wave Pal's reply to the same op
         {75, 19, "Pulse Pal 1"},
         {75, 20, "update the firmware"},
         {75, 23, "supports firmware up to v22"},

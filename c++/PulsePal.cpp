@@ -34,6 +34,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 static const uint8_t OpMenuByte = 213; // First byte of every command
 static const uint8_t HandshakeReply = 75; // 'K'
+static const uint8_t WavePalHandshakeReply = 87; // 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
 static const uint32_t OldestFirmwareSupported = 21;
 static const uint32_t CurrentFirmwareVersion = 22;
 
@@ -225,7 +226,15 @@ bool PulsePal::initialize(std::string portString)
     const uint8_t handshake[2] = {OpMenuByte, OP_HANDSHAKE};
     uint8_t reply[5] = {0};
     if (!serial->write(handshake, 2) || (serial->read(reply, 5, ReplyTimeoutMs) < 5) || (reply[0] != HandshakeReply)) {
-        reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal.");
+        if (reply[0] == WavePalHandshakeReply) {
+            std::ostringstream wavePalError;
+            wavePalError << "The device on port " << portString << " runs Wave Pal firmware (v" << readUint32(reply + 1)
+                         << "), not Pulse Pal firmware. To use it as a Pulse Pal, load Pulse Pal firmware onto it (see "
+                         << "/Firmware/Readme.txt). To use it as a Wave Pal, use its Python or MATLAB class.";
+            reportError(wavePalError.str());
+        } else {
+            reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal.");
+        }
         serial->close();
         return false;
     }
