@@ -67,7 +67,7 @@ jobs:
       - name: Build documentation
         run: |
           version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          pdoc PulsePal PulsePalGUI \
+          pdoc PulsePal PulsePalGUI WavePal \
             --docformat google \
             --output-directory "$GITHUB_WORKSPACE/site/Python" \
             --footer-text "Pulse Pal Python interface v$version"

@@ -59,6 +59,8 @@ their meanings are given with each attribute below.
   https://sites.google.com/site/pulsepalwiki/parameter-guide
 - Serial interface and general documentation:
   https://sites.google.com/site/pulsepalwiki/
+- `WavePal`: alternative firmware that makes a Pulse Pal 3 a four
+  channel waveform player, and its Python class, `WavePal.WavePalDevice`.
 
 ## License
 

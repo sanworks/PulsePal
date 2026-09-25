@@ -21,9 +21,10 @@ with WavePalDevice("COM3") as W:
     W.play(1)
 ```
 
-The device needs Wave Pal firmware, which is in `/Firmware/WavePal` in the
+The device needs Wave Pal firmware, which is in
+[/Firmware/WavePal](https://github.com/sanworks/PulsePal/tree/develop/Firmware/WavePal) in the
 Pulse Pal repository. Its USB protocol is documented in
-`/Firmware/WavePal/PROTOCOL.md`.
+[PROTOCOL.md](https://github.com/sanworks/PulsePal/blob/develop/Firmware/WavePal/PROTOCOL.md).
 
 ## Channel settings
 
@@ -166,8 +167,8 @@ class DeviceStatus:
 
     An underrun is a block of samples that was not read from the microSD
     card by the time it was due. The output then holds its last value
-    until the block arrives. See "Storage and buffering" in
-    `/Firmware/WavePal/PROTOCOL.md`.
+    until the block arrives. See "Storage and buffering" in the
+    [Wave Pal protocol](https://github.com/sanworks/PulsePal/blob/develop/Firmware/WavePal/PROTOCOL.md#storage-and-buffering).
     """
 
     longest_interrupt_us: float
