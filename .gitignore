@@ -17,6 +17,9 @@ venv/
 # MATLAB: serial port cached by PulsePal.m at runtime
 MATLAB/Legacy/LastSerialPortUsed.mat
 
+# MATLAB: oscilloscope test panel for the Python and MATLAB classes (lab-specific, not yet part of the repository)
+MATLAB/tests/ScopeTestPanel/
+
 # OS
 .DS_Store
 Thumbs.db

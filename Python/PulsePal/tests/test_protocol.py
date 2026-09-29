@@ -257,6 +257,138 @@ def test_stop_and_trigger_message_bytes():
     ]
 
 
+def test_values_the_device_cannot_play_raise_before_sending():
+    """Out of range values used to be clamped (voltages) or sent (0 cycle phases, which the
+    firmware now refuses and resets), leaving the local copy describing another program."""
+    calls = [
+        lambda d: d.set_voltage(1, 12),
+        lambda d: d.set_voltage(1, float("nan")),
+        lambda d: d.set_output_param("phase1_voltage", 1, 15),
+        lambda d: d.set_output_param("resting_voltage", [1, 2, 3, 4], [0, 0, -10.5, 0]),
+        lambda d: d.set_output_param("phase1_duration", 1, 0),
+        lambda d: d.set_output_param("phase1_duration", 1, 0.00002),   # Rounds to 0 cycles
+        lambda d: d.set_output_param("phase2_duration", 1, 0),
+        lambda d: d.set_output_param("pulse_train_delay", 1, -0.001),
+        lambda d: d.set_output_param("pulse_train_duration", 1, float("nan")),
+        lambda d: d.set_output_param("inter_pulse_interval", 1, 0),    # Monophasic
+        lambda d: d.set_output_param("is_biphasic", 1, 2),
+        lambda d: d.set_output_param("custom_train_id", 1, 5),
+        lambda d: d.set_output_param("custom_train_loop", 1, 0.5),
+        lambda d: d.set_trigger_param("trigger_mode", 1, 4),
+        lambda d: d.set_trigger_param("trigger_mode", 3, 0),
+        lambda d: d.send_custom_pulse_train(1, [0, 0.001], [5, 11]),
+        lambda d: d.send_custom_waveform(1, 0.001, [0, float("nan")]),
+    ]
+    for call in calls:
+        device = make_device()
+        device.info.hardware_version = 3
+        try:
+            call(device)
+            raise AssertionError("no error")
+        except PulsePal.PulsePalError:
+            assert device.port.writes == []
+
+    device = make_device()
+    device.phase1_voltage[3] = 15
+    try:
+        device.sync_to_device()
+        raise AssertionError("sync_to_device() sent a 15 V phase")
+    except PulsePal.PulsePalError as error:
+        assert "phase1_voltage on channel 3" in str(error), error
+        assert device.port.writes == []
+
+
+def test_only_biphasic_channels_may_have_no_inter_pulse_interval():
+    device = make_device()
+    device.set_output_param("is_biphasic", 1, 1)
+    device.set_output_param("inter_pulse_interval", 1, 0)     # A continuous biphasic square wave
+    assert len(device.port.writes) == 2
+    try:
+        device.set_output_param("is_biphasic", 1, 0)          # Would leave a monophasic channel with no interval
+        raise AssertionError("no error")
+    except PulsePal.PulsePalError as error:
+        assert "set inter_pulse_interval first" in str(error)
+    assert len(device.port.writes) == 2
+
+
+def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
+    """All three classes round a value exactly halfway to the even one, so a script gives the
+    same train in each: 125 us (2.5 cycles) is 2 cycles, and +4 V (DAC code 45874.5) is 45874."""
+    device = make_device()
+    device.set_output_param("phase1_duration", 1, 0.000125)
+    device.set_output_param("phase1_voltage", 1, 4)
+    assert device.port.writes == [
+        bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2),
+        bytes([OP_MENU_BYTE, 74, 2, 1]) + struct.pack("<H", 45874),
+    ]
+
+
+def test_trigger_and_stop_take_numpy_channel_numbers():
+    import numpy as np
+    device = make_device()
+    device.trigger(np.int64(2))
+    device.trigger(np.array([1, 3]))
+    device.trigger(1, 0, np.int64(1), 0)
+    device.stop(np.int64(2))
+    device.stop(np.array([1, 4]))
+    device.trigger([])                                        # Nothing, explicitly
+    assert device.port.writes == [
+        bytes([OP_MENU_BYTE, 77, 0b0010]),
+        bytes([OP_MENU_BYTE, 77, 0b0101]),
+        bytes([OP_MENU_BYTE, 77, 0b0101]),
+        bytes([OP_MENU_BYTE, 98, 0b0010]),
+        bytes([OP_MENU_BYTE, 98, 0b1001]),
+        bytes([OP_MENU_BYTE, 77, 0]),
+    ]
+
+
+def test_trigger_and_stop_refuse_what_they_used_to_ignore():
+    for call in [
+        lambda d: d.trigger(5),
+        lambda d: d.trigger(0),
+        lambda d: d.trigger(1.0),
+        lambda d: d.trigger(),
+        lambda d: d.trigger(1, 2),       # Flags are 0 or 1
+        lambda d: d.stop(5),
+        lambda d: d.stop("1"),
+    ]:
+        device = make_device()
+        try:
+            call(device)
+            raise AssertionError("no error")
+        except PulsePal.PulsePalError:
+            assert device.port.writes == []
+
+
+def test_a_refused_value_is_read_back_from_the_device():
+    """The firmware resets a value it refuses, so the class reads that parameter back (op 93)
+    for the channels it sent, and leaves every other local value as it was."""
+    device = make_device(ack=0)
+    device.phase1_voltage[1] = 7   # A local edit, not yet synced
+    device.port.response = bytearray(bytes([0]) + parameter_message(byte_value=1))
+    try:
+        device.set_output_param("custom_train_id", 2, 3)
+        raise AssertionError("a reply of 0 did not raise")
+    except PulsePal.PulsePalError as error:
+        assert "rejected" in str(error)
+    assert device.port.writes[1] == bytes([OP_MENU_BYTE, 93])
+    assert device.custom_train_id[1:5] == [0, 1, 0, 0]   # Channel 2 from the device
+    assert device.phase1_voltage[1] == 7
+
+
+def test_a_refused_settings_load_reads_the_parameters_back():
+    """A failed load leaves the device on its own defaults, so the local copy is read back."""
+    device = make_device()
+    device.port.response = bytearray(bytes([0]) + parameter_message(cycles=2))
+    try:
+        device.sd_settings("MISSING.pps", "load")
+        raise AssertionError("a refused load did not raise")
+    except PulsePal.PulsePalError:
+        pass
+    assert device.port.writes[-1] == bytes([OP_MENU_BYTE, 93])
+    assert device.phase1_duration[1:5] == [0.0001] * 4
+
+
 def parameter_message(cycles=200, volt_bits=None, byte_value=1):
     """Build the 178-byte parameter set that op 93 returns."""
     if volt_bits is None:

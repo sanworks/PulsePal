@@ -255,10 +255,10 @@ classdef PulsePalDevice < handle
                 if ~ismember(channel, [1 2 3 4])
                     error('channel must be 1, 2, 3 or 4')
                 end
-                if voltageOffset < -0.1 || voltageOffset > 0.1
+                if ~isscalar(voltageOffset) || ~(voltageOffset >= -0.1 && voltageOffset <= 0.1) % Also refuses NaN
                     error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
                 end
-                voltageBits = voltageOffset*(1/(20/65536));
+                voltageBits = obj.roundHalfEven(voltageOffset*(1/(20/65536)));
                 obj.Port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
                 obj.confirmWrite;
                 disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
@@ -275,6 +275,9 @@ classdef PulsePalDevice < handle
         function sendCustomWaveform(obj, trainID, samplingPeriod, voltages)
             % Sends a custom waveform to the device. trainId = 1 or 2. samplingPeriod = sec. voltages = volts.
             nVoltages = length(voltages);
+            if ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
+                error('Error: the sampling period must be a positive number of seconds.');
+            end
             if rem(round(samplingPeriod*1000000), obj.cyclePeriod*2) > 0
                 error(['Error: sampling period must be a multiple of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
@@ -340,13 +343,24 @@ classdef PulsePalDevice < handle
             obj.Port.write(Message, 'uint8');
             confirmed = 1;
             if obj.firmwareVersion > 21
-                confirmed = obj.confirmWrite(); % Sent after the file operation has finished
+                confirmed = obj.Port.read(1, 'uint8'); % Sent after the file operation has finished
             elseif OpByte == 2
                 pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
             end
             if OpByte == 2
+                % Read the parameters back even if the load failed: the device then loads its own default
+                % parameters (not the ones setDefaultParams() sets), and the properties must describe them.
                 obj.importCurrentParamsFromPulsePal;
             end
+            if isempty(confirmed) || confirmed ~= 1
+                if OpByte == 2
+                    error(['Error: Pulse Pal could not load ' settingsFileName '. It has loaded its default '...
+                        'parameters instead, and the properties have been updated to match.']);
+                else
+                    error('Error: Pulse Pal did not return an expected byte to confirm the operation.');
+                end
+            end
+            confirmed = true;
         end
 
         function saveParameters(obj, filename)
@@ -584,6 +598,14 @@ classdef PulsePalDevice < handle
             else
                 paramCodeString = 'A parameter';
             end
+            % NaN fails no comparison, so it passed the range check below and reached the device as 0: -10 V,
+            % or a phase of 0 cycles
+            if (~isnumeric(param) && ~islogical(param)) || ~all(isfinite(double(param(:))))
+                error([paramCodeString ' must be a number (NaN and Inf are not allowed).']);
+            end
+            if strcmp(type, 'Byte') && any(double(param(:)) ~= round(double(param(:))))
+                error([paramCodeString ' must be a whole number.']);
+            end
             if (sum(param < RangeLow) > 0) || (sum(param > RangeHigh) > 0)
                 error([paramCodeString ' was out of range: ' num2str(RangeLow) ' to ' num2str(RangeHigh)]);
             end
@@ -591,7 +613,16 @@ classdef PulsePalDevice < handle
 
         function bits = volts2Bits(obj, voltage)
             % Convert -10 to +10 V values to 16-bit DAC codes.
-            bits = uint16(min(max(round(((double(voltage) + 10) ./ 20) .* 65535), 0), 65535));
+            bits = uint16(min(max(obj.roundHalfEven(((double(voltage) + 10) ./ 20) .* 65535), 0), 65535));
+        end
+
+        function rounded = roundHalfEven(obj, value)
+            % Round to the nearest integer, and a value exactly halfway between two to the even one, as the Python
+            % and C++ classes do, so that all three send the same DAC codes and cycle counts. MATLAB's round() and
+            % uint32() take halves away from zero: 125 us (2.5 cycles) was 150 us here and 100 us in Python.
+            rounded = round(value);
+            halfway = abs(value - fix(value)) == 0.5;
+            rounded(halfway) = 2*round(value(halfway)/2);
         end
 
         function volts = bytes2Volts(obj, bytes)
@@ -643,8 +674,11 @@ classdef PulsePalDevice < handle
                         otherwise
                             range = [0 3600];
                     end
-                    obj.checkParamRange(val, 'Time', range, paramCode);
-                    value2send = val*obj.cycleFrequency;
+                    % Checked in whole timer cycles, as the device receives it: [100 100 100 100]*1e-6 is
+                    % 9.999999999999999e-05 in floating point, under the 0.0001 minimum, but is exactly 2 cycles.
+                    obj.checkParamRange(val, 'Time', [-Inf Inf], paramCode); % A number, not NaN or Inf
+                    value2send = obj.roundHalfEven(double(val)*obj.cycleFrequency);
+                    obj.checkParamRange(value2send/obj.cycleFrequency, 'Time', range, paramCode);
                 case 'Byte'
                     switch paramCode
                         case 1
@@ -723,9 +757,9 @@ classdef PulsePalDevice < handle
                     end
                 end
             end
-            TimeData = [obj.phase1Duration; obj.interPhaseInterval; obj.phase2Duration;...
+            TimeData = obj.roundHalfEven([obj.phase1Duration; obj.interPhaseInterval; obj.phase2Duration;...
                 obj.interPulseInterval; obj.burstDuration; obj.interBurstInterval;...
-                obj.pulseTrainDuration; obj.pulseTrainDelay]*obj.cycleFrequency;
+                obj.pulseTrainDuration; obj.pulseTrainDelay]*obj.cycleFrequency);
             TimeData = TimeData';
             VoltageData = [obj.volts2Bits(obj.phase1Voltage); obj.volts2Bits(obj.phase2Voltage); obj.volts2Bits(obj.restingVoltage)];
             VoltageData = VoltageData';
@@ -754,6 +788,9 @@ classdef PulsePalDevice < handle
                 error('There must be one voltage value (0-255) for every timestamp');
             end
             nPulses = length(pulseTimes);
+            if ~all(isfinite(double(pulseTimes(:)))) || ~all(isfinite(double(voltages(:))))
+                error('Error: custom pulse times and voltages must be numbers (NaN and Inf are not allowed).');
+            end
             if nPulses > obj.maxCustomPulses
                 error(['Error: Attempted to send ' num2str(nPulses) ' pulses. Pulse Pal '... 
                     num2str(obj.info.hardwareVersion) ' can only store '... 
@@ -765,7 +802,7 @@ classdef PulsePalDevice < handle
             if (sum(pulseTimes < 0) > 0)
                 error('Error: Custom pulse times must be positive');
             end
-            CandidateTimes = uint32(pulseTimes*obj.cycleFrequency);
+            CandidateTimes = uint32(obj.roundHalfEven(double(pulseTimes)*obj.cycleFrequency));
             CandidateVoltages = voltages;
             % The device plays each pulse until the next one's time, so a time that is not later than the one
             % before it would freeze the output for the rest of the train. diff() is taken on doubles because

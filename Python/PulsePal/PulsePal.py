@@ -50,8 +50,15 @@ P.set_output_param("inter_pulse_interval", [1, 2, 3, 4], 0.2)
 
 Voltages are in volts in the range [-10, 10]. Times are in seconds, and
 are rounded to the nearest cycle of the device's hardware timer (see
-`DeviceInfo.cycle_frequency`). Enumerated parameters are integers, and
+`DeviceInfo.cycle_frequency`); a time exactly halfway between two cycles
+rounds to the even one, as in the MATLAB and C++ classes, and voltages
+round to the nearest DAC code the same way. Enumerated parameters are integers, and
 their meanings are given with each attribute below.
+
+A value the device cannot play raises `PulsePalError` before anything is
+sent: a voltage outside [-10, 10], a time that is negative or not a
+number, a phase that rounds to 0 cycles, or an enumerated value out of
+range.
 
 ## Further reading
 
@@ -81,6 +88,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 from decimal import Decimal
 from dataclasses import dataclass
+import math
 import numbers
 import struct
 import time
@@ -404,6 +412,8 @@ class PulsePalDevice:
         "playback_mode",
     )
     _TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
+    # Output parameter codes whose values are 0 or 1
+    _BINARY_PARAMETER_CODES = (1, 12, 13, 15, 16, 18)
 
     _OUTPUT_PARAMETER_ATTRS = {
         1: "is_biphasic",
@@ -668,10 +678,10 @@ class PulsePalDevice:
             voltage: Voltage to set, in volts [-10, 10].
 
         Raises:
-            PulsePalError: If the device does not acknowledge the
-                command.
+            PulsePalError: If the voltage is outside [-10, 10], or the
+                device does not acknowledge the command.
         """
-        voltage_bits = self._volts_to_bits(voltage)
+        voltage_bits = self._volts_to_bits(voltage, "voltage")
         self._write_serial(
             (self._OP_MENU_BYTE, 79, channel),
             "uint8",
@@ -705,12 +715,13 @@ class PulsePalDevice:
             )
         if channel not in (1, 2, 3, 4):
             raise ValueError("channel must be 1, 2, 3 or 4")
-        if voltage_offset < -0.1 or voltage_offset > 0.1:
+        if not -0.1 <= voltage_offset <= 0.1:  # Also refuses NaN
             raise ValueError(
                 "voltage_offset for zero code calibration must be in range "
                 "[-0.1, 0.1]"
             )
-        voltage_bits = voltage_offset * (1 / (20 / 65536))
+        # To the nearest DAC code, halves to even, as the MATLAB class rounds it (int() truncated)
+        voltage_bits = int(round(voltage_offset * (1 / (20 / 65536))))
         self._write_serial(
             (self._OP_MENU_BYTE, 96, channel - 1),
             "uint8",
@@ -753,17 +764,18 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the parameter name is not recognized, the
-                channels or number of values are invalid, a value does not
-                fit the datatype the device expects, or the device does not
-                acknowledge the command.
+                channels or number of values are invalid, a value is out
+                of range for the parameter (nothing is sent), or the device
+                does not acknowledge the command. When the device refuses a
+                value, the local copy of the parameter is first read back
+                from the device, which resets a value it refuses.
         """
         param_code = self._get_output_param_code(param_name)
 
         if isinstance(channel, numbers.Integral):
-            self._set_one_output_param(param_code, int(channel), value)
-            return
-
-        channels = [int(ch) for ch in self._as_list(channel)]
+            channels = [int(channel)]
+        else:
+            channels = [int(ch) for ch in self._as_list(channel)]
         if (
             not channels
             or len(set(channels)) != len(channels)
@@ -781,6 +793,7 @@ class PulsePalDevice:
                 f"{len(values)} values were given for {len(channels)} "
                 "channels. Give one value, or one value per channel."
             )
+        self._check_output_values(param_code, channels, values)
 
         if sorted(channels) == [1, 2, 3, 4] and self.info.firmware_version > 21:
             # One op 91 command programs this parameter on all four channels
@@ -792,7 +805,10 @@ class PulsePalDevice:
                 data,
                 datatype,
             )
-            self._read_ack("set_output_param()")
+            self._read_ack(
+                "set_output_param()",
+                on_refusal=lambda: self._refresh_output_param(param_code, (1, 2, 3, 4)),
+            )
             for ch, channel_value in zip((1, 2, 3, 4), values_by_channel):
                 self._set_output_param_value(param_code, ch, channel_value)
         else:
@@ -819,17 +835,26 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the parameter name is not recognized, the
-                value does not fit the datatype the device expects, or
-                the device does not acknowledge the command.
+                channel or value is out of range (nothing is sent), or the
+                device does not acknowledge the command.
         """
         original_value = value
         param_code = self._get_trigger_param_code(param_name)
+        if param_code == 128:
+            if not (isinstance(channel, numbers.Integral) and channel in (1, 2)):
+                raise PulsePalError(
+                    f"channel must be a trigger channel number, 1 or 2. Received {channel!r}."
+                )
+            self._check_trigger_mode(value, channel)
 
         self._write_serial(
             (self._OP_MENU_BYTE, 74, param_code, channel, value),
             "uint8",
         )
-        self._read_ack("program_trigger_channel_param()")
+        self._read_ack(
+            "program_trigger_channel_param()",
+            on_refusal=lambda: self._refresh_trigger_mode(channel),
+        )
 
         if param_code in (1, 128):
             self.trigger_mode[channel] = original_value
@@ -854,9 +879,11 @@ class PulsePalDevice:
         effect is deferred that way.
 
         Raises:
-            PulsePalError: If the device does not acknowledge the
+            PulsePalError: If a value is out of range for its parameter
+                (nothing is sent), or the device does not acknowledge the
                 command.
         """
+        self._check_program()
         # _sync_all_params() for firmware v22+ uses the newer packed sync
         # opcode (92). _sync_all_params_legacy() uses the less efficient
         # legacy packed sync opcode (73).
@@ -864,7 +891,7 @@ class PulsePalDevice:
             self._sync_all_params()
         else:
             self._sync_all_params_legacy()
-        self._read_ack("sync_to_device()")
+        self._read_ack("sync_to_device()", on_refusal=self._refresh_after_refused_sync)
 
     def sync_from_device(self):
         """Read all parameters from the device into the local copy.
@@ -880,6 +907,16 @@ class PulsePalDevice:
                 or the device does not return the full parameter set.
         """
         self._require_firmware(22, "sync_from_device()")
+        for attr_name, values in self._read_device_params().items():
+            setattr(self, attr_name, values)
+
+    def _read_device_params(self):
+        """Read the device's parameters (op 93).
+
+        Returns a dict of parameter lists, indexed by channel like the
+        parameter array attributes. Continuous playback mode is not part
+        of op 93, so `playback_mode` is not included.
+        """
         self._write_serial((self._OP_MENU_BYTE, 93), "uint8")
         # The device sends the whole parameter set as one message, so read it in one go and
         # unpack it here. See "Op codes", op 93, in /Firmware/PROTOCOL.md.
@@ -888,6 +925,7 @@ class PulsePalDevice:
             f"{self._ENDIANNESS}32I12H26B",
             message,
         )
+        params = {}
 
         for index, attr_name in enumerate((
                 "phase1_duration",
@@ -900,8 +938,7 @@ class PulsePalDevice:
                 "pulse_train_delay",
         )):
             cycles = values[index * 4:index * 4 + 4]
-            setattr(self, attr_name,
-                    [float("nan")] + [self._cycles_to_seconds(x) for x in cycles])
+            params[attr_name] = [float("nan")] + [self._cycles_to_seconds(x) for x in cycles]
 
         for index, attr_name in enumerate((
                 "phase1_voltage",
@@ -909,8 +946,7 @@ class PulsePalDevice:
                 "resting_voltage",
         )):
             bits = values[32 + index * 4:32 + index * 4 + 4]
-            setattr(self, attr_name,
-                    [float("nan")] + [self._bits_to_volts(x) for x in bits])
+            params[attr_name] = [float("nan")] + [self._bits_to_volts(x) for x in bits]
 
         for index, attr_name in enumerate((
                 "is_biphasic",
@@ -920,9 +956,9 @@ class PulsePalDevice:
                 "link_trigger_channel1",
                 "link_trigger_channel2",
         )):
-            setattr(self, attr_name,
-                    [float("nan")] + list(values[44 + index * 4:44 + index * 4 + 4]))
-        self.trigger_mode = [float("nan")] + list(values[68:70])
+            params[attr_name] = [float("nan")] + list(values[44 + index * 4:44 + index * 4 + 4])
+        params["trigger_mode"] = [float("nan")] + list(values[68:70])
+        return params
 
     def send_custom_pulse_train(
         self,
@@ -972,11 +1008,11 @@ class PulsePalDevice:
             )
 
         pulse_times_cycles = [
-            self._seconds_to_cycles(pulse_time)
+            self._seconds_to_cycles(pulse_time, "pulse_times")
             for pulse_time in pulse_times
         ]
         pulse_voltage_bits = [
-            self._volts_to_bits(voltage)
+            self._volts_to_bits(voltage, "pulse_voltages")
             for voltage in pulse_voltages
         ]
 
@@ -1030,10 +1066,10 @@ class PulsePalDevice:
         """
         pulse_voltages = self._as_list(pulse_voltages)
         n_pulses = len(pulse_voltages)
-        pulse_width_cycles = self._seconds_to_cycles(pulse_width)
+        pulse_width_cycles = self._seconds_to_cycles(pulse_width, "pulse_width")
         pulse_times = [pulse_width_cycles * i for i in range(n_pulses)]
         pulse_voltage_bits = [
-            self._volts_to_bits(voltage)
+            self._volts_to_bits(voltage, "pulse_voltages")
             for voltage in pulse_voltages
         ]
 
@@ -1062,9 +1098,10 @@ class PulsePalDevice:
         P.trigger([1, 4])       # several channel numbers
         ```
 
-        Channel numbers outside 1-4 are ignored. A channel that is already
-        playing a pulse train ignores the trigger, and `stop()` cancels a
-        trigger that has not started its channel yet.
+        Channel numbers may be NumPy integers, and a list of them may be a
+        NumPy array. A channel that is already playing a pulse train
+        ignores the trigger, and `stop()` cancels a trigger that has not
+        started its channel yet.
 
         Args:
             channel1: `1` to trigger channel 1, otherwise `0`; or, when
@@ -1073,40 +1110,30 @@ class PulsePalDevice:
             channel2: `1` to trigger channel 2, otherwise `0`.
             channel3: `1` to trigger channel 3, otherwise `0`.
             channel4: `1` to trigger channel 4, otherwise `0`.
+
+        Raises:
+            PulsePalError: If a channel number is not 1-4, or a flag is not
+                0 or 1. Nothing is triggered.
         """
         trigger_byte = 0
 
         # Options 2 & 3: Only one argument was provided
         if channel2 is None and channel3 is None and channel4 is None:
-            # Option 2: Single integer
-            if isinstance(channel1, int):
-                channels_to_trigger = [channel1]
-            # Option 3: List/Tuple of integers
-            elif isinstance(channel1, (list, tuple, set)):
-                channels_to_trigger = channel1
-            else:
-                channels_to_trigger = []
-
-            # Use bitwise shifts to calculate the trigger byte
-            # (ch1=bit0, ch2=bit1, etc.)
-            for ch in channels_to_trigger:
-                if 1 <= ch <= 4:
-                    trigger_byte |= (1 << (ch - 1))
+            # A single channel number, or a list of them (ch1=bit0, ch2=bit1, etc.)
+            for ch in self._output_channel_numbers(channel1, "trigger()"):
+                trigger_byte |= (1 << (ch - 1))
 
         # Option 1: Original input scheme (logicals for each channel)
         else:
             # Fallback to 0 if an argument was omitted via kwargs
-            c1 = channel1 if channel1 is not None else 0
-            c2 = channel2 if channel2 is not None else 0
-            c3 = channel3 if channel3 is not None else 0
-            c4 = channel4 if channel4 is not None else 0
-
-            trigger_byte = (
-                (1 * c1)
-                + (2 * c2)
-                + (4 * c3)
-                + (8 * c4)
-            )
+            flags = [0 if flag is None else flag for flag in (channel1, channel2, channel3, channel4)]
+            for bit, flag in enumerate(flags):
+                if not (isinstance(flag, numbers.Integral) and flag in (0, 1)):
+                    raise PulsePalError(
+                        "trigger(): with more than one argument, each is a flag for one "
+                        f"channel, 0 or 1. Received {flag!r} for channel {bit + 1}."
+                    )
+                trigger_byte |= int(flag) << bit
 
         self._write_serial((self._OP_MENU_BYTE, 77, trigger_byte), "uint8")
 
@@ -1130,7 +1157,11 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If the file name has no `.pps` extension or
                 is too long, `op` is not one of the three operations, or
-                the device does not acknowledge the command.
+                the device does not acknowledge the command. A load that
+                fails leaves the device on its own default parameters
+                (not the ones `set_default_params` sets), and the local
+                copy is read back from the device before the error is
+                raised.
         """
         if ".pps" not in settings_file_name:
             raise PulsePalError(
@@ -1154,7 +1185,12 @@ class PulsePalDevice:
             "uint8",
         )
         if self.info.firmware_version > 21:
-            self._read_ack("sd_settings()")  # Sent after the file operation has finished
+            # Sent after the file operation has finished. A refused load leaves the device on
+            # its default parameters, so the local copy is read back first.
+            self._read_ack(
+                "sd_settings()",
+                on_refusal=self.sync_from_device if op_byte == 2 else None,
+            )
         elif op_byte == 2:
             time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
         if op_byte == 2:
@@ -1168,8 +1204,12 @@ class PulsePalDevice:
 
         Args:
             channels (list or tuple, optional): A list of channels to stop, e.g.,
-                [1, 3, 4] to stop playback on Ch1, Ch3, and Ch4. Default is None,
-                which stops all channels. (Requires firmware v22+)
+                [1, 3, 4] to stop playback on Ch1, Ch3, and Ch4, or a single
+                channel number. NumPy integers and arrays are accepted. Default is
+                None, which stops all channels. (Requires firmware v22+)
+
+        Raises:
+            PulsePalError: If a channel number is not 1-4.
         """
         bit_code = 15  # Default: 15 (binary 1111) stops all channels
 
@@ -1177,15 +1217,8 @@ class PulsePalDevice:
             if self.info.firmware_version < 22:
                 raise ValueError("stop() cannot address individual channels prior to firmware v22")
 
-            # If a single integer is provided, wrap it in a list
-            if isinstance(channels, int):
-                channels = [channels]
-
             bit_code = 0
-            for ch in channels:
-                if ch not in (1, 2, 3, 4):
-                    raise ValueError("All channels must be valid Pulse Pal output channel indexes: 1, 2, 3 or 4")
-
+            for ch in self._output_channel_numbers(channels, "stop()"):
                 # Bitwise OR (|=) handles the summation, safely ignoring duplicate channel entries
                 bit_code |= 1 << (ch - 1)
 
@@ -1489,11 +1522,13 @@ class PulsePalDevice:
             return values[0]
         return list(values)
 
-    def _read_ack(self, context):
+    def _read_ack(self, context, on_refusal=None):
         """Read a one-byte acknowledgement from the device.
 
         The device replies 1 if it executed the command, or 0 if it rejected
-        the command because a value was out of range.
+        the command because a value was out of range. On a 0, on_refusal()
+        is called before the error is raised: the device resets a value it
+        refuses, so callers use it to read the value back into the local copy.
         """
         try:
             acknowledgement = self._read_serial(1, "uint8")
@@ -1503,11 +1538,17 @@ class PulsePalDevice:
                 f"after a call to {context}."
             ) from exc
         if acknowledgement != 1:
-            raise PulsePalError(
+            refusal = PulsePalError(
                 f"Error: Pulse Pal rejected the command sent by {context}. "
                 "This usually means that a channel number, parameter code or "
                 "value was out of range for the connected device."
             )
+            if on_refusal is not None:
+                try:
+                    on_refusal()
+                except PulsePalError as exc:
+                    raise refusal from exc
+            raise refusal
 
     def _pack_values(self, values, datatype):
         """Pack scalar, list/tuple, or NumPy array values into bytes."""
@@ -1589,7 +1630,10 @@ class PulsePalDevice:
             data,
             datatype,
         )
-        self._read_ack("program_output_channel_param()")
+        self._read_ack(
+            "program_output_channel_param()",
+            on_refusal=lambda: self._refresh_output_param(param_code, (channel,)),
+        )
         self._set_output_param_value(param_code, channel, value)
 
     def _encode_output_param(self, param_code, values):
@@ -1600,11 +1644,145 @@ class PulsePalDevice:
         for times, and bytes for everything else.
         """
         values = self._as_list(values)
+        name = self._OUTPUT_PARAMETER_ATTRS.get(param_code, f"parameter {param_code}")
         if param_code in (2, 3, 17):
-            return [self._volts_to_bits(v) for v in values], "uint16"
+            return [self._volts_to_bits(v, name) for v in values], "uint16"
         if 4 <= param_code <= 11:
-            return [self._seconds_to_cycles(v) for v in values], "uint32"
+            return [self._seconds_to_cycles(v, name) for v in values], "uint32"
         return values, "uint8"
+
+    def _check_output_values(self, param_code, channels, values):
+        """Raise PulsePalError, before anything is sent, for values the device cannot play.
+
+        The device refuses them too, but it also resets them (see validateOutputParams() in
+        /Firmware/PulsePal3/USBOps.ino), so the local copy would describe a different program.
+        Whether an inter-pulse interval of 0 is allowed depends on is_biphasic, so each is
+        checked against the local copy of the other.
+        """
+        for ch, value in zip(channels, values):
+            self._check_output_value(param_code, value, ch)
+            if param_code == 7:
+                self._check_inter_pulse_interval(ch, value, self.is_biphasic[ch])
+            elif param_code == 1:
+                self._check_inter_pulse_interval(ch, self.inter_pulse_interval[ch], value)
+
+    def _check_program(self):
+        """Check the whole local copy before sync_to_device() sends it. See _check_output_values()."""
+        for param_code, attr_name in self._OUTPUT_PARAMETER_ATTRS.items():
+            values = getattr(self, attr_name)
+            for ch in range(1, 5):
+                self._check_output_value(param_code, values[ch], ch)
+        for ch in range(1, 5):
+            self._check_inter_pulse_interval(ch, self.inter_pulse_interval[ch], self.is_biphasic[ch])
+        for ch in (1, 2):
+            self._check_trigger_mode(self.trigger_mode[ch], ch)
+
+    def _check_output_value(self, param_code, value, channel):
+        """Raise PulsePalError if a value can never be played for this output parameter."""
+        attr_name = self._OUTPUT_PARAMETER_ATTRS.get(param_code)
+        if attr_name is None:
+            return  # The device refuses a code it does not know
+        name = f"{attr_name} on channel {channel}"
+        if param_code in (2, 3, 17):
+            self._volts_to_bits(value, name)
+        elif 4 <= param_code <= 11:
+            cycles = self._seconds_to_cycles(value, name)
+            if cycles == 0 and param_code in (4, 6):
+                # handler() would find the end of a 0 cycle phase only after it had passed, and hold
+                # the phase's voltage for the rest of the train
+                raise PulsePalError(
+                    f"{name} rounds to 0 cycles. A phase must last at least one "
+                    f"{self.info.cycle_period_us} us cycle. Received {value!r}."
+                )
+        elif param_code == 14:
+            self._check_whole_number(value, name, 0, self.info.n_custom_pulse_trains)
+        elif param_code in self._BINARY_PARAMETER_CODES:
+            self._check_whole_number(value, name, 0, 1)
+
+    def _check_inter_pulse_interval(self, channel, interval, is_biphasic):
+        """Raise PulsePalError if a monophasic channel would get an inter-pulse interval of 0 cycles.
+
+        The train would stop after one pulse. A biphasic channel with no interval plays its pulses
+        back to back, so 0 is allowed there.
+        """
+        try:
+            cycles = self._seconds_to_cycles(interval)
+            biphasic = int(is_biphasic)
+        except (PulsePalError, TypeError, ValueError):
+            return  # The other parameter's local value is not valid; it is checked when it is sent
+        if cycles == 0 and biphasic == 0:
+            raise PulsePalError(
+                f"inter_pulse_interval on channel {channel} rounds to 0 cycles, which a monophasic "
+                f"channel cannot play: its train would stop after one pulse. Use at least one "
+                f"{self.info.cycle_period_us} us cycle, or make the channel biphasic. To change a "
+                "biphasic channel with no interval to monophasic, set inter_pulse_interval first."
+            )
+
+    def _check_trigger_mode(self, value, channel):
+        """Raise PulsePalError if value is not a trigger mode the device has."""
+        # Param sync mode (3) is on Pulse Pal 3 with firmware v22 or newer
+        param_sync = (self.info.hardware_version or 2) > 2 and self.info.firmware_version > 21
+        self._check_whole_number(
+            value, f"trigger_mode on trigger channel {channel}", 0, 3 if param_sync else 2
+        )
+
+    def _check_whole_number(self, value, name, low, high):
+        """Raise PulsePalError unless value is a whole number from low to high."""
+        valid = (
+            isinstance(value, numbers.Real)
+            and math.isfinite(value)
+            and value == int(value)
+            and low <= value <= high
+        )
+        if not valid:
+            raise PulsePalError(
+                f"{name} must be a whole number from {low} to {high}. Received {value!r}."
+            )
+
+    def _refresh_output_param(self, param_code, channels):
+        """Read an output parameter back from the device into the local copy, for these channels.
+
+        Called after the device refused a value for them, which it resets. The parameter's other
+        channels, and other parameters, keep their local values, which may hold edits not yet synced.
+        """
+        attr_name = self._OUTPUT_PARAMETER_ATTRS.get(param_code)
+        if attr_name is None or self.info.firmware_version < 22:
+            return  # Nothing local to correct, or no op 93 to read it with
+        device_values = self._read_device_params().get(attr_name)
+        if device_values is None:
+            return  # Not in op 93 (continuous playback mode)
+        local_values = getattr(self, attr_name)
+        for ch in channels:
+            local_values[ch] = device_values[ch]
+
+    def _refresh_trigger_mode(self, channel):
+        """Read a trigger channel's mode back from the device, after the device refused a new one."""
+        if self.info.firmware_version > 21 and channel in (1, 2):
+            self.trigger_mode[channel] = self._read_device_params()["trigger_mode"][channel]
+
+    def _refresh_after_refused_sync(self):
+        """Read the parameters back after the device refused a sync_to_device() set.
+
+        The device programs the set with the refused values reset, so the local copy is read back.
+        In param sync mode the device stores the set instead, and op 93 would return the parameters
+        playing now, so the local copy is left as it is.
+        """
+        if self.info.firmware_version > 21 and 3 not in self.trigger_mode[1:3]:
+            self.sync_from_device()
+
+    def _output_channel_numbers(self, channels, context):
+        """Return output channel numbers as a list of ints.
+
+        channels is one integer (NumPy integers included) or an iterable of them (NumPy arrays
+        included). Raises PulsePalError for anything else, or a channel that is not 1-4.
+        """
+        channel_list = self._as_list(channels)
+        if not all(isinstance(ch, numbers.Integral) and 1 <= ch <= 4 for ch in channel_list):
+            raise PulsePalError(
+                f"{context}: channels must be output channel numbers 1-4, as one integer or a "
+                f"list of them. Received {channels!r}."
+            )
+        return [int(ch) for ch in channel_list]
 
     def _set_output_param_value(self, param_code, channel, original_value):
         """Store a programmed value in its local parameter array."""
@@ -1618,11 +1796,21 @@ class PulsePalDevice:
         """Convert a value to a Decimal with PulsePal precision."""
         return Decimal(value).quantize(Decimal("1.0000"))
 
-    def _volts_to_bits(self, value):
-        """Convert -10 V to +10 V to the corresponding DAC bit value."""
-        normalized = (float(value) + 10) / 20
+    def _volts_to_bits(self, value, name="voltage"):
+        """Convert -10 V to +10 V to the corresponding DAC bit value.
+
+        Rounds to the nearest code, halves to even (round()), as the MATLAB and C++ classes do.
+        Raises PulsePalError for a voltage outside [-10, 10] or not a number: clamping it would
+        play a different voltage.
+        """
+        try:
+            volts = float(value)
+        except (TypeError, ValueError):
+            volts = float("nan")
+        if not -10 <= volts <= 10:  # Also refuses NaN
+            raise PulsePalError(f"{name} must be in [-10, 10] V. Received {value!r}.")
         bit_max = int(self._dac_bit_max)
-        return int(min(max(round(normalized * bit_max), 0), bit_max))
+        return int(round((volts + 10) / 20 * bit_max))
 
     def _bits_to_volts(self, value):
         """Convert a DAC code to volts, snapping clean values within 1 LSB."""
@@ -1642,9 +1830,25 @@ class PulsePalDevice:
         # Otherwise, return the standard 4-decimal reading
         return round(raw_volts, 4)
 
-    def _seconds_to_cycles(self, value):
-        """Convert seconds to the corresponding refresh-cycle count."""
-        return int(round(float(value) * float(self.info.cycle_frequency)))
+    def _seconds_to_cycles(self, value, name="time"):
+        """Convert seconds to the corresponding refresh-cycle count.
+
+        Rounds to the nearest cycle, halves to even (round()), as the MATLAB and C++ classes do:
+        125 us, 2.5 cycles, is 2 cycles in all three. Raises PulsePalError for a time that is
+        negative, not a number, or too long for the device.
+        """
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            seconds = float("nan")
+        if not (math.isfinite(seconds) and seconds >= 0):
+            raise PulsePalError(f"{name} must be a time of 0 s or more. Received {value!r}.")
+        cycles = int(round(seconds * float(self.info.cycle_frequency)))
+        if cycles > 2**32 - 1:
+            raise PulsePalError(
+                f"{name} is too long for the device ({2**32 - 1} cycles at most). Received {value!r}."
+            )
+        return cycles
 
     def _cycles_to_seconds(self, value):
         """Convert hardware timer cycle counts to seconds."""
