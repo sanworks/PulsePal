@@ -59,7 +59,7 @@ classdef WavePalDevice < handle
     % a file, and a license block there would hide it.
 
     properties
-        Port % The serialport object connected to the device
+        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         samplingRate = 10000 % Sampling rate of all output channels, in Hz: a whole number from 1 to info.maxSamplingRate.
                              % It can change during playback. The rate played can differ slightly: see actualSamplingRate.
         outputRange = '' % Voltage range of all output channels: '0V:5V', '0V:10V', '-5V:5V' or '-10V:10V'. The smallest
@@ -147,7 +147,14 @@ classdef WavePalDevice < handle
             if isunix
                 defaultBaudRate = 4000000;
             end
-            obj.Port = serialport(portString, defaultBaudRate);
+            % On Windows, serialport delivers each reply about 16 ms after it arrives, so every command that waits for a
+            % confirm byte took 16 ms. .NET's SerialPort takes about 0.3 ms (see pulsepal.DotNetSerialPort). It is not
+            % available if MATLAB has been set to use .NET (Core) with dotnetenv, and serialport is used then.
+            if pulsepal.DotNetSerialPort.isAvailable()
+                obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
+            else
+                obj.Port = serialport(portString, defaultBaudRate);
+            end
             try
                 setDTR(obj.Port, true);
                 flush(obj.Port); % Discard anything left in the buffers by an earlier session

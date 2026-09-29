@@ -20,6 +20,9 @@ MATLAB/Legacy/LastSerialPortUsed.mat
 # MATLAB: oscilloscope test panel for the Python and MATLAB classes (lab-specific, not yet part of the repository)
 MATLAB/tests/ScopeTestPanel/
 
+# Firmware: USB serial latency experiment (see its README.md), not yet part of the repository
+Firmware/tools/UsbLatencyTest/
+
 # OS
 .DS_Store
 Thumbs.db

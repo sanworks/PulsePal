@@ -20,7 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 classdef PulsePalDevice < handle
     properties
-        Port % Serial port
+        Port % Serial port: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport. Both have write(), read(), NumBytesAvailable and setDTR()
         info % Information about the connected device
         autoSync = true; % If true, changing parameter fields automatically updates PulsePal device. Otherwise, use 'sync' method.
         isBiphasic % Remaining properties are parameters. See descriptions at: https://sites.google.com/site/pulsepalwiki/parameter-guide
@@ -115,11 +115,17 @@ classdef PulsePalDevice < handle
             if isunix
                 defaultBaudRate = 4000000;
             end
-            obj.Port = serialport(portString, defaultBaudRate);
+            % On Windows, serialport delivers each reply about 16 ms after it arrives, so every command that waits for a
+            % confirm byte took 16 ms. .NET's SerialPort takes about 0.3 ms (see pulsepal.DotNetSerialPort). It is not
+            % available if MATLAB has been set to use .NET (Core) with dotnetenv, and serialport is used then.
+            if pulsepal.DotNetSerialPort.isAvailable()
+                obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
+            else
+                obj.Port = serialport(portString, defaultBaudRate);
+            end
             setDTR(obj.Port, true);
             obj.Port.write([obj.OpMenuByte 72], 'uint8');
-            pause(.1);
-            HandShakeOkByte = obj.Port.read(1, 'uint8');
+            HandShakeOkByte = obj.Port.read(1, 'uint8'); % read() waits for the reply, up to the port's Timeout
             if HandShakeOkByte == 75
                 % Check firmware version
                 obj.firmwareVersion = obj.Port.read(1, 'uint32');
