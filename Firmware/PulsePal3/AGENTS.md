@@ -65,7 +65,8 @@ the `--show` output before concluding that a function really changed.
    interrupted by another in the timer interrupt leaves `loop()` waiting forever; this froze
    devices in the field. The one exception is `loop()`'s comm failure handling, which calls
    `dacWrite()` between `stopHardwareTimer()` and `startHardwareTimer()`, when no interrupt
-   can run.
+   can run. To send a new resting voltage from `loop()`, use `setRestingVoltageIfIdle()`: a
+   `setDAC()` on a channel that is playing cuts its current pulse short.
 2. **`setDAC()` sets `DACFlags[channel]` before `DACFlag`.** In the other order, an interrupt
    landing between the two lines clears `DACFlag` and loses the update.
 3. **Do not write to the screen, wait, or use the microSD card inside the timer interrupt.**
@@ -99,7 +100,7 @@ the `--show` output before concluding that a function really changed.
 
 `handler()` runs every 50 µs. `TC3_Handler()` is its entry point on Pulse Pal 2; on Pulse
 Pal 3, `IntervalTimer` calls it directly. It calls `killChannel()`, `setDAC()`, `dacWrite()`,
-`mirrorAboutZero()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
+`mirrorAboutZero()`, `pulseFitsInBurst()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`. On Pulse Pal 3 it also calls `startParamSync()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.

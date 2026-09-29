@@ -26,6 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   setDAC()
 //   dacWrite()
 //   outputRestingVoltages()
+//   setRestingVoltageIfIdle()
 //   clampU16()
 //   ProgramDAC()
 //   startHardwareTimer()
@@ -68,11 +69,23 @@ void dacWrite() {
   digitalWriteDirect(LDACPin,LOW);
 }
 
-// Sets all output channels to their resting voltage (written by handler() on its next cycle). Call after loading new parameters.
+// Sets all idle output channels to their resting voltage (written by handler() on its next cycle). Call after loading new parameters.
 void outputRestingVoltages() {
   for (int i = 0; i < 4; i++) {
-    setDAC(i, RestingVoltage[i]);
+    setRestingVoltageIfIdle(i);
   }
+}
+
+// Sends an output channel's (0-3) resting voltage to the DAC if the channel is idle. A channel playing a pulse train
+// takes the new resting voltage at its next transition to rest: setting it at once cut short the pulse it was playing.
+// Call from loop() only. Interrupts are off for the check and setDAC(), so that handler() cannot start the channel
+// between them and have its first pulse replaced by the resting voltage.
+void setRestingVoltageIfIdle(byte channel) {
+  noInterrupts();
+  if ((StimulusStatus[channel] == 0) && (PreStimulusStatus[channel] == 0)) {
+    setDAC(channel, RestingVoltage[channel]);
+  }
+  interrupts();
 }
 
 static inline uint16_t clampU16(uint16_t value, int16_t offset)

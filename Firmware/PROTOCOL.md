@@ -100,6 +100,21 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 ignores it and does not reply) | none | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
 
+### Soft triggers and stops
+
+A soft trigger (op 77) starts a channel's pulse train in the next 50 µs cycle. A channel that is
+already playing, or waiting out its pulse train delay, ignores it, as it ignores a trigger line
+in normal mode. Soft triggers read before that cycle add up: two op 77s in one USB packet trigger
+the channels of both. A stop (ops 80, 81 and 98) also cancels a soft trigger that the channel has
+not started yet.
+
+### Programming during playback
+
+Parameters programmed during playback (ops 73, 74, 91, 92, a settings file load) take effect at
+once, including in trains that are playing. A new resting voltage goes to an idle channel's
+output at once. A channel playing a pulse train is not interrupted: it moves to the new resting
+voltage at its next transition to rest.
+
 ## Parameter codes (ops 74 and 91)
 
 | Code | Parameter | Value | Range |
@@ -107,10 +122,10 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 1 | Biphasic pulse | 1 byte | 0 or 1 |
 | 2 | Phase 1 voltage | uint16 | DAC code |
 | 3 | Phase 2 voltage | uint16 | DAC code |
-| 4 | Phase 1 duration | uint32 | cycles |
+| 4 | Phase 1 duration | uint32 | 1 or more cycles |
 | 5 | Inter-phase interval | uint32 | cycles |
-| 6 | Phase 2 duration | uint32 | cycles |
-| 7 | Inter-pulse interval | uint32 | cycles |
+| 6 | Phase 2 duration | uint32 | 1 or more cycles |
+| 7 | Inter-pulse interval | uint32 | 1 or more cycles; 0 is allowed for biphasic pulses |
 | 8 | Burst duration | uint32 | cycles |
 | 9 | Burst interval | uint32 | cycles |
 | 10 | Pulse train duration | uint32 | cycles |
@@ -126,6 +141,15 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 
 In the Python class, a name's position in the parameter name list gives its code, so the list
 must stay in this order.
+
+A phase of 0 cycles would never end, and an inter-pulse interval of 0 would stop a monophasic
+train after its first pulse, so ops 73, 74, 91 and 92 and settings files refuse them: the reply
+is 0, and the value is set to 1 cycle. A biphasic channel with no inter-pulse interval plays its
+pulses back to back. The device checks each channel's parameters together, so to change such a
+channel to monophasic, set its inter-pulse interval first.
+
+In a burst, a pulse starts only if it ends before the burst does: its phase 1, or for a biphasic
+pulse the whole pulse, so that the end of the burst never cuts off phase 2.
 
 ### Param sync mode (Pulse Pal 3, trigger mode 3)
 

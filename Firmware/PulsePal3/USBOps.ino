@@ -29,6 +29,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   isValidTriggerChannel()
 //   validateOutputParams()
 //   validateParamBuffer()
+//   requireNonZeroCycles()
 //   paramSyncEnabled()
 //   updateParamSyncPending()
 //   discardBytes()
@@ -73,9 +74,15 @@ bool isValidTriggerChannel(byte channel) {
   return (channel >= 1) && (channel <= 2);
 }
 
-// Checks the parameters that would otherwise make handler() read outside its arrays, and resets any that are invalid.
-// Returns 1 if every parameter was valid, or 0 if any was reset.
+// Checks the parameters that would otherwise make handler() read outside its arrays or play a phase that never ends,
+// and resets any that are invalid. Returns 1 if every parameter was valid, or 0 if any was reset.
 // validateParamBuffer() below applies the same rules to a parameter set still in paramBuffer. Change both together.
+//
+// Times of 0 cycles: handler() finds a transition by comparing SystemTime with its time for equality, starting on the
+// cycle after it was scheduled. A time of 0 has passed by then, so a phase 1 or phase 2 of 0 cycles holds its voltage
+// until the train ends, and an inter-pulse interval of 0 stops a monophasic train after one pulse. Biphasic pulses
+// with no interval are valid: handler() goes straight from phase 2 to phase 1. A channel is checked as a whole, so
+// changing a biphasic channel with no interval to monophasic needs the interval set first.
 byte validateOutputParams() {
   byte allValid = 1;
   for (int i = 0; i < 4; i++) {
@@ -83,6 +90,9 @@ byte validateOutputParams() {
     if (CustomTrainTarget[i] > 1) {CustomTrainTarget[i] = 0; allValid = 0;}
     if (CustomTrainLoop[i] > 1) {CustomTrainLoop[i] = 0; allValid = 0;}
     if (IsBiphasic[i] > 1) {IsBiphasic[i] = 0; allValid = 0;}
+    if (Phase1Duration[i] == 0) {Phase1Duration[i] = 1; allValid = 0;}
+    if (Phase2Duration[i] == 0) {Phase2Duration[i] = 1; allValid = 0;}
+    if ((InterPulseInterval[i] == 0) && (IsBiphasic[i] == 0)) {InterPulseInterval[i] = 1; allValid = 0;}
   }
   for (int i = 0; i < 2; i++) {
     if (TriggerMode[i] > MAX_TRIGGER_MODE) {TriggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
@@ -97,7 +107,10 @@ byte validateOutputParams() {
 byte validateParamBuffer() {
   byte allValid = 1;
   uint8_t *nextByte = paramBuffer;
-  nextByte += sizeof(Phase1Duration) + sizeof(InterPhaseInterval) + sizeof(Phase2Duration) + sizeof(InterPulseInterval);
+  uint8_t *phase1Duration = nextByte;     nextByte += sizeof(Phase1Duration);
+  nextByte += sizeof(InterPhaseInterval);
+  uint8_t *phase2Duration = nextByte;     nextByte += sizeof(Phase2Duration);
+  uint8_t *interPulseInterval = nextByte; nextByte += sizeof(InterPulseInterval);
   nextByte += sizeof(BurstDuration) + sizeof(BurstInterval) + sizeof(PulseTrainDuration) + sizeof(PulseTrainDelay);
   nextByte += sizeof(Phase1Voltage) + sizeof(Phase2Voltage) + sizeof(RestingVoltage); // Times and voltages use their full range
   uint8_t *isBiphasic = nextByte;         nextByte += sizeof(IsBiphasic);
@@ -111,11 +124,28 @@ byte validateParamBuffer() {
     if (customTrainTarget[i] > 1) {customTrainTarget[i] = 0; allValid = 0;}
     if (customTrainLoop[i] > 1) {customTrainLoop[i] = 0; allValid = 0;}
     if (isBiphasic[i] > 1) {isBiphasic[i] = 0; allValid = 0;}
+    if (!requireNonZeroCycles(phase1Duration, i)) {allValid = 0;}
+    if (!requireNonZeroCycles(phase2Duration, i)) {allValid = 0;}
+    if ((isBiphasic[i] == 0) && !requireNonZeroCycles(interPulseInterval, i)) {allValid = 0;}
   }
   for (int i = 0; i < 2; i++) {
     if (triggerMode[i] > MAX_TRIGGER_MODE) {triggerMode[i] = TRIGGER_MODE_NORMAL; allValid = 0;}
   }
   return allValid;
+}
+
+// For validateParamBuffer(): sets an output channel's value in a time array in paramBuffer to 1 cycle if it is 0 (see
+// validateOutputParams()), and returns 0 if it did. The array is part of a byte buffer, so it is read and written with
+// memcpy.
+byte requireNonZeroCycles(uint8_t *timeArray, int channel) {
+  uint32_t cycles;
+  memcpy(&cycles, timeArray + channel * sizeof(cycles), sizeof(cycles));
+  if (cycles == 0) {
+    cycles = 1;
+    memcpy(timeArray + channel * sizeof(cycles), &cycles, sizeof(cycles));
+    return 0;
+  }
+  return 1;
 }
 
 #if (HARDWARE_VERSION > 2)
@@ -206,7 +236,7 @@ void processUSBCommands() {
          updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
          for (int x = 0; x < 4; x++) {
            updateUsesBursts(x);
-           setDAC(x, RestingVoltage[x]);
+           setRestingVoltageIfIdle(x);
          }
          PPUSB.writeByte(paramsValid); // Send confirm byte (0 if any parameter was out of range)
         } break;
@@ -253,7 +283,7 @@ void processUSBCommands() {
           updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
           updateUsesBursts(inByte3);
           if (inByte2 == PARAM_RESTING_VOLTAGE) {
-            setDAC(inByte3, RestingVoltage[inByte3]);
+            setRestingVoltageIfIdle(inByte3);
           }
           if (inByte2 == PARAM_CONTINUOUS_LOOP) {
             if (!ContinuousLoopMode[inByte3] && ContinuousLoopModeOriginal[inByte3]) {
@@ -277,8 +307,11 @@ void processUSBCommands() {
           inByte2 = PPUSB.readByte();
           for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
-            // (albeit at the expense of ~50us latency)
-            SoftTriggerScheduled[i] = bitRead(inByte2, i); 
+            // (albeit at the expense of ~50us latency). Channels are only ever added: two op 77s read before that cycle
+            // (e.g. in one USB packet) must trigger both sets of channels, not just the second.
+            if (bitRead(inByte2, i)) {
+              SoftTriggerScheduled[i] = 1;
+            }
           }
         } break;
         case OP_DISPLAY_MESSAGE: { // Op 78. Display a custom message on the oLED screen
@@ -452,7 +485,7 @@ void processUSBCommands() {
           for (int iChan = 0; iChan < 4; iChan++) {
             updateUsesBursts(iChan);
             if (inByte2 == PARAM_RESTING_VOLTAGE) {
-              setDAC(iChan, RestingVoltage[iChan]);
+              setRestingVoltageIfIdle(iChan);
             }
             if (inByte2 == PARAM_CONTINUOUS_LOOP) {
               if (!ContinuousLoopMode[iChan] && ContinuousLoopModeOriginal[iChan]) {
@@ -506,7 +539,7 @@ void processUSBCommands() {
           #if (HARDWARE_VERSION > 2)
             EEPROM.put(0, ZeroCodeCalibration);
           #endif
-          setDAC(inByte, RestingVoltage[inByte]);
+          setRestingVoltageIfIdle(inByte);
         } break;
         case OP_FORMAT_SD_CARD: { // Op 97. Format microSD card
           #if (HARDWARE_VERSION > 2)
@@ -607,7 +640,7 @@ void loadChannelParamsFromBuffer(const uint8_t *buffer, byte channel) {
 }
 
 // Loads the parameter set in paramBuffer and brings the device into line with it: UsesBursts is recomputed, the new
-// resting voltage is sent to the DAC, and a channel whose continuous loop mode was switched off stops. The set must
+// resting voltage is sent to the DAC for idle channels, and a channel whose continuous loop mode was switched off stops. The set must
 // already have been through validateParamBuffer(). Op 92 calls this from loop() when no trigger channel is in param
 // sync mode. A param sync edge takes the other route, through startParamSync().
 void applyParamBuffer() {
@@ -617,7 +650,7 @@ void applyParamBuffer() {
   loadParamsFromBuffer();
   for (int x = 0; x < 4; x++) {
     updateUsesBursts(x);
-    setDAC(x, RestingVoltage[x]);
+    setRestingVoltageIfIdle(x);
     if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
       killChannel(x);
     }

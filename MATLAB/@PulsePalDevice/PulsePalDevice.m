@@ -185,7 +185,7 @@ classdef PulsePalDevice < handle
         end
 
         function trigger(obj, channels, varargin)
-            % Soft-trigger output channels
+            % Soft-trigger output channels. A channel that is already playing a pulse train ignores the trigger.
             if ischar(channels)
                 TriggerAddress = bin2dec(channels);
             else

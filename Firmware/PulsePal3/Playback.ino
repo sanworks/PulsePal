@@ -26,6 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Functions in this file:
 //   TC3_Handler() (HW2 only)
 //   mirrorAboutZero()
+//   pulseFitsInBurst()
 //   handler()
 //   killChannel()
 //   AbortAllPulseTrains()
@@ -52,6 +53,17 @@ static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
   }
 }
 
+// True if a pulse starting on an output channel (0-3) now would end before its burst does. The end of a burst sets the
+// resting voltage whatever phase is playing, so a biphasic pulse must fit whole: cut short, it loses part or all of
+// phase 2 and is no longer charge balanced. A monophasic pulse needs only its phase 1 to fit.
+static inline bool pulseFitsInBurst(byte channel) {
+  uint32_t pulseEnd = SystemTime + Phase1Duration[channel];
+  if (IsBiphasic[channel]) {
+    pulseEnd += InterPhaseInterval[channel] + Phase2Duration[channel];
+  }
+  return pulseEnd < NextBurstTransitionTime[channel];
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // handler() is the hardware timer callback, and it does all pulse train playback. It runs every TIMER_PERIOD
 // microseconds (50us). Time is counted in timer cycles: SystemTime is the number of cycles since playback started,
@@ -71,7 +83,7 @@ static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
 //  4. For each output channel that is playing: stop it if a linked trigger channel in toggle mode went low to high,
 //     or a linked trigger channel in gated mode went high to low (unless the other trigger channel is also linked,
 //     gated and still high). For each channel that is not playing: start it if a linked trigger went low to high,
-//     or a soft trigger arrived. Triggers in normal mode are ignored while a channel is playing.
+//     or a soft trigger arrived. Triggers in normal mode, and soft triggers, are ignored while a channel is playing.
 //  5. For each output channel, advance its state machine. Transitions occur when SystemTime equals
 //     NextPulseTransitionTime or NextBurstTransitionTime.
 //       PreStimulusStatus = 1   Waiting for PulseTrainDelay to elapse, then StimulusStatus = 1
@@ -173,6 +185,9 @@ void handler(void) {
       byte KillChannel = 0;
        // If trigger channels are in toggle mode and a trigger arrived, or in gated mode and line is low, shut down any governed channels that are playing a pulse train
        if (((StimulusStatus[x] == 1) || (PreStimulusStatus[x] == 1))) {
+          // A soft trigger is ignored while the channel plays, as a trigger line in normal mode is. Left set, it started a
+          // second train the cycle this one ended, even when a stop command ended it.
+          SoftTriggered[x] = 0;
           for (int y = 0; y < 2; y++) {
             if (TriggerAddress[y][x]) {
                 if ((TriggerMode[y] == TRIGGER_MODE_TOGGLE) && (LineTriggerEvent[y] == TRIGGER_EVENT_LOW_TO_HIGH)) {
@@ -262,7 +277,7 @@ void handler(void) {
             if ((CustomTrainID[x] == 0) || ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1))) {
               if (SystemTime == NextPulseTransitionTime[x]) {
                 NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                    if (!((UsesBursts[x] == 1) && (NextPulseTransitionTime[x] >= NextBurstTransitionTime[x]))){ // so that it doesn't start a pulse it can't finish due to burst end
+                    if (!((UsesBursts[x] == 1) && !pulseFitsInBurst(x))){ // so that it doesn't start a pulse it can't finish due to burst end
                       PulseStatus[x] = PULSE_PHASE1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
                       if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
@@ -439,13 +454,17 @@ void handler(void) {
           // Determine if burst status should go to 1 now
             NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
             NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-            PulseStatus[x] = PULSE_PHASE1;
-            if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-              if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
-                  setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
+            if ((IsBiphasic[x] == 0) || pulseFitsInBurst(x)) {
+              PulseStatus[x] = PULSE_PHASE1;
+              if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
+                if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
+                    setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
+                }
+              } else {
+                   setDAC(x, Phase1Voltage[x]);
               }
             } else {
-                 setDAC(x, Phase1Voltage[x]);
+              PulseStatus[x] = PULSE_IDLE; // A biphasic pulse longer than the burst would lose its phase 2 (see pulseFitsInBurst())
             }
             BurstStatus[x] = 1;
          }
@@ -469,6 +488,9 @@ void killChannel(byte outputChannel) {
     PulseTrainDuration[outputChannel] = PulseTrainDuration_ExamplePulse[outputChannel];
     PulseTrainDuration_ExamplePulse[outputChannel] = 0;
   }
+  // A soft trigger not yet handled would start the channel again straight after a stop (op 77 then op 98 in one packet)
+  SoftTriggerScheduled[outputChannel] = 0;
+  SoftTriggered[outputChannel] = 0;
   CustomPulseTimeIndex[outputChannel] = 0;
   PreStimulusStatus[outputChannel] = 0;
   StimulusStatus[outputChannel] = 0;

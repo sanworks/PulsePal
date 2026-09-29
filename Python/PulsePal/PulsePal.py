@@ -225,7 +225,12 @@ class PulsePalDevice:
     """
 
     resting_voltage: list
-    """Voltage held between pulses, in volts [-10, 10]."""
+    """Voltage held between pulses, in volts [-10, 10].
+
+    A new resting voltage reaches an idle channel's output at once. A
+    channel playing a pulse train keeps playing it, and moves to the new
+    resting voltage at its next transition to rest.
+    """
 
     phase1_duration: list
     """Duration of the first phase of each pulse, in seconds."""
@@ -251,7 +256,9 @@ class PulsePalDevice:
     """Duration of each burst of pulses, in seconds.
 
     Set to `0` to disable bursts, so that pulses continue for the whole
-    pulse train.
+    pulse train. A pulse starts only if it ends before the burst does:
+    its first phase, or for a biphasic pulse the whole pulse, so that
+    the end of a burst never cuts off a second phase.
     """
 
     inter_burst_interval: list
@@ -1055,7 +1062,9 @@ class PulsePalDevice:
         P.trigger([1, 4])       # several channel numbers
         ```
 
-        Channel numbers outside 1-4 are ignored.
+        Channel numbers outside 1-4 are ignored. A channel that is already
+        playing a pulse train ignores the trigger, and `stop()` cancels a
+        trigger that has not started its channel yet.
 
         Args:
             channel1: `1` to trigger channel 1, otherwise `0`; or, when
