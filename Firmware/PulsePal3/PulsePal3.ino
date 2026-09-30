@@ -60,7 +60,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // compiler.cpp.extra_flags, so the flag is accepted and then dropped, and the macros below decide.
 // Edit them instead, as Firmware/tools/build_check.py does in a temporary copy of the sketch.
 #ifndef HARDWARE_VERSION
-  #define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+  #define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 #endif
 
 #ifndef PIN_MAP_VERSION
@@ -105,6 +105,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = μs
                         // Limited by ~15μs analog read speed for joystick x/y and precision of the joystick UI (0.0000).
                         // On HW3 this may be reduced in the future with the ADC library for fast analog reads + UI mods
+#define MIN_PULSE_CYCLES 2 // Shortest phase, inter-pulse interval and train duration the joystick menu sets, in timer cycles
+                           // (100us). A trigger channel reads its input once per cycle, so a pulse from another Pulse Pal
+                           // must last 2 cycles to be detected reliably. The MATLAB, Python and C++ classes use the same limit.
 
 
 #define TriggerLevel 0  // Trigger line level configuration. This defines the logic level when the trigger is activated.
@@ -248,6 +251,11 @@ enum TriggerEventValue {
   #define N_CUSTOM_PULSE_TRAINS 2
   #define MAX_CUSTOM_PULSES 5000
   #define CURSOR_BLINK_CYCLES 20000 // Joystick menu loop iterations between cursor blinks while editing a value
+  // Timed DAC updates, see dacWriteTimed(). The timer's counter runs at MCK/8.
+  #define TIMER_COUNTS_PER_US 10.5
+  #define DAC_CHANNEL_WRITE_US 4.0 // Longest SPI write of one DAC channel (3.55-3.9us measured)
+  #define DAC_LATCH_GAP_US 2.0 // Time from the last write to the latch. The DAC updates at once only about 1.4us after a write
+  #define DAC_LATCH_US 21.0 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap
 #else
   ArCOM PPUSB(Serial); // Initialize ArCOM USB serial wrapper
   // initialize u8g2 graphics library with the numbers of the interface pins
@@ -280,9 +288,15 @@ enum TriggerEventValue {
   U8G2_SSD1322_NHD_128X64_F_2ND_4W_HW_SPI u8g2(U8G2_R0, CS, DC, RST);
   LiquidCrystal_U8G2 lcd(u8g2);
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
+  IMXRT_PIT_CHANNEL_t *hardwareTimerChannel = nullptr; // The PIT channel hardwareTimer uses, found by startHardwareTimer()
   #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
   #define CURSOR_BLINK_CYCLES 10000 // Joystick menu loop iterations between cursor blinks while editing a value
+  // Timed DAC updates, see dacWriteTimed(). IntervalTimer's PIT counts at 24MHz.
+  #define TIMER_COUNTS_PER_US 24
+  #define DAC_CHANNEL_WRITE_US 1.3 // Longest SPI write of one DAC channel (1.13us measured)
+  #define DAC_LATCH_GAP_US 1.5 // Time from the last write to the latch. The DAC updates at once only some time after a write
+  #define DAC_LATCH_US 7.5 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap
 #endif
 
 // Variables for SPI bus
@@ -373,7 +387,7 @@ struct OutputParam {
   void* values;        // The parameter array, with one element per output channel
   uint8_t type;        // See enum ParamType
   uint8_t units;       // Display format, see enum DisplayUnits
-  uint32_t minValue;   // Limits used while editing the parameter with the joystick
+  uint32_t minValue;   // Limits used while editing the parameter with the joystick. 0 is valid for times that can be off
   uint32_t maxValue;
   bool biphasicOnly;   // The menu skips this parameter when the selected channel is monophasic
 };
@@ -383,14 +397,14 @@ const OutputParam outputParams[] = {
   {"<Biphasic Pulse>", IsBiphasic,         PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Phase1 Voltage>", Phase1Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    false},
   {"<Phase2 Voltage>", Phase2Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    true},
-  {"<Phase1Duration>", Phase1Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
-  {"<InterPhaseTime>", InterPhaseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, true},
-  {"<Phase2Duration>", Phase2Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, true},
-  {"<Pulse Interval>", InterPulseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
-  {"<Burst Duration>", BurstDuration,      PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
-  {"<Burst Interval>", BurstInterval,      PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
-  {"<Train Duration>", PulseTrainDuration, PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
-  {"< Train Delay  >", PulseTrainDelay,    PARAM_TYPE_UINT32, UNITS_TIME,           1, 72000000, false},
+  {"<Phase1Duration>", Phase1Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
+  {"<InterPhaseTime>", InterPhaseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, true},
+  {"<Phase2Duration>", Phase2Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, true},
+  {"<Pulse Interval>", InterPulseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
+  {"<Burst Duration>", BurstDuration,      PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
+  {"<Burst Interval>", BurstInterval,      PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
+  {"<Train Duration>", PulseTrainDuration, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
+  {"< Train Delay  >", PulseTrainDelay,    PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
   {"<Link Trigger 1>", TriggerAddress[0],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Link Trigger 2>", TriggerAddress[1],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Custom Train# >", CustomTrainID,      PARAM_TYPE_BYTE,   UNITS_INDEX,          0, N_CUSTOM_PULSE_TRAINS, false},

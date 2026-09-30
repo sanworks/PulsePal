@@ -190,11 +190,14 @@ def test_custom_train_rejects_bad_ids_and_oversized_trains():
 
 def test_custom_train_rejects_times_that_do_not_increase():
     """A pulse time that is not later than the one before it freezes the device's
-    output for the rest of the train, so the class must not send it."""
+    output for the rest of the train, so the class must not send it. Times must also be
+    two cycles apart, so that a trigger channel can detect each pulse."""
     cases = [
         [0, 0.2, 0.2],          # Duplicate
         [0, 0.2, 0.1],          # Decreasing
         [0, 0.00001],           # Distinct, but both round to cycle 0
+        [0, 0.00005, 0.0001],   # One 50 us cycle apart
+        [0, 0.0001, 0.00013],   # The last two round to 1 cycle apart
     ]
     for pulse_times in cases:
         device = make_device()
@@ -207,15 +210,16 @@ def test_custom_train_rejects_times_that_do_not_increase():
 
     device = make_device()
     try:
-        device.send_custom_waveform(1, 0.00001, [1, 2, 3])  # Under one 50 us cycle
-        raise AssertionError("no error for a waveform period under one cycle")
+        device.send_custom_waveform(1, 0.00005, [1, 2, 3])  # One 50 us cycle
+        raise AssertionError("no error for a waveform period of one cycle")
     except PulsePal.PulsePalError as error:
         assert "must increase" in str(error)
         assert device.port.writes == []
 
     device = make_device()
-    device.send_custom_pulse_train(1, [0, 0.00005, 0.0001], [1, 2, 3])  # One cycle apart
-    assert len(device.port.writes) == 1
+    device.send_custom_pulse_train(1, [0, 0.0001, 0.00025], [1, 2, 3])  # 2 and 3 cycles apart
+    device.send_custom_waveform(2, 0.0001, [1, 2, 3])
+    assert len(device.port.writes) == 2
 
 
 def test_waveform_matches_an_equivalent_pulse_train():
@@ -267,10 +271,14 @@ def test_values_the_device_cannot_play_raise_before_sending():
         lambda d: d.set_output_param("resting_voltage", [1, 2, 3, 4], [0, 0, -10.5, 0]),
         lambda d: d.set_output_param("phase1_duration", 1, 0),
         lambda d: d.set_output_param("phase1_duration", 1, 0.00002),   # Rounds to 0 cycles
+        lambda d: d.set_output_param("phase1_duration", 1, 0.00005),   # One cycle
         lambda d: d.set_output_param("phase2_duration", 1, 0),
+        lambda d: d.set_output_param("phase2_duration", 1, 0.00005),
+        lambda d: d.set_output_param("pulse_train_duration", 1, 0.00005),
         lambda d: d.set_output_param("pulse_train_delay", 1, -0.001),
         lambda d: d.set_output_param("pulse_train_duration", 1, float("nan")),
-        lambda d: d.set_output_param("inter_pulse_interval", 1, 0),    # Monophasic
+        lambda d: d.set_output_param("inter_pulse_interval", 1, 0),
+        lambda d: d.set_output_param("inter_pulse_interval", 1, 0.00005),
         lambda d: d.set_output_param("is_biphasic", 1, 2),
         lambda d: d.set_output_param("custom_train_id", 1, 5),
         lambda d: d.set_output_param("custom_train_loop", 1, 0.5),
@@ -298,17 +306,39 @@ def test_values_the_device_cannot_play_raise_before_sending():
         assert device.port.writes == []
 
 
-def test_only_biphasic_channels_may_have_no_inter_pulse_interval():
+def test_pulses_and_intervals_last_at_least_two_cycles():
+    """Two cycles is the shortest pulse a trigger channel detects reliably, as in the MATLAB
+    class and the joystick menu: 100 us on a 50 us timer, 50 us on a 25 us timer. Biphasic
+    channels need an inter-pulse interval too. Times of 0 still mean "off" where they did."""
     device = make_device()
     device.set_output_param("is_biphasic", 1, 1)
-    device.set_output_param("inter_pulse_interval", 1, 0)     # A continuous biphasic square wave
-    assert len(device.port.writes) == 2
+    for name in ("phase1_duration", "phase2_duration", "inter_pulse_interval",
+                 "pulse_train_duration"):
+        device.set_output_param(name, 1, 0.0001)
+        device.set_output_param(name, 1, 100 * 1e-6)  # Just under 0.0001, but 2 cycles
+    for name in ("inter_phase_interval", "burst_duration", "inter_burst_interval",
+                 "pulse_train_delay"):
+        device.set_output_param(name, 1, 0)
+        device.set_output_param(name, 1, 0.00005)
+    assert len(device.port.writes) == 17
     try:
-        device.set_output_param("is_biphasic", 1, 0)          # Would leave a monophasic channel with no interval
+        device.set_output_param("inter_pulse_interval", 1, 0)
         raise AssertionError("no error")
     except PulsePal.PulsePalError as error:
-        assert "set inter_pulse_interval first" in str(error)
-    assert len(device.port.writes) == 2
+        assert "at least 0.0001 s (2 cycles" in str(error), error
+    assert device.info.min_pulse_width_us is None  # Set when connecting; make_device() skips that
+
+    device = make_device()
+    device.info.cycle_period_us = 25
+    device.info.cycle_frequency = 40000
+    device.set_output_param("phase1_duration", 1, 0.00005)  # 2 cycles of 25 us
+    device.send_custom_waveform(1, 0.00005, [1, 2, 3])
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2)
+    try:
+        device.set_output_param("phase1_duration", 1, 0.000025)
+        raise AssertionError("no error")
+    except PulsePal.PulsePalError as error:
+        assert "at least 5e-05 s (2 cycles of the device's 25 us timer)" in str(error), error
 
 
 def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
@@ -473,6 +503,38 @@ def test_connecting_to_a_wave_pal_says_so():
         PulsePal.serial.Serial = original_serial
     assert port.writes == [bytes([OP_MENU_BYTE, 72])], port.writes
     assert not port.is_open
+
+
+def test_a_refused_connection_closes_the_port():
+    """Firmware too old or too new for the class, or an error later in the connection,
+    must not leave the port open: a second attempt could not open it."""
+    handshake_then_version = {
+        "old firmware": bytearray([75]) + struct.pack("<I", 19),
+        "future firmware": bytearray([75]) + struct.pack("<I", 99),
+        # Current firmware, then a reply to op 94 that ends early
+        "an error during setup": bytearray([75]) + struct.pack("<I", 22),
+    }
+    original_serial = PulsePal.serial.Serial
+    try:
+        for case, response in handshake_then_version.items():
+            port = ClosablePort()
+            port.response = response
+            if case == "an error during setup":
+                def fail_after_handshake(n, port=port, read=port.read):
+                    if len(port.reads) >= 2:
+                        raise PulsePal.serial.SerialException("device removed")
+                    return read(n)
+                port.read = fail_after_handshake
+            PulsePal.serial.Serial = lambda *args, port=port, **kwargs: port
+            try:
+                PulsePal.PulsePalDevice("COM9")
+                raise AssertionError(f"{case}: connected")
+            except (PulsePal.PulsePalError, PulsePal.serial.SerialException):
+                pass
+            assert not port.is_open, f"{case}: the port was left open"
+            assert bytes([OP_MENU_BYTE, 81]) not in port.writes, case
+    finally:
+        PulsePal.serial.Serial = original_serial
 
 
 class ChunkedPort(FakePort):

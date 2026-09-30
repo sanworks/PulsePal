@@ -224,11 +224,13 @@ void UpdateSettingsMenu() {
                ClickerButtonState = ReadDebouncedButton();
               }
               write2Screen("< Trigger Now >"," ");
+              noInterrupts(); // Schedule the linked channels together, so they start in the same cycle (see op 77)
               for (int x = 0; x < 4; x++) {
                 if (TriggerAddress[SelectedChannel-1][x] == 1) {
                   SoftTriggerScheduled[x] = 1;
                 }
               }
+              interrupts();
             } break;
             case 2: {
               // Change mode of selected channel
@@ -759,7 +761,9 @@ float digitsToVolts() {
 
 unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, unsigned long UpperLimit, byte Units) {
       // This function returns a value that the user chooses by scrolling up and down a number list with the joystick, and clicks to select the desired number.
-      // Editing starts at startValue. LowerLimit and UpperLimit are the limits for this selection. Units: see enum DisplayUnits.
+      // Editing starts at startValue. LowerLimit and UpperLimit are the limits for this selection; a time may go below
+      // LowerLimit while it is edited, but if it is still below it when the joystick is clicked, startValue is returned.
+      // Units: see enum DisplayUnits.
       // This function blocks until the joystick is clicked. It sets inMenu to MENU_OUTPUT_TRIGGER while editing (so times are shown with leading zeros),
       // and to MENU_TRIGGER_CHANNEL or MENU_OUTPUT_CHANNEL on return.
      unsigned long ValueToAdd = 0;
@@ -922,7 +926,7 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
               }
             } break;
             case UNITS_TIME: {
-                if (Digits[CursorPos] > 0)  {
+                if (Digits[CursorPos] > 0)  { // May go below LowerLimit while editing (see the check after the loop)
                  UserValue = UserValue - 2*(pow(10, ((5-CursorPos)+2)));
                   Digits[CursorPos] = Digits[CursorPos] - 1;
                 }
@@ -970,6 +974,12 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
          redrawEditValue(Units);
        }
      delayMicroseconds(ScrollSpeedDelay);  
+     }
+     // A time may pass through 0 while it is edited digit by digit (0.0010 to 0.0001 goes through 0.0000), but a value
+     // below LowerLimit is not adopted: the value the edit started from is restored. The menu used to accept 0 cycles,
+     // and handler() holds a 0 cycle phase's voltage for the rest of the train.
+     if (UserValue < LowerLimit) {
+       UserValue = startValue;
      }
      LCD_noCursor();
      LCD_setCursor(0, 1); 

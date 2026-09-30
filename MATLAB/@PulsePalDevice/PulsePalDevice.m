@@ -644,7 +644,9 @@ classdef PulsePalDevice < handle
         function confirmed = confirmWrite(obj)
             % Verify that the device acknowledged a write command.
             confirmed = obj.Port.read(1, 'uint8');
-            if confirmed ~= 1
+            % read() returns nothing (with a warning) if the byte does not arrive, and "if [] ~= 1" is false, so a
+            % missing confirm byte has to be checked for: left unchecked, it arrives late and is read as the next reply
+            if isempty(confirmed) || confirmed ~= 1
                 error('Error: Pulse Pal did not return an expected byte to confirm the operation.');
             end
         end

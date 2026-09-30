@@ -148,8 +148,19 @@ is 0, and the value is set to 1 cycle. A biphasic channel with no inter-pulse in
 pulses back to back. The device checks each channel's parameters together, so to change such a
 channel to monophasic, set its inter-pulse interval first.
 
+The clients (MATLAB, Python, C++) and the joystick menu are stricter: phase durations, the
+inter-pulse interval and the pulse train duration are at least 2 cycles (100 µs), and custom pulse
+times at least 2 cycles apart. A trigger channel reads its input once per cycle, so a 1 cycle
+pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse a trigger
+channel detects reliably. The device still accepts 1 cycle over USB, and settings files saved by
+older firmware may hold one.
+
 In a burst, a pulse starts only if it ends before the burst does: its phase 1, or for a biphasic
-pulse the whole pulse, so that the end of the burst never cuts off phase 2.
+pulse the whole pulse, so that the end of the burst never cuts off phase 2. Likewise, a biphasic
+pulse starts only if it ends by the end of the pulse train (it may end in the train's last cycle).
+A monophasic pulse still starts, and the end of the train cuts it short. Trains in continuous loop
+mode, and custom trains that do not loop, do not end at the train duration, so this does not apply
+to them.
 
 ### Param sync mode (Pulse Pal 3, trigger mode 3)
 

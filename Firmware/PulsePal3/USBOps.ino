@@ -305,6 +305,10 @@ void processUSBCommands() {
         
         case OP_SOFT_TRIGGER: { // Op 77. Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
           inByte2 = PPUSB.readByte();
+          // All the channels are scheduled with interrupts off: when handler() ran between two of them, one op 77
+          // started its channels 50us apart. A timer tick in that time is handled as soon as interrupts() is called,
+          // a few instructions late, and no output edge moves: dacWriteTimed() times the DAC from the timer's counter.
+          noInterrupts();
           for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
             // (albeit at the expense of ~50us latency). Channels are only ever added: two op 77s read before that cycle
@@ -313,6 +317,7 @@ void processUSBCommands() {
               SoftTriggerScheduled[i] = 1;
             }
           }
+          interrupts();
         } break;
         case OP_DISPLAY_MESSAGE: { // Op 78. Display a custom message on the oLED screen
           LCD_clear();

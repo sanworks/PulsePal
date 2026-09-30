@@ -642,6 +642,7 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
 
     // Check and convert every pulse before sending anything
     std::vector<uint32_t> pulseCycles(nPulses);
+    uint32_t minSpacing = (uint32_t)roundHalfEven(MinPulseTime * cycleFrequency); // 2 cycles
     for (int i = 0; i < nPulses; i++) {
         float pulseTime = customPulseTimes[i];
         if (!((pulseTime >= 0) && (pulseTime <= MaxTime))) { // Written this way to also reject NaN
@@ -651,10 +652,12 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
         }
         pulseCycles[i] = timeToCycles(pulseTime);
         // The device plays each pulse until the next one's time, so a time that is not later than the one before it
-        // would freeze the output for the rest of the train. The check is on the times the device will receive,
-        // after rounding to its timer cycles.
-        if ((i > 0) && (pulseCycles[i] <= pulseCycles[i - 1])) {
-            error << "pulse times must increase, by at least one " << (1000000.0 / cycleFrequency) << " us timer cycle. "
+        // would freeze the output for the rest of the train, and one a single cycle later would play a pulse too short
+        // for a trigger channel to detect (MinPulseTime, as in the Python class). The check is on the times the device
+        // will receive, after rounding to its timer cycles.
+        if ((i > 0) && (pulseCycles[i] < pulseCycles[i - 1] + minSpacing)) {
+            error << "pulse times must increase, by at least " << (MinPulseTime * 1000000.0) << " us ("
+                  << minSpacing << " timer cycles). "
                   << "Pulse " << (i + 1) << " is at " << pulseTime << " s, and pulse " << i << " is at "
                   << customPulseTimes[i - 1] << " s.";
             reportError(error.str());

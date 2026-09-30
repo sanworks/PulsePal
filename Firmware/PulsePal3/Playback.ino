@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   TC3_Handler() (HW2 only)
 //   mirrorAboutZero()
 //   pulseFitsInBurst()
+//   pulseFitsInTrain()
 //   handler()
 //   killChannel()
 //   AbortAllPulseTrains()
@@ -64,6 +65,19 @@ static inline bool pulseFitsInBurst(byte channel) {
   return pulseEnd < NextBurstTransitionTime[channel];
 }
 
+// True if a pulse starting on an output channel (0-3) now would end by the end of its pulse train. The end of a train
+// sets the resting voltage whatever phase is playing, so a biphasic pulse must fit whole, as in a burst. A pulse that
+// ends in the train's last cycle is whole: its phase 2 ends in the same cycle. Always true for a monophasic pulse (the
+// end of the train cuts it short), and for a train that does not stop at PulseTrainEndTime (see the end of handler()).
+static inline bool pulseFitsInTrain(byte channel) {
+  if ((IsBiphasic[channel] == 0) || ContinuousLoopMode[channel] ||
+      ((CustomTrainID[channel] > 0) && (CustomTrainLoop[channel] == 0))) {
+    return true;
+  }
+  uint32_t pulseEnd = SystemTime + Phase1Duration[channel] + InterPhaseInterval[channel] + Phase2Duration[channel];
+  return pulseEnd <= PulseTrainEndTime[channel];
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // handler() is the hardware timer callback, and it does all pulse train playback. It runs every TIMER_PERIOD
 // microseconds (50us). Time is counted in timer cycles: SystemTime is the number of cycles since playback started,
@@ -71,7 +85,8 @@ static inline bool pulseFitsInBurst(byte channel) {
 //
 // Each cycle:
 //  1. If any channel is playing: write DAC updates requested on the previous cycle, and abort all playback if the
-//     joystick button is pressed. The final DAC update after playback ends is written on the next idle cycle.
+//     joystick button is pressed. The final DAC update after playback ends is written on the next idle cycle. The
+//     outputs change DAC_LATCH_US after the timer tick, however many channels changed (see dacWriteTimed()).
 //  2. Soft triggers scheduled from loop() (op 77 or joystick menu) become active.
 //  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent). On Pulse Pal 3, a rising
 //     edge on a trigger channel in param sync mode takes the parameter set op 92 left in paramBuffer. Output
@@ -107,7 +122,7 @@ static inline bool pulseFitsInBurst(byte channel) {
 void handler(void) {
   if (StimulatingState == 0) {
       if ((LastStimulatingState == 1) || (DACFlag == 1)) { // The cycle on which all pulse trains have finished, or a DAC update was requested from loop()
-        dacWrite(); // Update DAC to final voltages (should be resting voltage), or to values set with setDAC()
+        dacWriteTimed(); // Update DAC to final voltages (should be resting voltage), or to values set with setDAC()
         DACFlag = 0;
       }
       SystemTime = 0;
@@ -117,7 +132,7 @@ void handler(void) {
   //     }
        StimulatingState = 1;
        if (DACFlag == 1) { // A DAC update was requested
-         dacWrite(); // Update DAC
+         dacWriteTimed(); // Update DAC, DAC_LATCH_US after the timer tick
          DACFlag = 0;
        }
        SystemTime++; // Increment system time (# of hardware timer cycles since stim start)
@@ -259,7 +274,12 @@ void handler(void) {
           }
           if (CustomTrainID[x] == 0) {
             NextPulseTransitionTime[x] = SystemTime;
-            setDAC(x, Phase1Voltage[x]);
+            // The PULSE_IDLE case below starts the first pulse in this cycle, unless its phase 1 does not fit in the first
+            // burst: a monophasic pulse then still shows here, cut short at the end of the burst, as it is at the start of
+            // later bursts. A biphasic pulse must play whole, so only the PULSE_IDLE case starts it.
+            if (IsBiphasic[x] == 0) {
+              setDAC(x, Phase1Voltage[x]);
+            }
           } else {
             NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0]; 
             CustomPulseTimeIndex[x] = 0;
@@ -277,7 +297,8 @@ void handler(void) {
             if ((CustomTrainID[x] == 0) || ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1))) {
               if (SystemTime == NextPulseTransitionTime[x]) {
                 NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                    if (!((UsesBursts[x] == 1) && !pulseFitsInBurst(x))){ // so that it doesn't start a pulse it can't finish due to burst end
+                    // so that it doesn't start a pulse it can't finish due to burst end, or a biphasic pulse it can't finish due to train end
+                    if (!((UsesBursts[x] == 1) && !pulseFitsInBurst(x)) && pulseFitsInTrain(x)){
                       PulseStatus[x] = PULSE_PHASE1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
                       if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
@@ -288,7 +309,9 @@ void handler(void) {
                     }
                  }
               } else {
-               if (SystemTime == NextPulseTransitionTime[x]) {
+               // A biphasic pulse that cannot finish before the train ends is not started. Nothing else happens on this
+               // channel until the train ends.
+               if ((SystemTime == NextPulseTransitionTime[x]) && pulseFitsInTrain(x)) {
                      int SkipNextInterval = 0;
                      if ((CustomTrainLoop[x] == 1) && (CustomPulseTimeIndex[x] == CustomTrainNpulses[thisTrainIDIndex])) {
                             CustomPulseTimeIndex[x] = 0;
@@ -419,7 +442,11 @@ void handler(void) {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
                     }
                   }
-                 if (!((CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0))) { 
+                 // With no inter-pulse interval, the next pulse starts now, if it can play whole (as in the PULSE_IDLE case).
+                 // If not, the channel rests until the next burst, or the end of the train.
+                 bool startNextPulse = (CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0) &&
+                                       !((UsesBursts[x] == 1) && !pulseFitsInBurst(x)) && pulseFitsInTrain(x);
+                 if (!startNextPulse) {
                    PulseStatus[x] = PULSE_IDLE;
                    digitalWriteDirect(OutputLEDLines[x], LOW);
                    setDAC(x, RestingVoltage[x]);
@@ -454,7 +481,7 @@ void handler(void) {
           // Determine if burst status should go to 1 now
             NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
             NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-            if ((IsBiphasic[x] == 0) || pulseFitsInBurst(x)) {
+            if ((IsBiphasic[x] == 0) || (pulseFitsInBurst(x) && pulseFitsInTrain(x))) {
               PulseStatus[x] = PULSE_PHASE1;
               if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
                 if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
@@ -464,7 +491,7 @@ void handler(void) {
                    setDAC(x, Phase1Voltage[x]);
               }
             } else {
-              PulseStatus[x] = PULSE_IDLE; // A biphasic pulse longer than the burst would lose its phase 2 (see pulseFitsInBurst())
+              PulseStatus[x] = PULSE_IDLE; // A biphasic pulse cut short by the end of the burst or train would lose its phase 2 (see pulseFitsInBurst())
             }
             BurstStatus[x] = 1;
          }

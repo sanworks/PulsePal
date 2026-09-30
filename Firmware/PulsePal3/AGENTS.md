@@ -60,13 +60,25 @@ the `--show` output before concluding that a function really changed.
 
 ## Rules that are easy to break
 
-1. **After `setup()`, only `handler()` may call `dacWrite()`.** Other code calls `setDAC()`,
-   and the next timer tick writes the value. An SPI transfer started in `loop()` and
-   interrupted by another in the timer interrupt leaves `loop()` waiting forever; this froze
-   devices in the field. The one exception is `loop()`'s comm failure handling, which calls
-   `dacWrite()` between `stopHardwareTimer()` and `startHardwareTimer()`, when no interrupt
-   can run. To send a new resting voltage from `loop()`, use `setRestingVoltageIfIdle()`: a
-   `setDAC()` on a channel that is playing cuts its current pulse short.
+1. **After `setup()`, only `handler()` may write to the DAC** (`dacWriteTimed()`,
+   `dacWrite()`). Other code calls `setDAC()`, and the next timer tick writes the value. An SPI
+   transfer started in `loop()` and interrupted by another in the timer interrupt leaves
+   `loop()` waiting forever; this froze devices in the field. The one exception is `loop()`'s
+   comm failure handling, which calls `dacWrite()` between `stopHardwareTimer()` and
+   `startHardwareTimer()`, when no interrupt can run. To send a new resting voltage from
+   `loop()`, use `setRestingVoltageIfIdle()`: a `setDAC()` on a channel that is playing cuts
+   its current pulse short.
+
+   Outputs change `DAC_LATCH_US` after the timer tick (7.5 µs on Pulse Pal 3, 21 µs on Pulse
+   Pal 2). `dacWriteTimed()` waits, writes the changed channels, and latches them together at
+   that time, reading the timer's own counter. Writing and latching straight away delayed each
+   update by 1.13 µs (Pulse Pal 3) or 3.7 µs (Pulse Pal 2) per channel written in that cycle.
+   The wait comes before the writes so that their digital feedthrough (a few mV on every
+   output) stays next to the edge. The writes end at least `DAC_LATCH_GAP_US` before the
+   latch: the DAC only updates at once about 1.4 µs after a write, and a sooner latch took
+   effect late. `DAC_LATCH_US` must cover the interrupt's start, four writes of
+   `DAC_CHANNEL_WRITE_US` and the gap: if SPI or the handler's start gets slower, measure again.
+   In a cycle that changes an output, the interrupt now runs for at least `DAC_LATCH_US`.
 2. **`setDAC()` sets `DACFlags[channel]` before `DACFlag`.** In the other order, an interrupt
    landing between the two lines clears `DACFlag` and loses the update.
 3. **Do not write to the screen, wait, or use the microSD card inside the timer interrupt.**
@@ -91,16 +103,23 @@ the `--show` output before concluding that a function really changed.
    during an op. Array reads and writes are single block copies, which rely on both boards
    being little-endian, like the wire format. See `ArCOM.h`.
 8. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
-   `TIMER_PERIOD` (50 µs). The joystick time editor in `Menu.ino` assumes 50 µs in two places,
-   so changing `TIMER_PERIOD` needs those fixed too.
+   `TIMER_PERIOD` (50 µs). Settings files store cycles, and legacy code and installed clients
+   assume 50 µs, so a faster cycle (e.g. 25 µs on Pulse Pal 3) would have to be optional, with
+   50 µs the default. The joystick time editor in `Menu.ino` also assumes 50 µs (2 cycles per
+   0.0001 s digit step) where it reads the digits and where it adds and subtracts a step.
+   Phases, the inter-pulse interval and the train duration have a minimum of
+   `MIN_PULSE_CYCLES` (2) in the menu and the clients: a trigger channel reads its input once
+   per cycle, so it can miss a 1 cycle pulse from another Pulse Pal.
 9. **Keep the existing names.** The lead developer navigates this code from memory during
    support calls. Renaming variables or reformatting whole files costs more than it saves.
 
 ## What runs in the timer interrupt
 
 `handler()` runs every 50 µs. `TC3_Handler()` is its entry point on Pulse Pal 2; on Pulse
-Pal 3, `IntervalTimer` calls it directly. It calls `killChannel()`, `setDAC()`, `dacWrite()`,
-`mirrorAboutZero()`, `pulseFitsInBurst()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
+Pal 3, `IntervalTimer` calls it directly. On Pulse Pal 2 the timer interrupt has a higher
+priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copies received bytes
+one at a time, and at equal priority it made the timer lose cycles. It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
+`mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`. On Pulse Pal 3 it also calls `startParamSync()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
@@ -116,7 +135,10 @@ Param sync costs, measured on a Teensy 4.1 against the 50 µs cycle:
 
 The interrupt can run at any point in `loop()`, but `loop()` never runs inside the interrupt.
 So when `loop()` updates several variables that the interrupt reads, the interrupt can see
-them half-updated; update them in a safe order (rule 2 is an example). Shared variables
+them half-updated; update them in a safe order (rule 2 is an example), or with interrupts off
+for a few instructions (op 77 schedules its channels' `SoftTriggerScheduled` flags that way,
+so they start in the same cycle). A tick that arrives meanwhile runs as soon as interrupts
+are back on; only interrupts off for longer than a cycle lose one. Shared variables
 include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
 `SoftTriggerScheduled`, `abortRequested`, all output channel parameters and, on Pulse Pal 3,
 `paramBuffer`, `paramSyncPending` and `paramSyncChannelsWaiting`.

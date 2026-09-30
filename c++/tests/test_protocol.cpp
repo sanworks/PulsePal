@@ -605,6 +605,8 @@ static void test_custom_trains_reject_bad_ids_sizes_and_times()
     const float sameCycle[2] = {0.001f, 0.00101f}; // Both round to 20 cycles
     CHECK(!pulsePal.sendCustomPulseTrain(1, 2, sameCycle, voltages));
     CHECK(contains(errors.text(), "pulse times must increase"));
+    const float oneCycle[2] = {0.001f, 0.00105f}; // 20 and 21 cycles: too short for a trigger channel
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, oneCycle, voltages));
     const float decreasing[2] = {0.002f, 0.001f};
     CHECK(!pulsePal.sendCustomPulseTrain(1, 2, decreasing, voltages));
     const float negative[2] = {-0.001f, 0.001f};

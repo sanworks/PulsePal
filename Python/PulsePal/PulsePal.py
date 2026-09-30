@@ -57,8 +57,11 @@ their meanings are given with each attribute below.
 
 A value the device cannot play raises `PulsePalError` before anything is
 sent: a voltage outside [-10, 10], a time that is negative or not a
-number, a phase that rounds to 0 cycles, or an enumerated value out of
-range.
+number, or an enumerated value out of range. So does a pulse phase,
+inter-pulse interval or pulse train duration shorter than
+`DeviceInfo.min_pulse_width_us`, and custom pulse times closer together
+than that, so that a Pulse Pal's trigger channels can detect the shortest
+pulse its output channels play.
 
 ## Further reading
 
@@ -165,6 +168,14 @@ class DeviceInfo:
     cycle_period_us: float = None
     """Update period of the device's hardware timer, in microseconds."""
 
+    min_pulse_width_us: float = None
+    """Shortest pulse phase, inter-pulse interval and pulse train duration,
+    and shortest time between custom pulses, in microseconds.
+
+    Two timer cycles: a trigger channel reads its input once per cycle, so
+    a pulse must last two cycles to be detected reliably.
+    """
+
 
 class PulsePalDevice:
     """A class to control a Pulse Pal device on a USB serial port.
@@ -241,7 +252,10 @@ class PulsePalDevice:
     """
 
     phase1_duration: list
-    """Duration of the first phase of each pulse, in seconds."""
+    """Duration of the first phase of each pulse, in seconds.
+
+    At least `DeviceInfo.min_pulse_width_us`.
+    """
 
     inter_phase_interval: list
     """Interval between the two phases of a biphasic pulse, in seconds.
@@ -254,11 +268,12 @@ class PulsePalDevice:
     """Duration of the second phase of each pulse, in seconds.
 
     Used only when `PulsePalDevice.is_biphasic` is `1` for the channel.
+    At least `DeviceInfo.min_pulse_width_us`.
     """
 
     inter_pulse_interval: list
     """Interval from the end of one pulse to the onset of the next, in
-    seconds."""
+    seconds. At least `DeviceInfo.min_pulse_width_us`."""
 
     burst_duration: list
     """Duration of each burst of pulses, in seconds.
@@ -277,7 +292,13 @@ class PulsePalDevice:
     """
 
     pulse_train_duration: list
-    """Total duration of the pulse train, in seconds."""
+    """Total duration of the pulse train, in seconds.
+
+    At least `DeviceInfo.min_pulse_width_us`. The end of the train cuts
+    short a monophasic pulse still playing. A biphasic pulse starts only
+    if it can end by the end of the train, so that it keeps its second
+    phase.
+    """
 
     pulse_train_delay: list
     """Delay from the trigger to the onset of the pulse train, in
@@ -414,6 +435,12 @@ class PulsePalDevice:
     _TRIGGER_PARAMETER_NAMES = ("trigger_mode",)
     # Output parameter codes whose values are 0 or 1
     _BINARY_PARAMETER_CODES = (1, 12, 13, 15, 16, 18)
+    # Phase 1 and 2 durations, inter-pulse interval and train duration last
+    # at least this many timer cycles, as in the MATLAB and C++ classes and
+    # the joystick menu. A trigger channel reads its input once per cycle, so a
+    # one cycle pulse from another Pulse Pal could fall between two reads.
+    _MIN_PULSE_CYCLES = 2
+    _MIN_PULSE_PARAMETER_CODES = (4, 6, 7, 10)
 
     _OUTPUT_PARAMETER_ATTRS = {
         1: "is_biphasic",
@@ -473,7 +500,8 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If the device does not return the expected
                 handshake, or its firmware is older than v21, or its
-                firmware is newer than this module supports.
+                firmware is newer than this module supports. The port is
+                closed again before any error is raised.
             serial.SerialException: If the serial port cannot be opened.
         """
         self.info = DeviceInfo()
@@ -485,6 +513,18 @@ class PulsePalDevice:
             rtscts=True,
         )
         self._closed = False
+        try:
+            self._start_session(port_name)
+        except BaseException:
+            # Otherwise the port stays open until the object is garbage
+            # collected, and a second attempt, or WavePal.WavePalDevice,
+            # cannot open it. The device is in an unknown state, so it is not
+            # sent the disconnect op.
+            self.close(send_disconnect=False)
+            raise
+
+    def _start_session(self, port_name):
+        """Handshake, check the firmware, and program the defaults."""
         self._dac_bit_max = self._to_decimal(0)
         self.info.firmware_version = None
         self.info.hardware_version = None
@@ -498,7 +538,6 @@ class PulsePalDevice:
         handshake = self._read_serial(1, "uint8")
         if handshake == self._WAVE_PAL_HANDSHAKE_RESPONSE:
             wave_pal_version = self._read_serial(1, "uint32")
-            self.close(send_disconnect=False)
             raise PulsePalError(
                 f"Error: the device on {port_name} runs Wave Pal firmware "
                 f"(v{wave_pal_version}), not Pulse Pal firmware. To use it as "
@@ -507,7 +546,6 @@ class PulsePalDevice:
                 "with WavePal.WavePalDevice."
             )
         if handshake != self._HANDSHAKE_RESPONSE:
-            self.close(send_disconnect=False)
             raise PulsePalError(
                 "Error: incorrect handshake returned. Expected "
                 f"{self._HANDSHAKE_RESPONSE}, received {handshake}."
@@ -550,6 +588,9 @@ class PulsePalDevice:
             self.info.cycle_frequency = 20000
             self.info.n_custom_pulse_trains = 2
             self.info.max_custom_pulses = 5000
+        self.info.min_pulse_width_us = (
+            self._MIN_PULSE_CYCLES * self.info.cycle_period_us
+        )
 
         # Client name op + "PYTHON" in ASCII.
         self._write_serial(
@@ -994,10 +1035,10 @@ class PulsePalDevice:
             PulsePalError: If `custom_train_id` is out of range,
                 `pulse_times` and `pulse_voltages` differ in length,
                 there are more pulses than
-                `DeviceInfo.max_custom_pulses`, a pulse time is not
-                later than the one before it (after rounding to the
-                device's timer cycle), or the device does not
-                acknowledge the command.
+                `DeviceInfo.max_custom_pulses`, a pulse time is less
+                than `DeviceInfo.min_pulse_width_us` after the one before
+                it (after rounding to the device's timer cycle), or the
+                device does not acknowledge the command.
         """
         pulse_times = self._as_list(pulse_times)
         pulse_voltages = self._as_list(pulse_voltages)
@@ -1061,8 +1102,9 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
                 are more samples than `DeviceInfo.max_custom_pulses`,
-                `pulse_width` rounds to less than one timer cycle, or the
-                device does not acknowledge the command.
+                `pulse_width` rounds to less than
+                `DeviceInfo.min_pulse_width_us`, or the device does not
+                acknowledge the command.
         """
         pulse_voltages = self._as_list(pulse_voltages)
         n_pulses = len(pulse_voltages)
@@ -1425,14 +1467,18 @@ class PulsePalDevice:
             )
         # The device plays each pulse until the next one's time, so a time
         # that is not later than the one before it would freeze the output
-        # for the rest of the train. The check is on the times the device
-        # will receive, after rounding to its timer cycles.
+        # for the rest of the train, and one only a cycle later would play
+        # a pulse too short for a trigger channel to detect (see
+        # _MIN_PULSE_CYCLES). The check is on the times the device will
+        # receive, after rounding to its timer cycles.
         for i in range(1, n_pulses):
-            if pulse_times_cycles[i] <= pulse_times_cycles[i - 1]:
+            if (pulse_times_cycles[i] - pulse_times_cycles[i - 1]
+                    < self._MIN_PULSE_CYCLES):
                 raise PulsePalError(
-                    f"{context}: pulse times must increase, by at least one "
-                    f"{self.info.cycle_period_us} us timer cycle. Pulse "
-                    f"{i + 1} is at "
+                    f"{context}: pulse times must increase, by at least "
+                    f"{self._min_pulse_seconds()} s ({self._MIN_PULSE_CYCLES} "
+                    f"cycles of the device's {self.info.cycle_period_us} us "
+                    f"timer). Pulse {i + 1} is at "
                     f"{self._cycles_to_seconds(pulse_times_cycles[i])} s, "
                     f"and pulse {i} is at "
                     f"{self._cycles_to_seconds(pulse_times_cycles[i - 1])} s."
@@ -1654,17 +1700,11 @@ class PulsePalDevice:
     def _check_output_values(self, param_code, channels, values):
         """Raise PulsePalError, before anything is sent, for values the device cannot play.
 
-        The device refuses them too, but it also resets them (see validateOutputParams() in
-        /Firmware/PulsePal3/USBOps.ino), so the local copy would describe a different program.
-        Whether an inter-pulse interval of 0 is allowed depends on is_biphasic, so each is
-        checked against the local copy of the other.
+        The device refuses most of them too, but it also resets them (see validateOutputParams()
+        in /Firmware/PulsePal3/USBOps.ino), so the local copy would describe a different program.
         """
         for ch, value in zip(channels, values):
             self._check_output_value(param_code, value, ch)
-            if param_code == 7:
-                self._check_inter_pulse_interval(ch, value, self.is_biphasic[ch])
-            elif param_code == 1:
-                self._check_inter_pulse_interval(ch, self.inter_pulse_interval[ch], value)
 
     def _check_program(self):
         """Check the whole local copy before sync_to_device() sends it. See _check_output_values()."""
@@ -1672,8 +1712,6 @@ class PulsePalDevice:
             values = getattr(self, attr_name)
             for ch in range(1, 5):
                 self._check_output_value(param_code, values[ch], ch)
-        for ch in range(1, 5):
-            self._check_inter_pulse_interval(ch, self.inter_pulse_interval[ch], self.is_biphasic[ch])
         for ch in (1, 2):
             self._check_trigger_mode(self.trigger_mode[ch], ch)
 
@@ -1687,36 +1725,22 @@ class PulsePalDevice:
             self._volts_to_bits(value, name)
         elif 4 <= param_code <= 11:
             cycles = self._seconds_to_cycles(value, name)
-            if cycles == 0 and param_code in (4, 6):
-                # handler() would find the end of a 0 cycle phase only after it had passed, and hold
-                # the phase's voltage for the rest of the train
+            # Checked in whole cycles, as the device receives it: 100 * 1e-6 is just under 0.0001,
+            # but is exactly 2 cycles of 50 us
+            if cycles < self._MIN_PULSE_CYCLES and param_code in self._MIN_PULSE_PARAMETER_CODES:
                 raise PulsePalError(
-                    f"{name} rounds to 0 cycles. A phase must last at least one "
-                    f"{self.info.cycle_period_us} us cycle. Received {value!r}."
+                    f"{name} must be at least {self._min_pulse_seconds()} s "
+                    f"({self._MIN_PULSE_CYCLES} cycles of the device's {self.info.cycle_period_us} us "
+                    f"timer), so that trigger channels can detect the pulses. Received {value!r}."
                 )
         elif param_code == 14:
             self._check_whole_number(value, name, 0, self.info.n_custom_pulse_trains)
         elif param_code in self._BINARY_PARAMETER_CODES:
             self._check_whole_number(value, name, 0, 1)
 
-    def _check_inter_pulse_interval(self, channel, interval, is_biphasic):
-        """Raise PulsePalError if a monophasic channel would get an inter-pulse interval of 0 cycles.
-
-        The train would stop after one pulse. A biphasic channel with no interval plays its pulses
-        back to back, so 0 is allowed there.
-        """
-        try:
-            cycles = self._seconds_to_cycles(interval)
-            biphasic = int(is_biphasic)
-        except (PulsePalError, TypeError, ValueError):
-            return  # The other parameter's local value is not valid; it is checked when it is sent
-        if cycles == 0 and biphasic == 0:
-            raise PulsePalError(
-                f"inter_pulse_interval on channel {channel} rounds to 0 cycles, which a monophasic "
-                f"channel cannot play: its train would stop after one pulse. Use at least one "
-                f"{self.info.cycle_period_us} us cycle, or make the channel biphasic. To change a "
-                "biphasic channel with no interval to monophasic, set inter_pulse_interval first."
-            )
+    def _min_pulse_seconds(self):
+        """The shortest pulse phase, interval or train, in seconds. See _MIN_PULSE_CYCLES."""
+        return self._cycles_to_seconds(self._MIN_PULSE_CYCLES)
 
     def _check_trigger_mode(self, value, channel):
         """Raise PulsePalError if value is not a trigger mode the device has."""

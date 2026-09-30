@@ -413,18 +413,19 @@ class PulsePalGUI:
         "phase2_duration",
     )
 
-    # Valid ranges, matching those enforced by the device interface
+    # Valid ranges, matching those enforced by the device interface. None
+    # is the device's shortest pulse, DeviceInfo.min_pulse_width_us.
     _FIELD_RANGES = {
         "resting_voltage": (-10.0, 10.0),
         "phase1_voltage": (-10.0, 10.0),
         "phase2_voltage": (-10.0, 10.0),
-        "phase1_duration": (0.0001, 3600.0),
+        "phase1_duration": (None, 3600.0),
         "inter_phase_interval": (0.0, 3600.0),
-        "phase2_duration": (0.0001, 3600.0),
-        "inter_pulse_interval": (0.0001, 3600.0),
+        "phase2_duration": (None, 3600.0),
+        "inter_pulse_interval": (None, 3600.0),
         "burst_duration": (0.0, 3600.0),
         "inter_burst_interval": (0.0, 3600.0),
-        "pulse_train_duration": (0.0001, 3600.0),
+        "pulse_train_duration": (None, 3600.0),
         "pulse_train_delay": (0.0, 3600.0),
     }
 
@@ -449,6 +450,11 @@ class PulsePalGUI:
 
         n_trains = getattr(device.info, "n_custom_pulse_trains", None) or 2
         self._n_custom_trains = int(n_trains)
+        min_pulse_us = getattr(device.info, "min_pulse_width_us", None) or 100
+        self._field_ranges = {
+            name: (min_pulse_us / 1e6 if low is None else low, high)
+            for name, (low, high) in self._FIELD_RANGES.items()
+        }
         # Param sync mode is offered by Pulse Pal 3 only
         hardware_version = int(getattr(device.info, "hardware_version", 2) or 2)
         self._trigger_modes = self._TRIGGER_MODES
@@ -1554,7 +1560,7 @@ class PulsePalGUI:
             var.set(_format_number(self._params[name][index]))
             return
 
-        low, high = self._FIELD_RANGES[name]
+        low, high = self._field_ranges[name]
         if not low <= value <= high:
             self._show_error(
                 f"{label} must be in range {_format_number(low)} to "

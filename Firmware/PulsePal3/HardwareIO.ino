@@ -24,7 +24,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Functions in this file:
 //   setDAC()
+//   dacLoad()
+//   dacLatch()
 //   dacWrite()
+//   timerCountsSinceTick()
+//   waitForTimerCount()
+//   dacWriteTimed()
 //   outputRestingVoltages()
 //   setRestingVoltageIfIdle()
 //   clampU16()
@@ -36,7 +41,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   Software_Reset()
 
 // Stores a new 16-bit DAC value for an output channel (0-3). handler() writes it to the DAC at the start of its next
-// cycle (within TIMER_PERIOD microseconds), whether or not a pulse train is playing.
+// cycle (DAC_LATCH_US after the cycle's timer tick, see dacWriteTimed()), whether or not a pulse train is playing.
 // DACFlags[channel] must be set before DACFlag: if the timer interrupt runs between them, it clears DACFlag without
 // writing this channel.
 static inline void setDAC(byte channel, uint16_t value) {
@@ -45,11 +50,12 @@ static inline void setDAC(byte channel, uint16_t value) {
   DACFlag = 1;
 }
 
-// Writes flagged channels to the DAC over SPI. Once the hardware timer has started, call this only from handler(),
-// or from loop() while stopHardwareTimer() has it stopped.
-// If a timer interrupt called dacWrite() during an SPI transfer started from loop(), the nested transfer would take the
-// outer transfer's received bytes, and loop() would wait forever inside SPI.transfer(). Use setDAC() instead.
-void dacWrite() {
+// Writes flagged channels into the DAC's input registers over SPI. LDAC is left high, so the outputs keep their
+// voltages until dacLatch() updates them all at once.
+// Once the hardware timer has started, call this only from handler(), or from loop() while stopHardwareTimer() has it
+// stopped. If a timer interrupt wrote to the DAC during an SPI transfer started from loop(), the nested transfer would
+// take the outer transfer's received bytes, and loop() would wait forever inside SPI.transfer(). Use setDAC() instead.
+void dacLoad() {
   digitalWriteDirect(LDACPin,HIGH);
   for (int i = 0; i < 4; i++) {
     if (DACFlags[i]) {
@@ -63,10 +69,82 @@ void dacWrite() {
       DACFlags[i] = 0;
     }
   }
+}
+
+// Updates every output to the value dacLoad() last wrote for it, together, on the falling edge of LDAC
+static inline void dacLatch() {
+  digitalWriteDirect(LDACPin,LOW);
+}
+
+// Writes flagged channels and updates the outputs at once: for setup(), loop()'s comm failure handling (while the timer
+// is stopped) and AbortAllPulseTrains(). handler() uses dacWriteTimed(). The same rules as dacLoad() apply.
+void dacWrite() {
+  dacLoad();
   #if (HARDWARE_VERSION > 2)
     digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
   #endif
-  digitalWriteDirect(LDACPin,LOW);
+  dacLatch();
+}
+
+#if (HARDWARE_VERSION > 2)
+  static const uint32_t HARDWARE_TIMER_LOAD = (TIMER_PERIOD * TIMER_COUNTS_PER_US) - 1; // IntervalTimer's PIT load value
+#endif
+
+// Timer counts (TIMER_COUNTS_PER_US per microsecond) since the current cycle's timer tick
+static inline uint32_t timerCountsSinceTick() {
+  #if (HARDWARE_VERSION == 2)
+    return TC1->TC_CHANNEL[0].TC_CV; // Counts up from 0 at each tick (see startHardwareTimer())
+  #else
+    // The PIT counts down from its load value, and ticks at 0. One register read: each takes about 0.1us, and reading
+    // LDVAL too made the waits end up to 0.2us after their count.
+    return HARDWARE_TIMER_LOAD - hardwareTimerChannel->CVAL;
+  #endif
+}
+
+// Waits until the timer has counted to count since the tick. Stops waiting if the next cycle starts first.
+static inline void waitForTimerCount(uint32_t count) {
+  uint32_t last = timerCountsSinceTick();
+  while (last < count) {
+    uint32_t now = timerCountsSinceTick();
+    if (now < last) {break;} // The next tick came: the counter restarted
+    last = now;
+  }
+}
+
+static const uint32_t DAC_LATCH_COUNT = DAC_LATCH_US * TIMER_COUNTS_PER_US;
+static const uint32_t DAC_CHANNEL_WRITE_COUNT = DAC_CHANNEL_WRITE_US * TIMER_COUNTS_PER_US;
+static const uint32_t DAC_LATCH_GAP_COUNT = DAC_LATCH_GAP_US * TIMER_COUNTS_PER_US;
+static_assert(DAC_LATCH_US >= (4 * DAC_CHANNEL_WRITE_US) + DAC_LATCH_GAP_US, "DAC_LATCH_US must allow 4 channel writes and the gap");
+
+// handler()'s DAC write. The outputs change DAC_LATCH_US after the timer tick, however many channels changed.
+// The DAC updates every output when LDAC falls after the last channel's SPI write, so writing and latching at once
+// delayed the update by the write time of every channel written in that cycle (1.13us each on Pulse Pal 3, 3.7us on
+// Pulse Pal 2), and a pulse's width depended on what the other channels were doing. So this waits, writes, and latches
+// at a fixed time. It waits before writing, so that the writes end just before the latch: SPI activity shows on the
+// outputs as a few mV of digital feedthrough, and next to the edge it is hidden in it. (Writing at the end of one cycle
+// and latching at the start of the next fixed the delay too, but put that feedthrough about 48us before every edge.)
+// The writes end at least DAC_LATCH_GAP_US before the latch: the DAC updates at once only about 1.4us after a write
+// (measured on Pulse Pal 2), and a sooner latch took effect late by the difference, so edges moved by 0.3-0.4us per
+// channel written again.
+// The cost: in a cycle that changes any output, the interrupt runs for at least DAC_LATCH_US.
+void dacWriteTimed() {
+  byte nChannels = DACFlags[0] + DACFlags[1] + DACFlags[2] + DACFlags[3];
+  if (nChannels == 0) {
+    return;
+  }
+  #if (HARDWARE_VERSION > 2)
+    if (hardwareTimerChannel == nullptr) { // startHardwareTimer() did not find the timer: write at once
+      dacWrite();
+      return;
+    }
+  #endif
+  waitForTimerCount(DAC_LATCH_COUNT - DAC_LATCH_GAP_COUNT - (nChannels * DAC_CHANNEL_WRITE_COUNT));
+  dacLoad();
+  waitForTimerCount(DAC_LATCH_COUNT);
+  #if (HARDWARE_VERSION > 2)
+    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+  #endif
+  dacLatch();
 }
 
 // Sets all idle output channels to their resting voltage (written by handler() on its next cycle). Call after loading new parameters.
@@ -126,11 +204,26 @@ void startHardwareTimer() {
     TC_SetRC(TC1, 0, (uint32_t)round(VARIANT_MCK / 8.0 * TIMER_PERIOD / 1000000.0)); // RC = ticks per period (525 for 50us)
     TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS; // Enable the interrupt on RC compare...
     TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS; // ...and disable all other timer interrupts
+    // The timer interrupt must be able to preempt the USB interrupt (0 is the highest priority). The Due core's USB
+    // interrupt copies each received byte into SerialUSB's buffer itself, about 3.9us per byte and up to 512 bytes, and
+    // at equal priority every timer cycle in that time was lost: op 92 (178 bytes) during playback stretched every
+    // playing channel by 0.7ms, and a custom train upload by 2ms. The core sets the USB priority once, before setup().
+    NVIC_SetPriority(UOTGHS_IRQn, 1);
+    NVIC_SetPriority(TC3_IRQn, 0);
     NVIC_ClearPendingIRQ(TC3_IRQn);
     NVIC_EnableIRQ(TC3_IRQn);
     TC_Start(TC1, 0);
   #else
     hardwareTimer.begin(handler, TIMER_PERIOD);
+    // dacWriteTimed() reads the timer's counter. IntervalTimer does not say which PIT channel it took, so find the
+    // running channel loaded with this period.
+    hardwareTimerChannel = nullptr;
+    for (int i = 0; i < 4; i++) {
+      if ((IMXRT_PIT_CHANNELS[i].TCTRL & PIT_TCTRL_TEN) && (IMXRT_PIT_CHANNELS[i].LDVAL == HARDWARE_TIMER_LOAD)) {
+        hardwareTimerChannel = &IMXRT_PIT_CHANNELS[i];
+        break;
+      }
+    }
   #endif
 }
 
