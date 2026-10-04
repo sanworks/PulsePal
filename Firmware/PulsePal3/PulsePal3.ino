@@ -60,7 +60,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // compiler.cpp.extra_flags, so the flag is accepted and then dropped, and the macros below decide.
 // Edit them instead, as Firmware/tools/build_check.py does in a temporary copy of the sketch.
 #ifndef HARDWARE_VERSION
-  #define HARDWARE_VERSION 2 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
+  #define HARDWARE_VERSION 3 // Use: 2 = Pulse Pal v2.X (as marked on PCB), 3 = Pulse Pal v3.X
 #endif
 
 #ifndef PIN_MAP_VERSION

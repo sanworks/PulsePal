@@ -20,9 +20,8 @@ MATLAB/Legacy/LastSerialPortUsed.mat
 # MATLAB: oscilloscope test panel for the Python and MATLAB classes (lab-specific, not yet part of the repository)
 MATLAB/tests/ScopeTestPanel/
 
-# Python: analog quality test's scope calibration (one per scope and bench) and its results
-Python/PulsePal/tests/analog_quality/scope_floor_*.json
-Python/PulsePal/tests/analog_quality/results/
+# Python: analog quality test for Pulse Pal 3 with a Rigol MSO5000 (lab-specific, not yet part of the repository)
+Python/PulsePal/tests/analog_quality/
 
 # Firmware: USB serial latency experiment (see its README.md), not yet part of the repository
 Firmware/tools/UsbLatencyTest/
