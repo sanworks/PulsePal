@@ -273,6 +273,38 @@ classdef PulsePalDevice < handle
             end
         end
 
+        function setScreenSaver(obj, state, timeout)
+            % Switches the device's screen saver on (state = 1 or true) or off (state = 0 or false), and sets its timeout
+            % in seconds (a whole number, 1-65535). With the screen saver on, the device dims its screen once it has been
+            % left alone for the timeout: no command from the computer, no rising edge on a trigger channel, and no
+            % joystick click or push. The next of these brings the screen back. Both settings are stored in the device's
+            % EEPROM and kept through power cycles; the screen saver can also be switched on and off from the device's
+            % joystick menu. A new device has it on, with 1800 s. The timeout is sent with every call, so leaving it out
+            % sets 1800 s.
+            % The device saves the settings once no channel is playing. Saving pauses its timer, usually for about
+            % 20 us but, once in about 2000 changes, for tens of milliseconds, which would delay a trigger. Change the
+            % settings before an experiment rather than during one.
+            % Requires firmware v22 or newer. Only Pulse Pal 3 has a screen saver: Pulse Pal 2 accepts state = 0 only.
+            % Example: setScreenSaver(P, 1, 300) dims the screen after 5 minutes without activity.
+            if nargin < 3
+                timeout = 1800;
+            end
+            if obj.firmwareVersion < 22
+                error(['setScreenSaver() requires firmware v22 or newer. Detected firmware is: v' num2str(obj.firmwareVersion)])
+            end
+            if ~(isnumeric(state) || islogical(state)) || ~isscalar(state) || ~(state == 0 || state == 1) % Also refuses NaN
+                error('state must be 1 (on) or 0 (off)')
+            end
+            if ~isnumeric(timeout) || ~isscalar(timeout) || ~(timeout >= 1 && timeout <= 65535) || timeout ~= round(timeout)
+                error('timeout must be a whole number of seconds from 1 to 65535')
+            end
+            if state == 1 && obj.hardwareVersion < 3
+                error('The screen saver requires hardware v3 or newer: Pulse Pal 2 accepts state = 0 only.')
+            end
+            obj.Port.write([obj.OpMenuByte 99 double(state) typecast(uint16(timeout), 'uint8')], 'uint8');
+            obj.confirmWrite;
+        end
+
         function sendCustomPulseTrain(obj, trainID, pulseTimes, voltages)
             % Sends a custom pulse train to the device. trainId = 1 or 2. pulseTimes = sec. voltages = volts.
             sendCustomTrain(obj, trainID, pulseTimes, voltages);

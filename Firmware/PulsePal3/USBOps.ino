@@ -196,6 +196,7 @@ void processUSBCommands() {
     if (PPUSB.available()) { // If bytes are available in the serial port buffer and a custom pulse train transfer is not ongoing
     CommandByte = PPUSB.readByte(); // Read a byte
     if (CommandByte == OpMenuByte) { // The first byte must be 213. Now, read the actual command byte. (Reduces interference from port scanning applications)
+      screenSaverActivity = true; // loop() wakes the screen once the command is done and its reply sent
       CommandByte = PPUSB.readByte(); // Read the command byte (an op code for the operation to execute)
       switch (CommandByte) {
         case OP_HANDSHAKE: { // Op 72. Handshake
@@ -542,7 +543,7 @@ void processUSBCommands() {
           ZeroCodeCalibration[inByte] = calibrationValue;
           PPUSB.writeByte(1); // Send confirm byte
           #if (HARDWARE_VERSION > 2)
-            EEPROM.put(0, ZeroCodeCalibration);
+            EEPROM.put(EEPROM_ZERO_CODE_CALIBRATION_ADDRESS, ZeroCodeCalibration);
           #endif
           setRestingVoltageIfIdle(inByte);
         } break;
@@ -565,6 +566,19 @@ void processUSBCommands() {
           }
         }
        } break;
+        case OP_SET_SCREEN_SAVER: { // Op 99. Switch the screen saver on (1) or off (0), and set its timeout in seconds. Used by the
+                                    // MATLAB and Python classes. Saved to the EEPROM once no channel is playing (see updateScreenSaver()).
+          inByte2 = PPUSB.readByte(); // State
+          uint16_t timeout = PPUSB.readUint16();
+          if ((inByte2 > MAX_SCREEN_SAVER_STATE) || (timeout == 0)) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          screenSaverEnabled = inByte2;
+          screenSaverTimeout = timeout;
+          screenSaverSavePending = true;
+          PPUSB.writeByte(1); // Send confirm byte. Like every command, this one wakes the screen if it is dimmed.
+        } break;
      }
     }
   }

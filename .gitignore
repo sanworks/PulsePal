@@ -23,6 +23,9 @@ MATLAB/tests/ScopeTestPanel/
 # Python: analog quality test for Pulse Pal 3 with a Rigol MSO5000 (lab-specific, not yet part of the repository)
 Python/PulsePal/tests/analog_quality/
 
+# Python: trigger latency test for Pulse Pal 3, with a second Pulse Pal and a Rigol MSO5000 (lab-specific, not yet part of the repository)
+Python/PulsePal/tests/trigger_latency/
+
 # Firmware: USB serial latency experiment (see its README.md), not yet part of the repository
 Firmware/tools/UsbLatencyTest/
 

@@ -17,7 +17,7 @@ The sketch is split into tabs. Arduino joins them into one file before compiling
 | `USBOps.ino` | Commands from the PC (`processUSBCommands()`), input validation, param sync mode |
 | `Menu.ino` | Thumb joystick menu and the parameter value editor. The menu map is above `UpdateSettingsMenu()` |
 | `SDSettings.ino` | Settings files on the microSD card. The file layout is above `SaveCurrentProgram2SD()` |
-| `Display.ino` | Screen output and the splash screen |
+| `Display.ino` | Screen output, the screen saver and the splash screen |
 | `HardwareIO.ino` | DAC writes, the hardware timer, fast digital I/O, software reset |
 
 Supporting classes: `ArCOM.h` (USB serial reads and writes), `LiquidCrystal_U8G2` (Pulse Pal 3
@@ -112,6 +112,14 @@ the `--show` output before concluding that a function really changed.
    per cycle, so it can miss a 1 cycle pulse from another Pulse Pal.
 9. **Keep the existing names.** The lead developer navigates this code from memory during
    support calls. Renaming variables or reformatting whole files costs more than it saves.
+10. **EEPROM writes stop all interrupts** (Pulse Pal 3). The Teensy 4.1 emulates its EEPROM in
+    flash, and interrupts are off while a byte is programmed (about 20 µs: during playback an
+    output edge moved by up to 12.5 µs) and, once in about 2000 changes, while a flash sector is
+    erased (tens of ms by the datasheet, so the timer loses cycles). Write only bytes
+    that changed (`EEPROM.put()` does), and only while no channel is playing, as
+    `saveScreenSaverSettings()` does through `screenSaverSavePending`. Op 96 still writes the
+    calibration at once. The layout is the `EEPROM_..._ADDRESS` constants in `PulsePal3.ino`;
+    addresses are fixed, because the EEPROM keeps its contents through firmware updates.
 
 ## What runs in the timer interrupt
 
@@ -140,7 +148,7 @@ for a few instructions (op 77 schedules its channels' `SoftTriggerScheduled` fla
 so they start in the same cycle). A tick that arrives meanwhile runs as soon as interrupts
 are back on; only interrupts off for longer than a cycle lose one. Shared variables
 include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
-`SoftTriggerScheduled`, `abortRequested`, all output channel parameters and, on Pulse Pal 3,
+`SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, all output channel parameters and, on Pulse Pal 3,
 `paramBuffer`, `paramSyncPending` and `paramSyncChannelsWaiting`.
 
 ## Checklists

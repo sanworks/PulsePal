@@ -99,6 +99,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 96 | Set DAC calibration | Channel (0-3), zero-code offset (int16). Pulse Pal 3 keeps it through power cycles; Pulse Pal 2 does not | 1 / 0 |
 | 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 ignores it and does not reply) | none | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
+| 99 | Set the [screen saver](#screen-saver) | State (0 off, 1 on; Pulse Pal 2 accepts 0 only), timeout in seconds (uint16, 1-65535). Pulse Pal 3 keeps both in its EEPROM; a new device starts with the screen saver on and 1800 s. Used by the MATLAB and Python classes | 1 / 0 |
 
 ### Soft triggers and stops
 
@@ -114,6 +115,23 @@ Parameters programmed during playback (ops 73, 74, 91, 92, a settings file load)
 once, including in trains that are playing. A new resting voltage goes to an idle channel's
 output at once. A channel playing a pulse train is not interrupted: it moves to the new resting
 voltage at its next transition to rest.
+
+### Screen saver
+
+A Pulse Pal 3 with its screen saver on dims its screen once it has been left alone for the
+timeout: no command, no rising edge on a trigger channel, and no joystick click or push. The
+next of these brings the screen back, showing the menu as it was left. A joystick click or push
+that wakes the screen does nothing else. The screen is written after the reply to the command
+that woke it has been sent, and after the timer cycle that handled the trigger, so neither is
+delayed.
+
+Op 99 switches the screen saver on or off and sets the timeout; the joystick menu's Screen Saver
+item switches it on or off. The device saves both to its EEPROM, but only once no channel is
+playing: on a Teensy 4.1, interrupts are off while the EEPROM is written. That takes about
+20 µs for each byte that changed, which could move an output edge by up to about 13 µs, and once
+in about 2000 changes tens of milliseconds, while a flash sector is erased, which would stop
+playback timing and delay a trigger. Change the setting before an experiment rather than during
+one.
 
 ## Parameter codes (ops 74 and 91)
 
@@ -268,7 +286,7 @@ load on Pulse Pal 2.
 
 | Firmware | Notes |
 |---|---|
-| v22 | Current. Adds ops 91-98, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
+| v22 | Current. Adds ops 91-99, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
 | v21 | No ops 91-98. Clients program parameters with ops 73 and 74, and custom trains with ops 75 and 76 |
 
 Clients read the firmware version from the handshake (op 72), and the device properties from

@@ -34,6 +34,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   LCD_cursor()
 //   LCD_noCursor()
 //   trimString()
+//   updateScreenSaver()
+//   startScreenSaver()
+//   endScreenSaver()
+//   loadScreenSaverSettings()
+//   saveScreenSaverSettings()
 //   runSplashScreen()
 
 void write2Screen(const char* Line1, const char* Line2) {
@@ -121,7 +126,73 @@ void trimString(char *str) {
   }
 }
 
-void runSplashScreen() {
+// Screen saver, called by loop() on every pass, after any reply to the PC has been sent. Activity (screenSaverActivity:
+// a command from the PC, a rising edge on a trigger channel, or a joystick click or push) restarts the idle time and
+// brings the screen back. Once the device has been idle for screenSaverTimeout seconds, the screen dims, if the
+// screen saver is on. Settings changed by op 99 or the joystick menu are saved here, once no channel is playing.
+//
+// The screen is written from loop() only (rule 3 in AGENTS.md): handler() just sets screenSaverActivity, so a trigger
+// is handled in the cycle it arrives, and the screen wakes after that cycle. The screen is on the second SPI bus and
+// the DAC on the first, so the timer interrupt runs on time during a screen write, however long the write takes.
+void updateScreenSaver() {
+  if (screenSaverActivity) {
+    screenSaverActivity = false;
+    lastActivityTime = millis();
+    if (screenDimmed) {
+      endScreenSaver();
+    }
+  } else if (!screenDimmed && screenSaverEnabled &&
+             ((millis() - lastActivityTime) >= ((uint32_t)screenSaverTimeout * 1000))) {
+    startScreenSaver();
+  }
+  if (screenSaverSavePending && (StimulatingState == 0)) {
+    screenSaverSavePending = false;
+    saveScreenSaverSettings();
+  }
+}
+
+void startScreenSaver() {
+  #if (HARDWARE_VERSION == 3)
+    u8g2.setContrast(SCREEN_SAVER_DIM_BRIGHTNESS); // One short command: the menu stays on the screen, dimmed
+  #endif
+  screenDimmed = true;
+}
+
+// Returns the screen to the menu as it was left
+void endScreenSaver() {
+  #if (HARDWARE_VERSION == 3)
+    u8g2.setContrast(SCREEN_BRIGHTNESS);
+  #endif
+  screenDimmed = false;
+}
+
+// Reads the screen saver settings from the EEPROM (Pulse Pal 3), at setup. Bytes never written read 0xFF, which is not
+// a valid state, so a new device keeps the defaults: on, with SCREEN_SAVER_DEFAULT_TIMEOUT.
+FLASHMEM void loadScreenSaverSettings() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal3.ino)
+  #if (HARDWARE_VERSION > 2)
+    byte enabled = 0;
+    uint16_t timeout = 0;
+    EEPROM.get(EEPROM_SCREEN_SAVER_ADDRESS, enabled);
+    EEPROM.get(EEPROM_SCREEN_SAVER_ADDRESS + sizeof(enabled), timeout);
+    if ((enabled <= MAX_SCREEN_SAVER_STATE) && (timeout > 0)) {
+      screenSaverEnabled = enabled;
+      screenSaverTimeout = timeout;
+    }
+  #endif
+}
+
+// Writes the screen saver settings to the EEPROM (Pulse Pal 3). Only bytes that changed are written. Call it only while
+// no channel is playing, as updateScreenSaver() does: on Teensy 4.1 the EEPROM is emulated in flash, and interrupts are
+// off while a byte is programmed. That is about 20us (measured: during playback, an output edge moved by up to 12.5us),
+// and, once in about 2000 changes, a flash sector erase of tens of ms (datasheet), which loses timer cycles.
+void saveScreenSaverSettings() {
+  #if (HARDWARE_VERSION > 2)
+    EEPROM.put(EEPROM_SCREEN_SAVER_ADDRESS, screenSaverEnabled);
+    EEPROM.put(EEPROM_SCREEN_SAVER_ADDRESS + sizeof(screenSaverEnabled), screenSaverTimeout);
+  #endif
+}
+
+FLASHMEM void runSplashScreen() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal3.ino)
   #if (HARDWARE_VERSION == 3)
     // SplashScreen
       u8g2.clearBuffer();

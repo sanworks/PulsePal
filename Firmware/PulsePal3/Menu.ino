@@ -53,9 +53,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            7     Save settings -> MENU_FILE_SAVE
 //                                            8     Load settings -> MENU_FILE_LOAD
 //                                            9     Erase settings -> MENU_FILE_DELETE
-//                                            10    Device info
-//                                            11    Reset
-//                                            12    Exit -> MENU_TOP
+//                                            10    Screen saver on/off (MENU_ITEM_SCREEN_SAVER, Pulse Pal 3 only)
+//                                            11    Device info (MENU_ITEM_DEVICE_INFO)
+//                                            12    Reset (MENU_ITEM_RESET)
+//                                            13    Exit -> MENU_TOP (MENU_ITEM_EXIT)
+//                       Pulse Pal 2 has no screen saver item, so its device info, reset and exit are 10, 11 and 12.
 // MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now -> MENU_OUTPUT_TRIGGER (MENU_ACTION_TRIGGER)
 //                                            2-17  Edit a parameter. Which parameters, in which order, and their
 //                                                  labels, limits and storage, all come from menuActionParams and
@@ -90,6 +92,18 @@ void UpdateSettingsMenu() {
     ClickerX = analogRead(ClickerXLine);
     ClickerY = analogRead(ClickerYLine);
     ClickerButtonState = ReadDebouncedButton();
+    // A joystick click or push restarts the screen saver's idle time. While the screen is dimmed, it only wakes the
+    // screen: it is marked as handled here, so the menu acts on the next click or push, not on this one.
+    if ((ClickerButtonState == 1) || (ClickerX < ClickerMinThreshold) || (ClickerX > ClickerMaxThreshold) ||
+        (ClickerY < ClickerMinThreshold) || (ClickerY > ClickerMaxThreshold)) {
+      screenSaverActivity = true;
+      if (screenDimmed) {
+        if (ClickerButtonState == 1) {LastClickerButtonState = 1;}
+        if (ClickerX < ClickerMinThreshold) {LastClickerXState = 1;}
+        if (ClickerX > ClickerMaxThreshold) {LastClickerXState = 2;}
+        return;
+      }
+    }
     if (ClickerButtonState == 1 && LastClickerButtonState == 0) {
         LastClickerButtonState = 1;
         switch(inMenu) {
@@ -131,7 +145,14 @@ void UpdateSettingsMenu() {
                 myFilePos = 1;
                 RefreshFileMenu();
               } break;
-              case 10: { // Info
+              #if (HARDWARE_VERSION > 2)
+                case MENU_ITEM_SCREEN_SAVER: { // Switch the screen saver on or off. Its timeout is set over USB only (op 99)
+                  screenSaverEnabled = !screenSaverEnabled;
+                  screenSaverSavePending = true; // Saved to the EEPROM by updateScreenSaver()
+                  RefreshChannelMenu(SelectedChannel);
+                } break;
+              #endif
+              case MENU_ITEM_DEVICE_INFO: { // Info
                 if (!viewingInfo) {
                   write2Screen("Hardware v" TOSTRING(HARDWARE_VERSION), "Firmware v" TOSTRING(FIRMWARE_VERSION));
                   viewingInfo = true;
@@ -140,12 +161,12 @@ void UpdateSettingsMenu() {
                   viewingInfo = false;
                 }
               } break;
-              case 11: { // Reset
+              case MENU_ITEM_RESET: { // Reset
               write2Screen(" "," ");
               delayMicroseconds(1000000);
                 Software_Reset();
               } break;
-              case 12: {
+              case MENU_ITEM_EXIT: {
                 inMenu = MENU_TOP;
                 write2Screen(CommanderString," Click for menu");
               } break;
@@ -434,7 +455,7 @@ void UpdateSettingsMenu() {
         if (myFilePos > 0) {myFilePos = myFilePos - 1;}
       }
       if (SelectedInputAction == 0) {SelectedInputAction = 3;}
-      if (SelectedChannel == 0) {SelectedChannel = 12;}
+      if (SelectedChannel == 0) {SelectedChannel = MENU_ITEM_EXIT;}
       if (SelectedStimMode == 0) {SelectedStimMode = 4;}
     }
     if (LastClickerXState != 2 && ClickerX > ClickerMaxThreshold) {
@@ -448,7 +469,7 @@ void UpdateSettingsMenu() {
         myFilePos++;
       }
       if (SelectedInputAction == 4) {SelectedInputAction = 1;}
-      if (SelectedChannel == 13) {SelectedChannel = 1;}
+      if (SelectedChannel == MENU_ITEM_EXIT + 1) {SelectedChannel = 1;}
       if (SelectedStimMode == 5) {SelectedStimMode = 1;}
     }
     if (LastClickerXState != 0 && ClickerX < ClickerMaxThreshold && ClickerX > ClickerMinThreshold) {
@@ -551,9 +572,12 @@ void RefreshChannelMenu(int ThisChannel) {
         case 7: {write2Screen(" SAVE SETTINGS  ","< Select File >");} break;
         case 8: {write2Screen(" LOAD SETTINGS  ","< Select File >");} break;
         case 9: {write2Screen(" ERASE SETTINGS ","< Select File >");} break;
-        case 10: {write2Screen("  Device Info  ","<Click to view>");} break;
-        case 11: {write2Screen("    -RESET-       ","<Click to reset>");} break;
-        case 12: {write2Screen("<Click to exit>"," ");} break;
+        #if (HARDWARE_VERSION > 2)
+          case MENU_ITEM_SCREEN_SAVER: {write2Screen("Screen Saver", screenSaverEnabled ? "On" : "Off");} break;
+        #endif
+        case MENU_ITEM_DEVICE_INFO: {write2Screen("  Device Info  ","<Click to view>");} break;
+        case MENU_ITEM_RESET: {write2Screen("    -RESET-       ","<Click to reset>");} break;
+        case MENU_ITEM_EXIT: {write2Screen("<Click to exit>"," ");} break;
   }
 }
 void RefreshActionMenu(int ThisAction) {

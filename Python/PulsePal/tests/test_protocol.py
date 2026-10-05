@@ -600,6 +600,52 @@ def test_format_microsd_raises_when_the_device_reports_failure():
         assert "could not format" in str(error)
 
 
+def test_set_screen_saver_uses_op_99():
+    device = make_device()
+    device.info.hardware_version = 3
+    device.set_screen_saver(True, 300)
+    device.set_screen_saver(0, 65535)
+    device.set_screen_saver(False)  # The timeout is always sent: 1800 s when left out
+    assert device.port.writes == [
+        bytes([OP_MENU_BYTE, 99, 1]) + struct.pack("<H", 300),
+        bytes([OP_MENU_BYTE, 99, 0]) + struct.pack("<H", 65535),
+        bytes([OP_MENU_BYTE, 99, 0]) + struct.pack("<H", 1800),
+    ]
+
+
+def test_set_screen_saver_refuses_bad_values_before_sending():
+    device = make_device()
+    device.info.hardware_version = 3
+    for enabled, timeout in ((2, 600), ("on", 600), (None, 600), (1, 0), (1, 65536), (1, 1.5),
+                             (1, float("nan")), (1, True)):
+        try:
+            device.set_screen_saver(enabled, timeout)
+            raise AssertionError(f"set_screen_saver({enabled!r}, {timeout!r}) did not raise")
+        except ValueError:
+            pass
+    assert device.port.writes == []
+
+
+def test_set_screen_saver_needs_pulse_pal_3_and_firmware_v22():
+    device = make_device()
+    device.info.hardware_version = 2
+    try:
+        device.set_screen_saver(True)
+        raise AssertionError("Pulse Pal 2 switched its screen saver on")
+    except PulsePal.PulsePalError:
+        pass
+    device.set_screen_saver(False)  # Off is valid on Pulse Pal 2
+    assert device.port.writes == [bytes([OP_MENU_BYTE, 99, 0]) + struct.pack("<H", 1800)]
+    device = make_device(firmware_version=21)
+    device.info.hardware_version = 3
+    try:
+        device.set_screen_saver(False)
+        raise AssertionError("firmware v21 has no op 99")
+    except PulsePal.PulsePalError:
+        pass
+    assert device.port.writes == []
+
+
 def main():
     tests = [
         value for name, value in sorted(globals().items())

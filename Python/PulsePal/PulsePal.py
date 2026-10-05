@@ -771,6 +771,70 @@ class PulsePalDevice:
         )
         self._read_ack("set_calibration()")
 
+    def set_screen_saver(self, enabled, timeout=1800):
+        """Switch the device's screen saver on or off, and set its timeout.
+
+        With the screen saver on, the device dims its screen once it has
+        been left alone for `timeout` seconds: no command from the
+        computer, no rising edge on a trigger channel, and no joystick
+        click or push. The next of these brings the screen back. Both
+        settings are stored in the device's EEPROM and kept through power
+        cycles; the screen saver can also be switched on and off from the
+        device's joystick menu. A new device has it on, with 1800 s.
+
+        The device saves the settings once no channel is playing. Saving
+        pauses its timer, usually for about 20 us but, once in about 2000
+        changes, for tens of milliseconds, which would delay a trigger.
+        Change the settings before an experiment rather than during one.
+
+        Requires firmware v22 or newer. Only Pulse Pal 3 has a screen
+        saver: Pulse Pal 2 accepts `enabled=False` only.
+
+        ```python
+        P.set_screen_saver(True, 300)  # dim after 5 minutes
+        P.set_screen_saver(False)
+        ```
+
+        Args:
+            enabled: True (or 1) to switch the screen saver on, False (or
+                0) to switch it off.
+            timeout: Seconds without activity before the screen dims, a
+                whole number from 1 to 65535. It is sent with every call,
+                so leaving it out sets 1800 s.
+
+        Raises:
+            PulsePalError: If the firmware is older than v22, the
+                screen saver is switched on with hardware older than v3,
+                or the device does not acknowledge the command.
+            ValueError: If `enabled` is not True, False, 1 or 0, or
+                `timeout` is not a whole number from 1 to 65535.
+        """
+        self._require_firmware(22, "set_screen_saver()")
+        if isinstance(enabled, str) or enabled not in (0, 1):  # True and False equal 1 and 0
+            raise ValueError("enabled must be True or False (1 or 0)")
+        if not (
+            isinstance(timeout, numbers.Real)
+            and not isinstance(timeout, bool)
+            and math.isfinite(timeout)
+            and timeout == int(timeout)
+            and 1 <= timeout <= 65535
+        ):
+            raise ValueError(
+                "timeout must be a whole number of seconds from 1 to 65535"
+            )
+        if enabled and (self.info.hardware_version or 2) < 3:
+            raise PulsePalError(
+                "The screen saver requires hardware v3 or newer: Pulse Pal 2 "
+                "accepts set_screen_saver(False) only."
+            )
+        self._write_serial(
+            (self._OP_MENU_BYTE, 99, int(enabled)),
+            "uint8",
+            int(timeout),
+            "uint16",
+        )
+        self._read_ack("set_screen_saver()")
+
     def set_output_param(self, param_name, channel, value):
         """Program an output channel parameter on the device.
 

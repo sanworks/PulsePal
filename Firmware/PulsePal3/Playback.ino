@@ -161,6 +161,7 @@ void handler(void) {
          // update LineTriggerEvent with logic representing logic transition
          if ((InputValues[x] == TriggerLevel) && (InputValuesLastCycle[x] == DefaultInputLevel)) {
            LineTriggerEvent[x] = TRIGGER_EVENT_LOW_TO_HIGH; // Low to high transition
+           screenSaverActivity = true; // loop() wakes the screen, after this cycle (see updateScreenSaver())
          } else if ((InputValues[x] == DefaultInputLevel) && (InputValuesLastCycle[x] == TriggerLevel)) {
            LineTriggerEvent[x] = TRIGGER_EVENT_HIGH_TO_LOW; // High to low transition
          }
@@ -536,6 +537,7 @@ void AbortAllPulseTrains() {
     }
     dacWrite();
     abortRequested = true;
+    screenSaverActivity = true; // The click also wakes the screen, before loop() shows the message
 }
 
 // Sets UsesBursts for an output channel (0-3) from its parameters. Call after any output channel parameter changes.

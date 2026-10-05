@@ -46,7 +46,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   Menu.ino         Thumb joystick menu, UpdateSettingsMenu(), with a map of all menu options, and the editor
 //                    for parameter values, ReturnUserValue()
 //   SDSettings.ino   Settings files on the microSD card, with the file layout
-//   Display.ino      Screen output and splash screen
+//   Display.ino      Screen output, screen saver and splash screen
 //   HardwareIO.ino   DAC writes, the hardware timer, fast digital I/O and software reset
 // Supporting classes: ArCOM (USB serial data types), LiquidCrystal_U8G2 (Pulse Pal 3 screen)
 
@@ -147,7 +147,8 @@ enum OpCode {
   OP_LOAD_CUSTOM_TRAIN = 95,          // Load a custom pulse train
   OP_SET_ZERO_CODE_CALIBRATION = 96,  // Set DAC zero code calibration for one channel (stored in EEPROM on HW3)
   OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only)
-  OP_ABORT_CHANNELS = 98              // Stop playback on specific output channels (1 bit per channel)
+  OP_ABORT_CHANNELS = 98,             // Stop playback on specific output channels (1 bit per channel)
+  OP_SET_SCREEN_SAVER = 99            // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
 };
 
 // Parameter IDs used by ops 74 and 91. These match the parameter codes in the MATLAB and Python interfaces.
@@ -221,6 +222,27 @@ enum TriggerModeValue {
   #define MAX_TRIGGER_MODE TRIGGER_MODE_GATED
 #endif
 
+// Screen saver. Once the device has been left alone for screenSaverTimeout seconds (no command from the PC, no rising
+// edge on a trigger channel, and no joystick click or push), it dims the screen. Any of these brings the screen back,
+// showing the menu as it was left. Op 99 switches it on or off and sets the timeout; the joystick menu switches it on
+// or off. Both settings are kept in the EEPROM. See updateScreenSaver() in Display.ino.
+// The highest screen saver state this board accepts: 1 (on), or 0 (off) on Pulse Pal 2, whose character display has no
+// brightness control. Devices start with the screen saver in this state until op 99 or the menu changes it.
+#if (HARDWARE_VERSION > 2)
+  #define MAX_SCREEN_SAVER_STATE 1
+#else
+  #define MAX_SCREEN_SAVER_STATE 0
+#endif
+#define SCREEN_SAVER_DEFAULT_TIMEOUT 1800 // Seconds, until op 99 sets another
+
+// EEPROM layout (Pulse Pal 3). These addresses are fixed: the EEPROM keeps its contents through firmware updates, and
+// Wave Pal reads the calibration at address 0 too. Teensy's EEPROM emulation keeps bytes 4n to 4n+3 in flash sector
+// n % 63, and now and then erases and rewrites a whole sector when one of its bytes changes. The screen saver bytes
+// share no sector with the calibration, so a power cut during such a rewrite cannot lose the calibration. Addresses
+// 8-15 are left free for more calibration data.
+#define EEPROM_ZERO_CODE_CALIBRATION_ADDRESS 0 // ZeroCodeCalibration (int16 x 4). Set by op 96
+#define EEPROM_SCREEN_SAVER_ADDRESS 16 // screenSaverEnabled (byte), then screenSaverTimeout (uint16). See saveScreenSaverSettings()
+
 // Values of LineTriggerEvent[]
 enum TriggerEventValue {
   TRIGGER_EVENT_NONE = 0,
@@ -251,6 +273,7 @@ enum TriggerEventValue {
   #define N_CUSTOM_PULSE_TRAINS 2
   #define MAX_CUSTOM_PULSES 5000
   #define CURSOR_BLINK_CYCLES 20000 // Joystick menu loop iterations between cursor blinks while editing a value
+  #define FLASHMEM // Teensy only (see the Pulse Pal 3 note below). The Due runs all code from flash
   // Timed DAC updates, see dacWriteTimed(). The timer's counter runs at MCK/8.
   #define TIMER_COUNTS_PER_US 10.5
   #define DAC_CHANNEL_WRITE_US 4.0 // Longest SPI write of one DAC channel (3.55-3.9us measured)
@@ -297,6 +320,11 @@ enum TriggerEventValue {
   #define DAC_CHANNEL_WRITE_US 1.3 // Longest SPI write of one DAC channel (1.13us measured)
   #define DAC_LATCH_GAP_US 1.5 // Time from the last write to the latch. The DAC updates at once only some time after a write
   #define DAC_LATCH_US 7.5 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap
+  #define SCREEN_BRIGHTNESS 128 // Brightness of the oLED display (u8g2 contrast, 0-255). Use 128 max because:
+                                // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
+  #define SCREEN_SAVER_DIM_BRIGHTNESS 8 // Brightness while the screen saver dims the screen
+  // Teensy 4.1 runs code from RAM1 (ITCM), which it takes in 32kB blocks, so code just over a multiple of 32kB costs a
+  // whole block of RAM. Functions that run only at startup are marked FLASHMEM, which runs them from flash instead.
 #endif
 
 // Variables for SPI bus
@@ -442,6 +470,17 @@ const byte MENU_ACTION_TRIGGER = 1; // Output channel menu: trigger this channel
 const byte MENU_ACTION_FIRST_PARAM = 2; // First action that edits a parameter from menuActionParams
 const byte MENU_ACTION_EXIT = MENU_ACTION_FIRST_PARAM + sizeof(menuActionParams); // Last action: back to the channel list
 
+// Channel list items after the file menus (SelectedChannel, while inMenu is MENU_CHANNEL_LIST). Pulse Pal 3 lists the
+// screen saver before the device info; Pulse Pal 2 has none, so its items from device info on are one lower.
+#if (HARDWARE_VERSION > 2)
+  const byte MENU_ITEM_SCREEN_SAVER = 10;
+  const byte MENU_ITEM_DEVICE_INFO = 11;
+#else
+  const byte MENU_ITEM_DEVICE_INFO = 10;
+#endif
+const byte MENU_ITEM_RESET = MENU_ITEM_DEVICE_INFO + 1;
+const byte MENU_ITEM_EXIT = MENU_ITEM_RESET + 1; // The last item
+
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
 unsigned long CustomTrainNpulses[N_CUSTOM_PULSE_TRAINS] = {0}; // Stores the total number of pulses in the custom pulse train
@@ -553,10 +592,22 @@ char tempText[17] = {0}; // Temporary buffer for holding a file name or other te
 boolean NeedUpdate = 0; // If a new menu item is selected, the screen must be updated
 uint32_t PulseTrainDuration_ExamplePulse[4] = {0};
 
+// Screen saver. See updateScreenSaver() in Display.ino.
+byte screenSaverEnabled = MAX_SCREEN_SAVER_STATE; // 1 if the screen saver is on. Set by op 99 and the joystick menu
+uint16_t screenSaverTimeout = SCREEN_SAVER_DEFAULT_TIMEOUT; // Seconds without activity before the screen dims. Set by op 99
+boolean screenSaverSavePending = false; // The settings above changed, and are written to the EEPROM once no channel is playing
+boolean screenDimmed = false; // True while the screen saver has dimmed the screen
+uint32_t lastActivityTime = 0; // millis() when updateScreenSaver() last found screenSaverActivity set
+volatile boolean screenSaverActivity = false; // Set by handler() on a rising edge of a trigger channel or a joystick click
+                                              // that stops playback, and by loop() for a command from the PC or a joystick
+                                              // click or push in the menu. updateScreenSaver() clears it.
+
 // DAC variables
 boolean DACFlags[4] = {0}; // Flag to indicate whether each output channel needs to be updated in a call to dacWrite()
 byte dacBuffer[3] = {0}; // Holds bytes about to be written via SPI (for improved transfer speed with array writes)
 int16_t ZeroCodeCalibration[4] = {0}; // Calibration for zero-code error of the DAC
+static_assert(EEPROM_SCREEN_SAVER_ADDRESS >= EEPROM_ZERO_CODE_CALIBRATION_ADDRESS + sizeof(ZeroCodeCalibration),
+              "The screen saver settings must not overlap the calibration in the EEPROM");
 union { // dacValue contains a single sample of raw 16-bit data to be written on each DAC channel
     byte byteArray[8];
     uint16_t uint16[4];
@@ -584,7 +635,8 @@ void setup() {
   digitalWriteDirect(LDACPin, LOW);
   digitalWriteDirect(SyncPin, HIGH);
   #if (HARDWARE_VERSION > 2)
-    EEPROM.get(0, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
+    EEPROM.get(EEPROM_ZERO_CODE_CALIBRATION_ADDRESS, ZeroCodeCalibration); //Read the Zero code calibration from the EEPROM
+    loadScreenSaverSettings();
   #endif
   ProgramDAC(28, 0, 0); // Clear DAC register
   ProgramDAC(12, 0, 4); // Set DAC output range to +/- 10V
@@ -607,8 +659,7 @@ void setup() {
     // With external VSL, every lit row leaves a dim ghost on the row below it.
     u8g2.sendF("caa", 0xB4, 0xA2, 0xFD);
     runSplashScreen();
-    u8g2.setContrast(128); // Brightness of oLED display. Use 128 max (of 256) because:
-                          // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
+    u8g2.setContrast(SCREEN_BRIGHTNESS); // Brightness of oLED display. See SCREEN_BRIGHTNESS
   #endif
   lcd.begin(16, 2);
   lcd.clear();
@@ -678,6 +729,7 @@ void loop() {
   }
   usbLoadFlag = false;
   PPUSB.flush(); // Send any reply from this pass as a single USB packet
+  updateScreenSaver(); // After the reply is sent, so that waking the screen never delays it
   if (abortRequested) { // handler() stopped playback because the joystick button was pressed
     abortRequested = false;
     ShowAbortMessage();
@@ -693,6 +745,7 @@ void loop() {
     dacWrite();
     DACFlag = 0;
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
+    screenSaverActivity = true; // The click that ended the message. The screen saver's idle time starts again here.
     PPUSB.clearTimedOut();
     startHardwareTimer();
   }
