@@ -49,7 +49,8 @@ static inline uint16_t clampU16(uint16_t value, int16_t offset)
     return (uint16_t)corrected;
 }
 
-// Writes one channel's input register. The output changes on the next falling edge of LDAC.
+// Writes one channel's input register. The output changes on the next falling edge of LDAC, if that comes at least
+// DAC_WRITE_TO_LATCH_NS after the first write since the previous latch.
 static inline void writeDACRegister(byte channel, uint16_t value) {
   value = clampU16(value, activeCalibration[channel]);
   digitalWriteFast(SyncPin, LOW);
@@ -69,7 +70,7 @@ void dacWrite() {
       DACFlags[i] = 0;
     }
   }
-  digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+  delayNanoseconds(DAC_WRITE_TO_LATCH_NS); // A sooner latch can be ignored, and the outputs keep their old voltages
   digitalWriteFast(LDACPin, LOW);
 }
 
@@ -83,7 +84,7 @@ void dacWriteChannels(byte channelBits) {
       DACFlags[i] = 0;
     }
   }
-  digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+  delayNanoseconds(DAC_WRITE_TO_LATCH_NS); // A sooner latch can be ignored, and the outputs keep their old voltages
   digitalWriteFast(LDACPin, LOW);
 }
 

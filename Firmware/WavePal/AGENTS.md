@@ -65,6 +65,16 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
 7. **The op codes, trigger mode values and range indices in `PROTOCOL.md` are fixed** once a
    client is released. Add new op codes rather than changing existing ones.
 8. **Use ArCOM for USB, and only from `loop()`**, as in Pulse Pal firmware. See `ArCOM.h`.
+9. **Leave time between the DAC writes and the latch.** The AD5754R ignores an LDAC falling
+   edge that comes less than about 60 ns after the first input register write since the
+   previous latch (measured on a Pulse Pal 3: 47 ns failed, 63 ns worked). The outputs then
+   keep their old voltages until a later latch. When more than one channel is written, the
+   first write is a microsecond old by the latch, so only single-channel updates are at risk:
+   one channel playing (every sample), one channel's waveform ending or being stopped, or a
+   fixed voltage on one channel. `dacWrite()` and `dacWriteChannels()` therefore wait
+   `DAC_WRITE_TO_LATCH_NS` (200 ns) before the latch. The `digitalWrite()` they used before
+   took about 50 ns and only just worked: the same wait with a few fewer instructions failed
+   every time.
 
 ## What runs in the playback interrupts
 
@@ -79,8 +89,9 @@ the playback state (`playing`, `stopAfterWrite`, `playChunk`, ...), `bufferChunk
 `nSamples`, the settings (`loopMode`, `loopDuration`, `triggerMode`, `TriggerAddress`) and
 `dacValue`.
 
-Measured on a Teensy 4.1 (op 71, `longest_interrupt_us`): `handler()` takes 1.6 µs with one
-channel playing and 5.2 µs with four, against a 10 µs sample period at 100 kHz.
+Measured on a Teensy 4.1 (op 71, `longest_interrupt_us`): `handler()` takes 1.7 µs with one
+channel playing and 5.4 µs with four, against a 10 µs sample period at 100 kHz. About 0.15 µs
+of that is the wait before the latch (rule 9).
 
 ## Checks
 

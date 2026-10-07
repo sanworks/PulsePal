@@ -78,10 +78,15 @@ static inline void dacLatch() {
 
 // Writes flagged channels and updates the outputs at once: for setup(), loop()'s comm failure handling (while the timer
 // is stopped) and AbortAllPulseTrains(). handler() uses dacWriteTimed(). The same rules as dacLoad() apply.
+// The AD5754R (Pulse Pal 3) ignores a latch that comes less than about 60ns after the first channel write since the
+// previous latch, and the outputs keep their old voltages. Here little more than the digitalWrite() below (about 50ns)
+// separates the last write from the latch. That is enough because every caller writes all four channels, so the first
+// write is microseconds old. To write a single channel and latch at once, wait longer first (Wave Pal and Synth Pal wait
+// DAC_WRITE_TO_LATCH_NS, 200ns).
 void dacWrite() {
   dacLoad();
   #if (HARDWARE_VERSION > 2)
-    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! A short wait before the latch (see above)
   #endif
   dacLatch();
 }

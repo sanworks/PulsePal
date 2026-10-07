@@ -79,6 +79,16 @@ the `--show` output before concluding that a function really changed.
    effect late. `DAC_LATCH_US` must cover the interrupt's start, four writes of
    `DAC_CHANNEL_WRITE_US` and the gap: if SPI or the handler's start gets slower, measure again.
    In a cycle that changes an output, the interrupt now runs for at least `DAC_LATCH_US`.
+
+   `dacWrite()` latches straight after its writes, with little more than a `digitalWrite()`
+   (about 50 ns) in between. On Pulse Pal 3 the AD5754R ignores an LDAC falling edge that comes
+   less than about 60 ns after the first channel write since the previous latch (measured:
+   47 ns failed, 63 ns worked), and the outputs keep their old voltages. `dacWrite()` is safe
+   only because its callers write all four channels, so the first write is microseconds old by
+   the latch. Checked with a scope: after a joystick abort and after a comm failure, all four
+   outputs, channel 4 included, return to their resting voltages. Code that writes one channel
+   and latches at once must wait longer first (Wave Pal and Synth Pal wait
+   `DAC_WRITE_TO_LATCH_NS`, 200 ns).
 2. **`setDAC()` sets `DACFlags[channel]` before `DACFlag`.** In the other order, an interrupt
    landing between the two lines clears `DACFlag` and loses the update.
 3. **Do not write to the screen, wait, or use the microSD card inside the timer interrupt.**
