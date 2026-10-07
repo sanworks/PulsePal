@@ -114,7 +114,13 @@ void processUSBCommands() {
     case OP_SET_WAVEFORM: { // Op 87 ('W'). One byte per output channel. See enum WaveformValue.
       byte newWaveforms[N_CHANNELS];
       PPUSB.readByteArray(newWaveforms, N_CHANNELS);
-      if (!allAtMost(newWaveforms, N_CHANNELS, MAX_WAVEFORM)) {
+      // A fixed voltage reads the amplitude differently, so the levels are checked again (e.g. a fixed voltage of -5V
+      // is no amplitude for a sine wave)
+      bool valid = allAtMost(newWaveforms, N_CHANNELS, MAX_WAVEFORM);
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        valid = valid && isValidOutputLevel(newWaveforms[i], restingVoltageMicrovolts[i], amplitudeMicrovolts[i]);
+      }
+      if (!valid) {
         PPUSB.writeByte(0);
         break;
       }
@@ -127,12 +133,13 @@ void processUSBCommands() {
       PPUSB.writeByte(1);
     } break;
 
-    case OP_SET_AMPLITUDE: { // Op 65 ('A'). One uint32 per output channel: peak to peak, in microvolts.
-      uint32_t newAmplitudes[N_CHANNELS];
-      PPUSB.readUint32Array(newAmplitudes, N_CHANNELS);
+    case OP_SET_AMPLITUDE: { // Op 65 ('A'). One int32 per output channel, in microvolts: peak to peak, or a fixed voltage.
+      int32_t newAmplitudes[N_CHANNELS];
+      PPUSB.readUint32Array((uint32_t*)newAmplitudes, N_CHANNELS); // Two's complement, so the bytes are the same. Only a
+                                                                    // fixed voltage can be negative.
       bool valid = true;
       for (byte i = 0; i < N_CHANNELS; i++) {
-        valid = valid && isValidOutputLevel(restingVoltageMicrovolts[i], newAmplitudes[i]);
+        valid = valid && isValidOutputLevel(waveform[i], restingVoltageMicrovolts[i], newAmplitudes[i]);
       }
       if (!valid) {
         PPUSB.writeByte(0);
@@ -152,7 +159,7 @@ void processUSBCommands() {
       PPUSB.readUint32Array((uint32_t*)newVoltages, N_CHANNELS); // Two's complement, so the bytes are the same
       bool valid = true;
       for (byte i = 0; i < N_CHANNELS; i++) {
-        valid = valid && isValidOutputLevel(newVoltages[i], amplitudeMicrovolts[i]);
+        valid = valid && isValidOutputLevel(waveform[i], newVoltages[i], amplitudeMicrovolts[i]);
       }
       if (!valid) {
         PPUSB.writeByte(0);

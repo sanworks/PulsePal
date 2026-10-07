@@ -24,7 +24,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Synth Pal turns a Pulse Pal 3 into a four channel waveform synthesizer. Each output channel plays a sine, triangle,
 // square or sawtooth wave, with its own amplitude (peak to peak), resting voltage (the voltage between playbacks, and the
 // waveform's mean) and play duration, when it is triggered: by a TTL edge on a trigger channel, by a command from the PC,
-// or from the thumb joystick menu. One frequency, 1Hz to 20kHz in steps of 0.01Hz, applies to all four channels.
+// or from the thumb joystick menu. A channel can instead play a fixed voltage, its amplitude, for its play duration.
+// One frequency, 1Hz to 20kHz in steps of 0.01Hz, applies to all four channels.
 // Samples are computed as they play, at a sampling rate that is a multiple of the frequency, so that every cycle is
 // rendered the same way. The DAC's output range is chosen for each channel, to give its waveform the finest steps.
 // The USB protocol is documented in PROTOCOL.md in this folder, and AGENTS.md lists the rules for changing this code.
@@ -96,7 +97,8 @@ enum OpCode {
   OP_HARDWARE_INFO = 'N',             // 78. Returns the hardware properties and the limits of the settings
   OP_SET_FREQUENCY = 'F',             // 70. Frequency of all output channels, in hundredths of a Hz
   OP_SET_WAVEFORM = 'W',              // 87. Waveform of each output channel. See enum WaveformValue
-  OP_SET_AMPLITUDE = 'A',             // 65. Peak to peak amplitude of each output channel, in microvolts
+  OP_SET_AMPLITUDE = 'A',             // 65. Amplitude of each output channel, in microvolts: peak to peak, or the voltage
+                                      // of a fixed voltage
   OP_SET_RESTING_VOLTAGE = 'V',       // 86. Resting voltage of each output channel, in microvolts
   OP_SET_PLAY_DURATION = 'D',         // 68. Play duration of each output channel, in microseconds. 0 = until stopped
   OP_SET_TRIGGER_LINKS = 'I',         // 73. Links from the trigger channels to the output channels
@@ -114,9 +116,11 @@ enum WaveformValue {
   WAVEFORM_SINE = 0,                  // Starts at the resting voltage, rising
   WAVEFORM_TRIANGLE = 1,              // Starts at the resting voltage, rising
   WAVEFORM_SQUARE = 2,                // High for the first half of each cycle, low for the second
-  WAVEFORM_SAWTOOTH = 3               // Rises from its lowest voltage to its highest, then falls back at the cycle's end
+  WAVEFORM_SAWTOOTH = 3,              // Rises from its lowest voltage to its highest, then falls back at the cycle's end
+  WAVEFORM_FIXED_VOLTAGE = 4          // Not periodic: the output steps to the amplitude, a voltage (-10V to 10V), for the
+                                      // play duration. See isValidOutputLevel() in Settings.ino.
 };
-#define MAX_WAVEFORM WAVEFORM_SAWTOOTH
+#define MAX_WAVEFORM WAVEFORM_FIXED_VOLTAGE
 
 // Values of TriggerMode[], one per trigger channel. These are Pulse Pal's trigger modes, with the same values.
 enum TriggerModeValue {
@@ -284,8 +288,8 @@ SPISettings DACSettings(30000000, MSBFIRST, SPI_MODE2); // The AD5754R's maximum
 // ---------------------------------------------------------------------------------------------------------------
 uint32_t frequencyCentiHz = DEFAULT_FREQUENCY_CENTIHZ; // Frequency of all output channels, in hundredths of a Hz
 byte waveform[N_CHANNELS] = {0}; // See enum WaveformValue
-uint32_t amplitudeMicrovolts[N_CHANNELS] = {0}; // Peak to peak
-int32_t restingVoltageMicrovolts[N_CHANNELS] = {0}; // The output while the channel is idle, and the waveform's mean
+int32_t amplitudeMicrovolts[N_CHANNELS] = {0}; // Peak to peak (0 or more), or the voltage of WAVEFORM_FIXED_VOLTAGE
+int32_t restingVoltageMicrovolts[N_CHANNELS] = {0}; // The output while the channel is idle, and a periodic waveform's mean
 uint32_t playDurationMicros[N_CHANNELS] = {0}; // How long the channel plays after each trigger. 0 = until stopped.
 volatile byte TriggerAddress[2][N_CHANNELS] = {0}; // Output channels triggered by trigger channel 1 (row 1) and 2 (row 2)
 volatile byte TriggerMode[2] = {0}; // One per trigger channel. See enum TriggerModeValue
@@ -321,6 +325,7 @@ struct ChannelOutput {
   uint16_t restCode;          // The DAC code nearest the resting voltage: the code output while the channel is idle
   float restCodeFraction;     // The resting voltage's exact code minus restCode, -0.5 to 0.5
   float halfAmplitudeCodes;   // Half the peak to peak amplitude, in DAC codes
+  uint16_t fixedCode;         // WAVEFORM_FIXED_VOLTAGE: the DAC code nearest the amplitude, played on every sample
 };
 ChannelOutput activeOutput[N_CHANNELS]; // What the channel plays now, and the range the DAC has for it
 ChannelOutput pendingOutput[N_CHANNELS]; // New values from loop(), waiting for handler() (see pendingOutputChannels)

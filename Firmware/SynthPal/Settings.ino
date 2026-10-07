@@ -30,16 +30,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   setFrequency()
 //   setPlayDurations()
 //   isValidOutputLevel()
+//   fitAmplitude()
 //   outputRangeFor()
 //   updateChannelOutput()
 //   takePendingOutputIfIdle()
 //   LoadDefaultSettings()
 //
 // OUTPUT RANGES
-// Each channel's waveform spans its resting voltage plus and minus half its amplitude, which must stay within +/-10V
-// (isValidOutputLevel()). The channel's output range is the one with the finest steps that holds that span
-// (outputRangeFor()): 0-5V (76uV steps), then 0-10V or +/-5V (153uV), then +/-10V (305uV). The DAC has one output range
-// register per channel, so the channels' ranges are independent.
+// Each channel's periodic waveform spans its resting voltage plus and minus half its amplitude, which must stay within
+// +/-10V (isValidOutputLevel()). A fixed voltage (WAVEFORM_FIXED_VOLTAGE) spans its resting voltage and its amplitude,
+// which is a voltage in its own right, -10V to 10V. The channel's output range is the one with the finest steps that
+// holds that span (outputRangeFor()): 0-5V (76uV steps), then 0-10V or +/-5V (153uV), then +/-10V (305uV). The DAC has
+// one output range register per channel, so the channels' ranges are independent.
 // A new waveform, amplitude or resting voltage is worked out into a ChannelOutput (updateChannelOutput()) and handed to
 // handler(), which takes it on a tick, after that tick's DAC update (takePendingOutput() in Playback.ino). While the
 // sample clock is stopped, loop() takes it at once. If the range changes, the DAC needs a range write as well as a
@@ -117,20 +119,41 @@ void setPlayDurations(const uint32_t *newMicros) {
   interrupts();
 }
 
-// True if a resting voltage and amplitude (peak to peak) can be played: the waveform must stay within +/-10V
-bool isValidOutputLevel(int32_t restingMicrovolts, uint32_t amplitudeMicrovolts) {
-  if ((amplitudeMicrovolts > MAX_AMPLITUDE_MICROVOLTS) || (restingMicrovolts > MAX_VOLTAGE_MICROVOLTS) ||
-      (restingMicrovolts < -MAX_VOLTAGE_MICROVOLTS)) {
+// True if a waveform (enum WaveformValue) can be played with a resting voltage and amplitude: every voltage on the
+// output must stay within +/-10V. A periodic waveform's amplitude is peak to peak, 0 or more, and the waveform swings half
+// of it either side of the resting voltage. A fixed voltage's amplitude is the voltage itself, and may be negative.
+bool isValidOutputLevel(byte shape, int32_t restingMicrovolts, int32_t amplitudeMicrovolts) {
+  if ((restingMicrovolts > MAX_VOLTAGE_MICROVOLTS) || (restingMicrovolts < -MAX_VOLTAGE_MICROVOLTS)) {
     return false;
   }
-  return (2 * abs(restingMicrovolts)) + (int32_t)amplitudeMicrovolts <= 2 * MAX_VOLTAGE_MICROVOLTS;
+  if (shape == WAVEFORM_FIXED_VOLTAGE) {
+    return (amplitudeMicrovolts >= -MAX_VOLTAGE_MICROVOLTS) && (amplitudeMicrovolts <= MAX_VOLTAGE_MICROVOLTS);
+  }
+  if ((amplitudeMicrovolts < 0) || (amplitudeMicrovolts > MAX_AMPLITUDE_MICROVOLTS)) {
+    return false;
+  }
+  return (2 * abs(restingMicrovolts)) + amplitudeMicrovolts <= 2 * MAX_VOLTAGE_MICROVOLTS;
+}
+
+// The valid amplitude nearest a channel's amplitude, for a waveform and resting voltage (with isValidOutputLevel()).
+// The joystick menu uses it when it changes a channel's waveform: a fixed voltage of -5V becomes a 5V peak to peak wave,
+// and a 20V peak to peak wave a fixed voltage of 10V.
+int32_t fitAmplitude(byte shape, int32_t restingMicrovolts, int32_t amplitudeMicrovolts) {
+  if (shape == WAVEFORM_FIXED_VOLTAGE) {
+    return constrain(amplitudeMicrovolts, -MAX_VOLTAGE_MICROVOLTS, MAX_VOLTAGE_MICROVOLTS);
+  }
+  return min(abs(amplitudeMicrovolts), (2 * MAX_VOLTAGE_MICROVOLTS) - (2 * abs(restingMicrovolts)));
 }
 
 // The output range for a waveform: the first range, in the order of enum OutputRange, that holds its lowest and highest
 // voltages. They are compared at twice their value, so that half the amplitude needs no rounding.
-byte outputRangeFor(int32_t restingMicrovolts, uint32_t amplitudeMicrovolts) {
-  int32_t lowest2 = (2 * restingMicrovolts) - (int32_t)amplitudeMicrovolts;
-  int32_t highest2 = (2 * restingMicrovolts) + (int32_t)amplitudeMicrovolts;
+byte outputRangeFor(byte shape, int32_t restingMicrovolts, int32_t amplitudeMicrovolts) {
+  int32_t lowest2 = (2 * restingMicrovolts) - amplitudeMicrovolts;
+  int32_t highest2 = (2 * restingMicrovolts) + amplitudeMicrovolts;
+  if (shape == WAVEFORM_FIXED_VOLTAGE) { // The resting voltage and the fixed voltage
+    lowest2 = 2 * min(restingMicrovolts, amplitudeMicrovolts);
+    highest2 = 2 * max(restingMicrovolts, amplitudeMicrovolts);
+  }
   for (byte range = 0; range < RANGE_PLUS_MINUS_10V; range++) {
     if ((lowest2 >= 2 * rangeMinMicrovolts[range]) && (highest2 <= 2 * rangeMaxMicrovolts[range])) {
       return range;
@@ -145,14 +168,21 @@ byte outputRangeFor(int32_t restingMicrovolts, uint32_t amplitudeMicrovolts) {
 void updateChannelOutput(byte channel) {
   ChannelOutput out;
   out.waveform = waveform[channel];
-  out.range = outputRangeFor(restingVoltageMicrovolts[channel], amplitudeMicrovolts[channel]);
+  out.range = outputRangeFor(out.waveform, restingVoltageMicrovolts[channel], amplitudeMicrovolts[channel]);
   double codesPerMicrovolt = 65536.0 / (rangeMaxMicrovolts[out.range] - rangeMinMicrovolts[out.range]);
   double restingCode = (restingVoltageMicrovolts[channel] - rangeMinMicrovolts[out.range]) * codesPerMicrovolt;
   double nearestCode = floor(restingCode + 0.5);
   out.restCode = (nearestCode > 65535) ? 65535 : (uint16_t)nearestCode; // The top of the range (code 65536) is one step
                                                                          // above the DAC's highest code
   out.restCodeFraction = (float)(restingCode - nearestCode);
-  out.halfAmplitudeCodes = (float)(amplitudeMicrovolts[channel] * 0.5 * codesPerMicrovolt);
+  if (out.waveform == WAVEFORM_FIXED_VOLTAGE) { // The amplitude is a voltage, rounded to a code as the resting voltage is
+    double fixedCode = floor(((amplitudeMicrovolts[channel] - rangeMinMicrovolts[out.range]) * codesPerMicrovolt) + 0.5);
+    out.fixedCode = (fixedCode > 65535) ? 65535 : (uint16_t)fixedCode;
+    out.halfAmplitudeCodes = 0;
+  } else {
+    out.fixedCode = 0;
+    out.halfAmplitudeCodes = (float)(amplitudeMicrovolts[channel] * 0.5 * codesPerMicrovolt);
+  }
   noInterrupts();
   pendingOutput[channel] = out;
   if (timerRunning) {

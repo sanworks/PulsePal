@@ -10,7 +10,7 @@ trains. `WavePalExample.py` shows how to use it.
 
 `SynthPal.py` controls a Pulse Pal 3 running Synth Pal firmware
 (`/Firmware/SynthPal`), which plays sine, triangle, square and sawtooth
-waves. `SynthPalExample.py` shows how to use it.
+waves, and fixed voltages. `SynthPalExample.py` shows how to use it.
 
 ## Installation
 

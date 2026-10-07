@@ -1,9 +1,9 @@
 # Synth Pal serial protocol
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output channel plays a sine,
-triangle, square or sawtooth wave when it is triggered, with its own amplitude, resting voltage
-and play duration, at one frequency shared by all four channels. This page is the reference for
-its USB serial protocol, as of Synth Pal firmware v1.
+triangle, square or sawtooth wave, or steps to a fixed voltage, when it is triggered, with its own
+amplitude, resting voltage and play duration, at one frequency shared by all four channels. This
+page is the reference for its USB serial protocol, as of Synth Pal firmware v1.
 
 | Client | Location |
 |---|---|
@@ -43,9 +43,10 @@ The Python and MATLAB classes connect in this order:
    so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal.
 2. Op 78 ('N'): hardware properties and limits.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
-4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 87, 86, 65, 68,
-   84 and 73. The resting voltages (op 86) go before the amplitudes (op 65): 0 V is valid with
-   any amplitude the device may hold, and the default amplitude is then valid too.
+4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 86, 65, 87, 68,
+   84 and 73. In this order each is valid whatever the device holds (see [Levels](#levels)): a
+   resting voltage of 0 V (op 86) goes with any waveform and amplitude, the default amplitude
+   of 5 V (op 65) then goes with any waveform, and a sine wave (op 87) then goes with both.
 
 When they close, they send op 81, which puts "Synth Pal v3.0" back on the screen.
 
@@ -63,7 +64,7 @@ so that it is not taken for the next command.
 | 78 | `N` | Hardware info | none | Hardware version (uint8), number of output channels (uint8), lowest frequency in centiHz (uint32), highest frequency in centiHz (uint32), highest sampling rate in Hz (uint32), sample clock's timer clock in Hz (uint32), longest play duration in µs (uint32) |
 | 70 | `F` | Set frequency | Frequency in centiHz (uint32), 100 to 2000000 (1 Hz to 20 kHz) | 1 / 0, then samples per cycle (uint32). Always 5 bytes: after a 0, the samples per cycle of the frequency in use |
 | 87 | `W` | Set waveforms | 4 bytes, one per output channel, see [Waveforms](#waveforms) | 1 / 0 |
-| 65 | `A` | Set amplitudes | 4 uint32, one per output channel: peak to peak, in µV, 0 to 20000000. See [Levels](#levels) | 1 / 0 |
+| 65 | `A` | Set amplitudes | 4 int32, one per output channel, in µV: peak to peak, 0 to 20000000, or for a fixed voltage the voltage, -10000000 to 10000000. See [Levels](#levels) | 1 / 0 |
 | 86 | `V` | Set resting voltages | 4 int32, one per output channel: in µV, -10000000 to 10000000. See [Levels](#levels) | 1 / 0 |
 | 68 | `D` | Set play durations | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 plays until stopped | 1 / 0 |
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
@@ -127,9 +128,16 @@ sampling rate in use, and a nonzero duration lasts at least one sample.
 | 1 | Triangle | Starts at the resting voltage, rising. Peak at a quarter cycle, trough at three quarters |
 | 2 | Square | High for the first half cycle, low for the second |
 | 3 | Sawtooth | Rises in equal steps from its lowest voltage, at the first sample, to its highest, at the last, then falls back |
+| 4 | Fixed Voltage | Not periodic: steps to the amplitude, a voltage, and holds it for the play duration |
 
 A channel that stops, at the end of its play duration or otherwise, returns to its resting
 voltage on the next sample, part way through a cycle if need be.
+
+A fixed voltage plays like the other waveforms: it starts on the sample clock, as they do (about
+8 µs after a trigger when no channel plays), lasts its play duration in samples, and stops and
+responds to the trigger modes in the same way. Its output is written to the DAC once, as it
+starts, and once more as it stops. The frequency does not change it, except through the sampling
+rate that its play duration is counted in.
 
 ## Levels
 
@@ -141,22 +149,32 @@ waveform must stay within -10 V to 10 V:
 2 * |resting voltage| + amplitude <= 20 V
 ```
 
-Op 65 checks the new amplitudes against the resting voltages the device holds, and op 86 the new
-resting voltages against its amplitudes, and either replies 0 if any channel would go beyond.
-So to raise an amplitude beyond what a channel's resting voltage allows, send the resting
-voltage first.
+A fixed voltage (waveform 4) reads the amplitude differently: the amplitude is the voltage the
+output steps to, -10 V to 10 V, and may be negative. Any resting voltage within -10 V to 10 V
+goes with it. Only a fixed voltage takes a negative amplitude.
+
+Op 65 checks the new amplitudes against the waveforms and resting voltages the device holds, op
+86 the new resting voltages against its waveforms and amplitudes, and op 87 the new waveforms
+against its amplitudes and resting voltages. Each replies 0 if any channel would break these
+rules. So to raise an amplitude beyond what a channel's resting voltage allows, send the resting
+voltage first; and to change a waveform, send an amplitude that suits both the old waveform and
+the new one first (an amplitude of 0 goes with every waveform and resting voltage), or change
+the amplitude after the waveform. For example, from a fixed voltage of -5 V to a sine wave of
+4 V peak to peak: op 65 with 4 V, then op 87.
 
 Each sample is the resting voltage's DAC code plus an offset rounded half away from zero, so
 samples the same distance above and below the resting voltage are the same number of codes from
 it: when the resting voltage falls exactly on a DAC code (as 0 V does in the bipolar ranges), the
-mean of any whole number of cycles is exactly that code. The top of a range is one DAC step above
-the DAC's highest code, so a waveform that reaches it stops one step short.
+mean of any whole number of cycles is exactly that code. A fixed voltage is rounded to its
+nearest DAC code, as the resting voltage is. The top of a range is one DAC step above the DAC's
+highest code, so a waveform that reaches it stops one step short.
 
 ### Output ranges
 
 The DAC is an AD5754R with its internal 2.5 V reference, and each output channel has its own
 output range. The device chooses it from the channel's amplitude and resting voltage: the first
-range in this order that holds the whole waveform, which gives the finest steps.
+range in this order that holds the whole waveform, which gives the finest steps. For a fixed
+voltage, the range holds both the fixed voltage and the resting voltage.
 
 | Index | Range | Step |
 |---|---|---|

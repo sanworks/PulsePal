@@ -9,7 +9,8 @@
 % The device counts the samples each channel plays and sums their DAC codes. The tests compare these with values
 % worked out here from the settings, independently of SynthPalDevice, so a mistake in how it encodes frequencies,
 % voltages or durations fails: play durations in samples, the resting voltage's DAC code (the mean of any whole
-% number of cycles), and the codes of a square wave's high half (resting voltage plus half the amplitude).
+% number of cycles), the codes of a square wave's high half (resting voltage plus half the amplitude), and the code
+% of a fixed voltage.
 % /Python/PulsePal/tests/synthpal_hardware_test.py tests the firmware's synthesis itself, code by code.
 
 %{
@@ -34,7 +35,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testSynthPalDevice(portString)
 tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAreExactInSamples, ...
-    @testRestingVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testInfiniteDurationAndStop, ...
+    @testRestingVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
+    @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testInvalidArgumentsAreRefused};
 S = SynthPalDevice(portString);
 nFailed = 0;
@@ -160,6 +162,33 @@ for i = 1:size(cases, 1)
 end
 end
 
+function testFixedVoltage(S)
+% A fixed voltage plays its amplitude's code, in the range that holds it and the resting voltage, for its play
+% duration. Only a fixed voltage takes a negative amplitude.
+S.frequency = 1000; % 100 kHz
+cases = {-2.5, 1, '-5V:5V'; 4, 0, '0V:5V'; 9.99, -3, '-10V:10V'; 0, 7, '0V:10V'};
+for i = 1:size(cases, 1)
+    [fixedVoltage, restingVoltage] = cases{i, 1:2};
+    setChannel(S, 3, 'Fixed Voltage', fixedVoltage, restingVoltage);
+    ranges = S.status().outputRanges;
+    assert(strcmp(ranges{3}, cases{i,3}), 'fixed voltage %g V at %g V: range %s, expected %s', ...
+        fixedVoltage, restingVoltage, ranges{3}, cases{i,3});
+    limits = sscanf(strrep(cases{i,3}, 'V', ''), '%f:%f')';
+    fixedCode = min(round((fixedVoltage - limits(1))/(limits(2) - limits(1))*65536), 65535);
+    S.playDuration(3) = 150/S.samplingRate;
+    S.play(3);
+    waitUntilStopped(S, 3, 1);
+    checkPlayed(S, 3, 150, 150*fixedCode);
+end
+setChannel(S, 3, 'Fixed Voltage', -2.5, 0);
+amplitudes = S.amplitude;
+expectError(@() setProperty(S, 'waveform', 'Sine')); % A sine wave of -2.5 V
+expectError(@() setProperty(S, 'amplitude', [1 1 10.5 1])); % Beyond 10 V
+expectError(@() setProperty(S, 'amplitude', [-1 1 1 1])); % Channel 1 plays a sine wave
+assert(strcmp(S.waveform{3}, 'Fixed Voltage') && isequal(S.amplitude, amplitudes), 'a refused setting was changed');
+setChannel(S, 3, 'Sine', 5, 0);
+end
+
 function testInfiniteDurationAndStop(S)
 S.frequency = 1000;
 S.playDuration(1) = 0;
@@ -239,6 +268,15 @@ end
 function setLevels(S, channel, amplitude, restingVoltage)
 % Sets a channel's amplitude and resting voltage in an order the device accepts from any earlier levels
 S.amplitude(channel) = 0;
+S.restingVoltage(channel) = restingVoltage;
+S.amplitude(channel) = amplitude;
+end
+
+function setChannel(S, channel, waveform, amplitude, restingVoltage)
+% Sets a channel's waveform and levels in an order the device accepts from any earlier settings: an amplitude of 0
+% goes with any waveform and resting voltage
+S.amplitude(channel) = 0;
+S.waveform{channel} = waveform;
 S.restingVoltage(channel) = restingVoltage;
 S.amplitude(channel) = amplitude;
 end

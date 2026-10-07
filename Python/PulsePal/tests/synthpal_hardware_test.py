@@ -44,10 +44,13 @@ def samples_per_cycle(centihz):
     return 4 * (2_500_000 // centihz)
 
 
-def output_range(resting_uv, amplitude_uv):
+def output_range(waveform, resting_uv, amplitude_uv):
     """As outputRangeFor() in /Firmware/SynthPal/Settings.ino: an index into RANGE_LIMITS_UV."""
+    lowest2, highest2 = 2 * resting_uv - amplitude_uv, 2 * resting_uv + amplitude_uv
+    if waveform == SynthPal.FIXED_VOLTAGE:  # The resting voltage and the fixed voltage
+        lowest2, highest2 = 2 * min(resting_uv, amplitude_uv), 2 * max(resting_uv, amplitude_uv)
     for index, (low, high) in enumerate(RANGE_LIMITS_UV[:3]):
-        if 2 * resting_uv - amplitude_uv >= 2 * low and 2 * resting_uv + amplitude_uv <= 2 * high:
+        if lowest2 >= 2 * low and highest2 <= 2 * high:
             return index
     return 3
 
@@ -59,8 +62,11 @@ def fused_multiply_add(a, b, c):
 
 def expected_cycle(waveform, amplitude_uv, resting_uv, n):
     """The DAC codes of one cycle of n samples, computed as the firmware does (Playback.ino)."""
-    low, high = RANGE_LIMITS_UV[output_range(resting_uv, amplitude_uv)]
+    low, high = RANGE_LIMITS_UV[output_range(waveform, resting_uv, amplitude_uv)]
     codes_per_microvolt = 65536.0 / (high - low)
+    if waveform == SynthPal.FIXED_VOLTAGE:  # The same code on every sample: the amplitude's
+        fixed_code = np.floor((amplitude_uv - low) * codes_per_microvolt + 0.5)
+        return np.full(n, min(fixed_code, 65535), dtype=np.int64)
     # As updateChannelOutput() in /Firmware/SynthPal/Settings.ino
     resting_code = (resting_uv - low) * codes_per_microvolt
     nearest_code = np.floor(resting_code + 0.5)
@@ -140,11 +146,11 @@ def check_played(S, channel, n_expected, cycle=None):
 
 def configure(S, channel, waveform, amplitude, resting):
     """Set a channel's waveform and levels, in an order the device accepts from any
-    earlier levels."""
+    earlier settings: an amplitude of 0 goes with any waveform and resting voltage."""
     S.amplitude[channel] = 0
+    S.waveform[channel] = waveform
     S.resting_voltage[channel] = resting
     S.amplitude[channel] = amplitude
-    S.waveform[channel] = waveform
 
 
 def centihz(S):
@@ -205,6 +211,55 @@ def test_output_ranges_follow_the_levels(S):
         cycle = expected_cycle("Sine", microvolts(amplitude), microvolts(resting),
                                S.samples_per_cycle)
         check_played(S, 2, expected_samples(0.01, centihz(S)), cycle)
+
+
+def test_fixed_voltage_steps_to_its_amplitude(S):
+    """A fixed voltage plays one code, its amplitude's, in the range that holds it and the
+    resting voltage, for its play duration."""
+    S.frequency = 777
+    cases = [  # (fixed voltage, resting voltage, range)
+        (5, 0, "0V:5V"), (-5, 0, "-5V:5V"), (2.5, 4.99, "0V:5V"), (10, 0, "0V:10V"),
+        (0, 7, "0V:10V"), (-10, 0, "-10V:10V"), (10, -10, "-10V:10V"), (-0.001, 9.75, "-10V:10V"),
+        (-4.2, 4.2, "-5V:5V"), (0, 0, "0V:5V"), (3.3333333, 1.2345678, "0V:5V"),
+    ]
+    for fixed, resting, range_name in cases:
+        configure(S, 3, "Fixed Voltage", fixed, resting)
+        ranges = S.status().output_ranges
+        assert ranges[3] == range_name, (fixed, resting, ranges)
+        duration = 0.0123
+        S.play_duration[3] = duration
+        S.play(3)
+        wait_until_stopped(S, [3], timeout=1)
+        cycle = expected_cycle("Fixed Voltage", microvolts(fixed), microvolts(resting),
+                               S.samples_per_cycle)
+        check_played(S, 3, expected_samples(duration, centihz(S)), cycle)
+
+
+def test_levels_must_suit_the_waveform(S):
+    """The firmware's own checks, with commands sent past the class's: only a fixed voltage
+    takes a negative amplitude, and a waveform change must suit the amplitude it finds."""
+    def send(op, data):
+        S._write_command(op, data)
+        return S._read_raw(1)[0]
+
+    def amplitudes(*volts):
+        return b"".join(microvolts(v).to_bytes(4, "little", signed=True) for v in volts)
+
+    configure(S, 1, "Fixed Voltage", -5, 0)
+    configure(S, 2, "Sine", 20, 0)
+    assert send(S._OP_SET_AMPLITUDE, amplitudes(-5, -1, 5, 5)) == 0  # -1 V on a sine wave
+    assert send(S._OP_SET_AMPLITUDE, amplitudes(10.000001, 20, 5, 5)) == 0  # Beyond 10 V fixed
+    assert send(S._OP_SET_WAVEFORM, bytes([0, 0, 0, 0])) == 0  # A sine wave of -5 V
+    assert send(S._OP_SET_WAVEFORM, bytes([4, 4, 0, 0])) == 0  # A fixed voltage of 20 V
+    assert send(S._OP_SET_WAVEFORM, bytes([4, 0, 0, 5])) == 0  # No waveform 5
+    assert send(S._OP_SET_RESTING_VOLTAGE, amplitudes(10, 0, 0, 0)) == 1  # Any rest, fixed
+    assert send(S._OP_SET_RESTING_VOLTAGE, amplitudes(10.000001, 0, 0, 0)) == 0
+    assert send(S._OP_SET_AMPLITUDE, amplitudes(-10, 20, 5, 5)) == 1
+    S._resting_uv[1:] = [10_000_000, 0, 0, 0]  # The class's record of what was sent past it
+    S._amplitude_uv[1:] = [-10_000_000, 20_000_000, 5_000_000, 5_000_000]
+    assert S.status().output_ranges[1:3] == ["-10V:10V", "-10V:10V"]
+    configure(S, 1, "Sine", 5, 0)
+    configure(S, 2, "Sine", 5, 0)
 
 
 def test_means_are_the_resting_voltage(S):
@@ -294,7 +349,8 @@ def test_settings_change_during_playback(S):
     S.play_duration[1] = 1
     S.play(1)
     for waveform, amplitude, resting in (("Triangle", 2, 2.5), ("Square", 8, 5),
-                                         ("Sawtooth", 16, 0), ("Sine", 1, -3)):
+                                         ("Fixed Voltage", -7, 1), ("Sawtooth", 16, 0),
+                                         ("Sine", 1, -3)):
         time.sleep(0.1)
         configure(S, 1, waveform, amplitude, resting)
         assert 1 in S.status().playing
@@ -348,6 +404,8 @@ def main():
         test_samples_per_cycle_is_the_largest_multiple_of_4_at_or_below_100khz,
         test_every_waveform_plays_the_modelled_samples,
         test_output_ranges_follow_the_levels,
+        test_fixed_voltage_steps_to_its_amplitude,
+        test_levels_must_suit_the_waveform,
         test_means_are_the_resting_voltage,
         test_play_durations_are_exact_in_samples,
         test_infinite_duration_plays_until_stopped,

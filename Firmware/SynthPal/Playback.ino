@@ -67,7 +67,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Synthesis. Each sample is computed when it is fetched (synthesizeCode()), from the channel's waveform at its phase,
 // scaled by the amplitude around the resting voltage, in DAC codes of the channel's output range. Each channel has its
-// own output range on the DAC, the one with the finest steps that holds its whole waveform (Settings.ino).
+// own output range on the DAC, the one with the finest steps that holds its whole waveform (Settings.ino). A fixed
+// voltage (WAVEFORM_FIXED_VOLTAGE) is the same code on every sample, so it is written once, as it starts: it plays like
+// the other waveforms (start, play duration, stop, triggers), on the same sample clock.
 //
 // Starting. A channel starts at phase 0 of its waveform. If the sample clock is stopped (no channel was playing), the
 // trigger computes the first samples, starts the clock from that moment, and latches them DAC_LATCH_US later, as on
@@ -120,8 +122,9 @@ static inline float quarterSine(uint32_t r) {
   return sineTable[index] + (fraction * (sineTable[index + 1] - sineTable[index]));
 }
 
-// The value of a waveform at sample n of its cycle (0 to samplesPerCycle - 1), from -1 to 1. Each waveform's values are
-// symmetric about 0, so its mean is exactly the resting voltage, and its highest and lowest samples are exactly 1 and -1.
+// The value of a periodic waveform at sample n of its cycle (0 to samplesPerCycle - 1), from -1 to 1. Each waveform's
+// values are symmetric about 0, so its mean is exactly the resting voltage, and its highest and lowest samples are
+// exactly 1 and -1. A fixed voltage never comes here: see synthesizeCode().
 static inline float unitWaveform(byte shape, uint32_t n) {
   uint32_t quarter = samplesPerQuarter;
   switch (shape) {
@@ -158,6 +161,9 @@ static inline float unitWaveform(byte shape, uint32_t n) {
 // would round values above 32768 more coarsely than those below it.
 static inline uint16_t synthesizeCode(byte channel, uint32_t n) {
   const ChannelOutput &out = activeOutput[channel];
+  if (out.waveform == WAVEFORM_FIXED_VOLTAGE) { // Not periodic, and not centred on the resting voltage
+    return out.fixedCode;
+  }
   float offset = out.restCodeFraction + (out.halfAmplitudeCodes * unitWaveform(out.waveform, n));
   int32_t code = (int32_t)out.restCode + (int32_t)roundf(offset);
   if (code < 0) {

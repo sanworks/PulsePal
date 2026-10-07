@@ -27,11 +27,11 @@ code.
 
 /SynthPal
 Synth Pal: alternative firmware for Pulse Pal 3 (Teensy 4.1) that makes it a four channel waveform
-synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, with its own amplitude,
-resting voltage and play duration, when it is triggered by TTL, by software or from the joystick. One
-frequency, 1 Hz to 20 kHz, applies to all four. It is controlled with the Python class in
-/Python/PulsePal/SynthPal.py or the MATLAB class in /MATLAB/@SynthPalDevice. PROTOCOL.md and AGENTS.md in
-that folder describe its USB protocol and code.
+synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a fixed
+voltage, with its own amplitude, resting voltage and play duration, when it is triggered by TTL, by
+software or from the joystick. One frequency, 1 Hz to 20 kHz, applies to all four. It is controlled
+with the Python class in /Python/PulsePal/SynthPal.py or the MATLAB class in /MATLAB/@SynthPalDevice.
+PROTOCOL.md and AGENTS.md in that folder describe its USB protocol and code.
 
 /Old
 Archived firmware for earlier hardware and releases, kept for reference and no longer developed.

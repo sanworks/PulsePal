@@ -2,11 +2,11 @@
 Python interface for Synth Pal, a waveform synthesizer for Pulse Pal 3.
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output
-channel plays a sine, triangle, square or sawtooth wave when it is
-triggered: by a TTL pulse on a trigger channel, from software, or from
-the thumb joystick. Each channel has its own waveform, amplitude, resting
-voltage and play duration, and one frequency, 1 Hz to 20 kHz in steps of
-0.01 Hz, applies to all four.
+channel plays a sine, triangle, square or sawtooth wave, or steps to a
+fixed voltage, when it is triggered: by a TTL pulse on a trigger channel,
+from software, or from the thumb joystick. Each channel has its own
+waveform, amplitude, resting voltage and play duration, and one
+frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four.
 
 Everything is accessed through `SynthPalDevice`. Import it, connect to
 the device's serial port, set the waveforms, and trigger, e.g.
@@ -49,7 +49,9 @@ channel number, 1 or 2.
 
 Voltages are in volts, times in seconds, and frequencies in Hz. A
 channel's waveform swings `amplitude / 2` above and below its
-`resting_voltage`, and must stay within -10 V to 10 V.
+`resting_voltage`, and must stay within -10 V to 10 V. A `"Fixed Voltage"`
+channel steps to its `amplitude`, a voltage from -10 V to 10 V, for its
+play duration.
 
 ## License
 
@@ -82,7 +84,8 @@ __all__ = ["SynthPalDevice", "DeviceInfo", "DeviceStatus", "SynthPalError"]
 __docformat__ = "google"
 
 # Waveforms in order of their code on the device
-WAVEFORMS = ("Sine", "Triangle", "Square", "Sawtooth")
+WAVEFORMS = ("Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage")
+FIXED_VOLTAGE = "Fixed Voltage"  # Its amplitude is a voltage, not peak to peak
 
 # Trigger modes in order of their code on the device. These are Pulse Pal's
 # trigger modes, with the same codes.
@@ -459,11 +462,12 @@ class SynthPalDevice:
         starts with.
         """
         self.frequency = 100
-        self.waveform = "Sine"
-        # The resting voltage first: 0 V is valid with any amplitude the
-        # device may hold, and any amplitude is then valid
+        # In this order, each is valid whatever the device holds: 0 V rests
+        # with any waveform and amplitude, 5 V is then a valid amplitude for
+        # any waveform, and a sine wave is then valid
         self.resting_voltage = 0
         self.amplitude = 5
+        self.waveform = "Sine"
         self.play_duration = 1
         self.trigger_mode = "Normal"
         self._set_trigger_links([True] * 4, [False] * 4)
@@ -538,9 +542,17 @@ class SynthPalDevice:
         - `"Square"`: high for the first half of each cycle, then low.
         - `"Sawtooth"`: rises from its lowest voltage to its highest, then
           falls back at the end of the cycle.
+        - `"Fixed Voltage"`: steps to the channel's `amplitude`, which is
+          then a voltage, -10 V to 10 V, for the play duration, and
+          returns to the resting voltage. It is not periodic, so the
+          frequency does not change it.
 
         Names are not case sensitive. A change applies to playback in
-        progress.
+        progress. The channel's amplitude must suit the new waveform: a
+        negative amplitude (a fixed voltage below 0 V) is no amplitude for
+        a periodic waveform, and a fixed voltage must stay within -10 V to
+        10 V. Set an amplitude that suits both waveforms first, or change
+        it after the waveform when it suits the new one.
         """
         return self._waveform
 
@@ -550,15 +562,21 @@ class SynthPalDevice:
 
     @property
     def amplitude(self):
-        """The peak to peak amplitude of each output channel, in volts.
+        """The amplitude of each output channel, in volts.
 
-        Indexed by channel number (see "Channel settings" above). 0 to 20
-        V. The waveform swings `amplitude / 2` above and below the
-        channel's `resting_voltage`, so it must stay within -10 V to 10 V:
+        Indexed by channel number (see "Channel settings" above). For the
+        periodic waveforms, it is peak to peak, 0 to 20 V: the waveform
+        swings `amplitude / 2` above and below the channel's
+        `resting_voltage`, so it must stay within -10 V to 10 V:
         `abs(resting_voltage) + amplitude / 2 <= 10`. To raise the
         amplitude beyond what the resting voltage allows, change the
-        resting voltage first. Set to the nearest microvolt. A change
-        applies to playback in progress.
+        resting voltage first.
+
+        For a `"Fixed Voltage"` channel, it is the voltage the channel
+        steps to, -10 V to 10 V, with any resting voltage.
+
+        Set to the nearest microvolt. A change applies to playback in
+        progress.
         """
         return self._amplitude
 
@@ -571,10 +589,10 @@ class SynthPalDevice:
         """The resting voltage of each output channel, in volts.
 
         Indexed by channel number (see "Channel settings" above). -10 to
-        10 V. The channel outputs it while idle, and its waveform has this
-        mean. With the `amplitude`, it must keep the waveform within -10 V
-        to 10 V (see `SynthPalDevice.amplitude`). Set to the nearest
-        microvolt. A change applies to playback in progress.
+        10 V. The channel outputs it while idle, and a periodic waveform
+        has this mean. With the `amplitude`, it must keep the waveform
+        within -10 V to 10 V (see `SynthPalDevice.amplitude`). Set to the
+        nearest microvolt. A change applies to playback in progress.
         """
         return self._resting_voltage
 
@@ -899,6 +917,8 @@ class SynthPalDevice:
                     f"{', '.join(WAVEFORMS)}."
                 )
             names.append(matches[0])
+        self._check_output_levels(names, self._amplitude_uv[1:],
+                                  self._resting_uv[1:], "waveform")
         self._write_command(
             self._OP_SET_WAVEFORM,
             bytes(WAVEFORMS.index(name) for name in names),
@@ -907,12 +927,23 @@ class SynthPalDevice:
         return names
 
     def _apply_amplitude(self, values):
-        volts = [self._to_volts(value, "amplitude", 0, 20) for value in values]
+        volts = []
+        for channel, value in enumerate(values, start=1):
+            if self._waveform[channel] == FIXED_VOLTAGE:
+                volts.append(self._to_volts(
+                    value, "amplitude", -10, 10,
+                    " on a Fixed Voltage channel: the voltage it steps to"))
+            else:
+                volts.append(self._to_volts(
+                    value, "amplitude", 0, 20,
+                    f" peak to peak on a {self._waveform[channel]} channel "
+                    f"(channel {channel}). Only a Fixed Voltage can be "
+                    "negative"))
         microvolts = [round(v * 1e6) for v in volts]
-        self._check_output_levels(microvolts, self._resting_uv[1:],
-                                  "amplitude")
+        self._check_output_levels(self._waveform[1:], microvolts,
+                                  self._resting_uv[1:], "amplitude")
         self._write_command(self._OP_SET_AMPLITUDE,
-                            struct.pack("<4I", *microvolts))
+                            struct.pack("<4i", *microvolts))
         self._read_ack("setting amplitude")
         self._amplitude_uv[1:] = microvolts
         return volts
@@ -921,28 +952,52 @@ class SynthPalDevice:
         volts = [self._to_volts(value, "resting_voltage", -10, 10)
                  for value in values]
         microvolts = [round(v * 1e6) for v in volts]
-        self._check_output_levels(self._amplitude_uv[1:], microvolts,
-                                  "resting_voltage")
+        self._check_output_levels(self._waveform[1:], self._amplitude_uv[1:],
+                                  microvolts, "resting_voltage")
         self._write_command(self._OP_SET_RESTING_VOLTAGE,
                             struct.pack("<4i", *microvolts))
         self._read_ack("setting resting_voltage")
         self._resting_uv[1:] = microvolts
         return volts
 
-    def _check_output_levels(self, amplitudes_uv, resting_uv, setting):
-        """Check that each channel's waveform stays within -10 V to 10 V."""
-        for channel, (amplitude, resting) in enumerate(
-                zip(amplitudes_uv, resting_uv), start=1):
-            if 2 * abs(resting) + amplitude > 2 * self._MAX_VOLTAGE_UV:
-                other = ("resting_voltage" if setting == "amplitude"
-                         else "amplitude")
+    def _check_output_levels(self, waveforms, amplitudes_uv, resting_uv,
+                             setting):
+        """Check that each channel's levels suit its waveform, and keep
+        its output within -10 V to 10 V, as the device does. `setting` is
+        the one being changed, for the advice in the message."""
+        for channel, (waveform, amplitude, resting) in enumerate(
+                zip(waveforms, amplitudes_uv, resting_uv), start=1):
+            if waveform == FIXED_VOLTAGE:
+                if abs(amplitude) > self._MAX_VOLTAGE_UV:
+                    raise SynthPalError(
+                        f"On channel {channel}, a Fixed Voltage of "
+                        f"{amplitude / 1e6:g} V is beyond -10 V to 10 V. "
+                        "Its amplitude is the voltage it steps to."
+                        + (" Change amplitude first." if setting ==
+                           "waveform" else "")
+                    )
+            elif amplitude < 0:
+                raise SynthPalError(
+                    f"On channel {channel}, an amplitude of "
+                    f"{amplitude / 1e6:g} V is negative, which only a Fixed "
+                    f"Voltage can be: a {waveform} wave's amplitude is peak "
+                    "to peak, 0 to 20 V."
+                    + (" Change amplitude first." if setting ==
+                       "waveform" else "")
+                )
+            elif 2 * abs(resting) + amplitude > 2 * self._MAX_VOLTAGE_UV:
+                other = {"amplitude": "resting_voltage",
+                         "resting_voltage": "amplitude",
+                         "waveform": "amplitude or resting_voltage"}[setting]
                 raise SynthPalError(
                     f"On channel {channel}, a resting voltage of "
                     f"{resting / 1e6:g} V and an amplitude of "
                     f"{amplitude / 1e6:g} V peak to peak would reach "
                     f"{(abs(resting) + amplitude / 2) / 1e6:g} V. The "
                     "waveform must stay within -10 V to 10 V. Change "
-                    f"{other} first, or choose a smaller {setting}."
+                    f"{other} first"
+                    + (f", or choose a smaller {setting}."
+                       if setting != "waveform" else ".")
                 )
 
     def _apply_play_duration(self, values):
@@ -1011,12 +1066,12 @@ class SynthPalDevice:
         self._read_ack("setting the trigger channel links")
 
     @staticmethod
-    def _to_volts(value, name, low, high):
+    def _to_volts(value, name, low, high, note=""):
         if isinstance(value, bool) or not isinstance(value, numbers.Real) \
                 or not math.isfinite(value) or not low <= value <= high:
             raise SynthPalError(
                 f"{name} values must be numbers of volts from {low} to "
-                f"{high}. Received {value!r}."
+                f"{high}{note}. Received {value!r}."
             )
         return float(value)
 

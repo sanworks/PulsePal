@@ -52,6 +52,7 @@ class FakeSynthPal:
         self.firmware_version = firmware_version
         self.ack = ack
         self.centihz = 10000
+        self.waveform = [0] * 4
         self.amplitude = [5_000_000] * 4
         self.resting = [0] * 4
         self.status_reply = bytes(17)
@@ -85,19 +86,28 @@ class FakeSynthPal:
             if ok:
                 self.centihz = centihz
             return struct.pack("<BI", ok, samples_per_cycle(self.centihz))
-        if op in (ord("A"), ord("V")):
-            if op == ord("A"):
-                amplitude, resting = list(struct.unpack("<4I", payload)), self.resting
+        if op in (ord("W"), ord("A"), ord("V")):
+            waveform, amplitude, resting = self.waveform, self.amplitude, self.resting
+            if op == ord("W"):
+                waveform = list(payload)
+            elif op == ord("A"):
+                amplitude = list(struct.unpack("<4i", payload))
             else:
-                amplitude, resting = self.amplitude, list(struct.unpack("<4i", payload))
-            # As isValidOutputLevel() in /Firmware/SynthPal/Settings.ino
-            ok = self.ack and all(a <= 20_000_000 and abs(r) <= 10_000_000
-                                  and 2 * abs(r) + a <= 20_000_000
-                                  for a, r in zip(amplitude, resting))
+                resting = list(struct.unpack("<4i", payload))
+            ok = self.ack and all(map(self.is_valid_output_level, waveform, resting, amplitude))
             if ok:
-                self.amplitude, self.resting = amplitude, resting
+                self.waveform, self.amplitude, self.resting = waveform, amplitude, resting
             return bytes([ok])
         return bytes([self.ack])
+
+    @staticmethod
+    def is_valid_output_level(waveform, resting, amplitude):
+        """As isValidOutputLevel() in /Firmware/SynthPal/Settings.ino."""
+        if waveform > 4 or abs(resting) > 10_000_000:
+            return False
+        if waveform == 4:  # Fixed Voltage: the amplitude is the voltage
+            return abs(amplitude) <= 10_000_000
+        return 0 <= amplitude <= 20_000_000 and 2 * abs(resting) + amplitude <= 20_000_000
 
     def read(self, n):
         reply = bytes(self.replies[:n])
@@ -161,9 +171,10 @@ def test_connection_sequence_programs_the_defaults():
         command(89, b"PYTHON"),  # Shown on the device's screen as "PYTHON Connected"
         command("X", bytes([0x0F])),
         command("F", struct.pack("<I", 10000)),
+        # In this order, each is valid whatever the device holds (see the next test)
+        command("V", struct.pack("<4i", 0, 0, 0, 0)),
+        command("A", struct.pack("<4i", *[5_000_000] * 4)),
         command("W", bytes(4)),
-        command("V", struct.pack("<4i", 0, 0, 0, 0)),  # First: valid with any amplitude
-        command("A", struct.pack("<4I", *[5_000_000] * 4)),
         command("D", struct.pack("<4I", *[1_000_000] * 4)),
         command("T", bytes(2)),
         command("I", bytes([1, 1, 1, 1, 0, 0, 0, 0])),
@@ -183,6 +194,19 @@ def test_connection_sequence_programs_the_defaults():
     assert device.trigger_mode == [None, "Normal", "Normal"]
     assert device.link_trigger_channel1 == [None, True, True, True, True]
     assert device.link_trigger_channel2 == [None, False, False, False, False]
+
+
+def test_connecting_resets_any_levels_the_device_holds():
+    """The device keeps its settings between sessions, e.g. fixed voltages of -5 V,
+    and a sine wave of 20 V peak to peak. A sine wave could not take the first, nor
+    a fixed voltage the second: the defaults are sent in an order that works."""
+    fake = FakeSynthPal()
+    fake.waveform = [4, 4, 0, 4]
+    fake.amplitude = [-5_000_000, 10_000_000, 20_000_000, 9_000_000]
+    fake.resting = [9_000_000, -10_000_000, 0, 9_000_000]
+    device, fake = connect(fake)
+    assert (fake.waveform, fake.amplitude, fake.resting) == ([0] * 4, [5_000_000] * 4, [0] * 4)
+    assert device.waveform == [None] + ["Sine"] * 4
 
 
 def test_connecting_to_other_firmware_names_it_and_closes_the_port():
@@ -249,14 +273,16 @@ def test_waveforms_by_name():
     device, fake = connect()
     device.waveform[2] = "triangle"
     device.waveform[3:5] = ["SQUARE", "Sawtooth"]
+    device.waveform[1] = "fixed voltage"
     assert fake.writes == [
         command("W", bytes([0, 1, 0, 0])),
         command("W", bytes([0, 1, 2, 3])),
+        command("W", bytes([4, 1, 2, 3])),
     ]
-    assert device.waveform == [None, "Sine", "Triangle", "Square", "Sawtooth"]
-    for bad in ("Ramp", 1, None):
+    assert device.waveform == [None, "Fixed Voltage", "Triangle", "Square", "Sawtooth"]
+    for bad in ("Ramp", "Fixed", 1, None):
         expect_error(device.waveform.__setitem__, 1, bad)
-    assert len(fake.writes) == 2
+    assert len(fake.writes) == 3
 
 
 def test_voltages_are_sent_in_microvolts():
@@ -265,7 +291,7 @@ def test_voltages_are_sent_in_microvolts():
     device.amplitude = [1, 0.0123456, 17, 20]
     assert fake.writes == [
         command("V", struct.pack("<4i", 1_500_000, -2_250_000, 0, 0)),
-        command("A", struct.pack("<4I", 1_000_000, 12_346, 17_000_000, 20_000_000)),
+        command("A", struct.pack("<4i", 1_000_000, 12_346, 17_000_000, 20_000_000)),
     ]
     assert device.amplitude == [None, 1, 0.0123456, 17, 20]
 
@@ -301,6 +327,49 @@ def test_large_amplitude_after_moving_the_resting_voltage():
     device.amplitude[3] = 2
     device.resting_voltage[3] = 9
     assert fake.amplitude[2] == 2_000_000 and fake.resting[2] == 9_000_000
+
+
+def test_a_fixed_voltage_amplitude_is_a_signed_voltage():
+    device, fake = connect()
+    device.waveform[2] = "Fixed Voltage"
+    device.amplitude[2] = -7.5
+    device.resting_voltage[2] = 9.5  # Any resting voltage goes with a fixed voltage
+    device.amplitude[2] = 10
+    assert fake.writes[1:] == [
+        command("A", struct.pack("<4i", 5_000_000, -7_500_000, 5_000_000, 5_000_000)),
+        command("V", struct.pack("<4i", 0, 9_500_000, 0, 0)),
+        command("A", struct.pack("<4i", 5_000_000, 10_000_000, 5_000_000, 5_000_000)),
+    ]
+    fake.writes.clear()
+    for bad in (10.5, -10.000001, float("nan"), "5", True):
+        error = expect_error(device.amplitude.__setitem__, 2, bad)
+    assert "from -10 to 10 on a Fixed Voltage channel" in str(error), error
+    error = expect_error(device.amplitude.__setitem__, 1, -1)  # Channel 1 plays a sine wave
+    assert "Only a Fixed Voltage can be negative" in str(error), error
+    assert fake.writes == []
+    assert device.amplitude == [None, 5, 10, 5, 5]
+
+
+def test_a_new_waveform_must_suit_the_amplitude():
+    device, fake = connect()
+    device.waveform[1] = "Fixed Voltage"
+    device.amplitude[1] = -5
+    device.amplitude[3] = 20
+    device.waveform[4] = "Fixed Voltage"
+    device.amplitude[4] = 9
+    device.resting_voltage[4] = 9
+    fake.writes.clear()
+    error = expect_error(device.waveform.__setitem__, 1, "Sine")
+    assert "negative" in str(error) and "Change amplitude first" in str(error), error
+    error = expect_error(device.waveform.__setitem__, 3, "Fixed Voltage")
+    assert "beyond -10 V to 10 V" in str(error), error
+    error = expect_error(device.waveform.__setitem__, 4, "Sine")  # 9 V + 9 V / 2 = 13.5 V
+    assert "13.5 V" in str(error) and "amplitude or resting_voltage first" in str(error), error
+    assert fake.writes == []
+    device.amplitude[1] = 5  # Valid for both: a fixed voltage of 5 V, then a sine wave of 5 V peak to peak
+    device.waveform[1] = "Sine"
+    assert fake.waveform == [0, 0, 0, 4]
+    assert device.waveform == [None, "Sine", "Sine", "Sine", "Fixed Voltage"]
 
 
 def test_play_durations_are_sent_in_microseconds():

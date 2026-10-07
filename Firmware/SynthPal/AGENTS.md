@@ -1,10 +1,11 @@
 # Working on the Synth Pal firmware
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware (Teensy 4.1): a four channel waveform
-synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, with its own
-amplitude, resting voltage and play duration, when a TTL edge, a USB command or the joystick
-menu triggers it. One frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four. The
-USB protocol is in `PROTOCOL.md` in this folder. Read this page before changing anything here.
+synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
+fixed voltage, with its own amplitude, resting voltage and play duration, when a TTL edge, a USB
+command or the joystick menu triggers it. One frequency, 1 Hz to 20 kHz in steps of 0.01 Hz,
+applies to all four. The USB protocol is in `PROTOCOL.md` in this folder. Read this page before
+changing anything here.
 
 ## Where things are
 
@@ -127,10 +128,11 @@ cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3
 
 It checks every sample played against a model of the firmware's synthesis, which computes each
 DAC code as `synthesizeCode()` does, in single precision (`expected_cycle()`): every waveform at
-4, 32 and 12868 samples per cycle, each output range, means exactly at the resting voltage, play
-durations exact to the sample, frequency and setting changes during playback, a channel joining
-a running clock, and the timing budget with four channels. A change to the synthesis must
-change the model too.
+4, 32 and 12868 samples per cycle, each output range, fixed voltages and their ranges, means
+exactly at the resting voltage, play durations exact to the sample, frequency and setting
+changes during playback, a channel joining a running clock, the firmware's own checks of the
+levels (with commands sent past the class's checks), and the timing budget with four channels.
+A change to the synthesis must change the model too.
 
 The MATLAB class has its own test (about 15 s, verified with R2025a):
 
@@ -156,7 +158,12 @@ triggers or the menu, check:
 - The joystick menu: edit each setting of an output channel, the frequency and the trigger mode;
   play and stop a channel from its menu and see the item change back when its play duration
   ends; trigger a trigger channel; screen saver, device info, reset and exit. The splash screen
-  shows the Synth Pal logo.
+  shows the Synth Pal logo. The waveform list reads downwards, Sine at the top: down moves to
+  Triangle, and on to Fixed Voltage (the other lists, as in Pulse Pal firmware, move to their
+  next item with up). With "Fixed Voltage": the amplitude shows in V (not Vpp) and edits
+  from -10.00 to +10.00 V, the resting voltage edits over the whole -10 V to 10 V, and switching
+  the waveform to and from it takes the nearest amplitude that suits the new waveform
+  (`fitAmplitude()`: a fixed voltage of -5 V becomes 5 Vpp; 20 Vpp becomes 10 V).
 - After a power cycle (unplug the USB cable, plug it back in), all four outputs play. Flashing
   the device does not reset the DAC, so a test right after flashing over other firmware cannot
   catch a fault in `setup()` (rule 4).

@@ -1,8 +1,8 @@
 % SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four
-% channel waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave when it is
-% triggered: by a TTL pulse on a trigger channel, from MATLAB with play(), or from the thumb joystick. Each channel
-% has its own waveform, amplitude, resting voltage and play duration, and one frequency, 1 Hz to 20 kHz in steps of
-% 0.01 Hz, applies to all four.
+% channel waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
+% fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with play(), or from the thumb
+% joystick. Each channel has its own waveform, amplitude, resting voltage and play duration, and one frequency, 1 Hz
+% to 20 kHz in steps of 0.01 Hz, applies to all four.
 %
 % Example:
 %   S = SynthPalDevice('COM3');        % Replace COM3 with the device's port. serialportlist lists them.
@@ -22,11 +22,17 @@
 %
 % Levels. A channel's waveform swings amplitude/2 above and below its restingVoltage, which the channel outputs while
 % idle, and which is the waveform's mean. It must stay within -10 V to 10 V: abs(restingVoltage) + amplitude/2 <= 10.
-% To raise an amplitude beyond what the resting voltage allows, change the resting voltage first. The device picks
+% To raise an amplitude beyond what the resting voltage allows, change the resting voltage first. A 'Fixed Voltage'
+% channel's amplitude is instead the voltage it steps to, -10 V to 10 V, with any resting voltage. The device picks
 % each channel's output range for the finest voltage steps: see status().
 %
 % Waveforms start at the trigger: 'Sine' and 'Triangle' at the resting voltage, rising; 'Square' high for the first
 % half of each cycle; 'Sawtooth' rising from its lowest voltage to its highest, and falling back at the cycle's end.
+% 'Fixed Voltage' steps to the amplitude for the play duration, then returns to the resting voltage. A channel's
+% amplitude must suit a new waveform: only a fixed voltage can be negative, and a fixed voltage stays within -10 V to
+% 10 V. Set an amplitude that suits both waveforms first, or change it after the waveform.
+%   S.waveform{2} = 'Fixed Voltage';
+%   S.amplitude(2) = -2.5;             % Steps to -2.5 V when triggered
 %
 % Triggers. triggerMode sets how each trigger channel acts on the output channels linked to it (linkTriggerChannel1,
 % linkTriggerChannel2). These are Pulse Pal's trigger modes:
@@ -75,11 +81,13 @@ classdef SynthPalDevice < handle
         frequency = 100 % Frequency of all output channels, in Hz: 1 to 20000, rounded to 0.01 Hz. It can change during
                         % playback: playing channels carry on from the same point in their cycle, and keep the time
                         % they have left to play.
-        waveform = {'Sine', 'Sine', 'Sine', 'Sine'} % 1x4 cell array: 'Sine', 'Triangle', 'Square' or 'Sawtooth'. Not
-                                                    % case sensitive. A change applies to playback in progress.
-        amplitude = [5 5 5 5] % 1x4, peak to peak, in volts: 0 to 20. See "Levels" above.
-        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle, and the waveform's
-                                   % mean. See "Levels" above.
+        waveform = {'Sine', 'Sine', 'Sine', 'Sine'} % 1x4 cell array: 'Sine', 'Triangle', 'Square', 'Sawtooth' or
+                                                    % 'Fixed Voltage'. Not case sensitive. A change applies to playback
+                                                    % in progress.
+        amplitude = [5 5 5 5] % 1x4, in volts: peak to peak, 0 to 20, or on a 'Fixed Voltage' channel the voltage it
+                              % steps to, -10 to 10. See "Levels" above.
+        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle, and a periodic
+                                   % waveform's mean. See "Levels" above.
         playDuration = [1 1 1 1] % 1x4, in seconds: how long the channel plays after a trigger, up to
                                  % info.maxPlayDuration. 0 plays until stopped. Counted in samples.
         triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle' or 'Gated'.
@@ -124,7 +132,8 @@ classdef SynthPalDevice < handle
         SynthPalHandshakeReply = 83 % 'S'
         PulsePalHandshakeReply = 75 % 'K': the device runs Pulse Pal firmware
         WavePalHandshakeReply = 87 % 'W': the device runs Wave Pal firmware
-        WaveformNames = {'Sine', 'Triangle', 'Square', 'Sawtooth'} % In order of their code on the device
+        WaveformNames = {'Sine', 'Triangle', 'Square', 'Sawtooth', 'Fixed Voltage'} % In order of their code on the
+                                                                                    % device
         TriggerModeNames = {'Normal', 'Toggle', 'Gated'} % In order of their code on the device
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         MaxVoltage_uV = 10000000 % Every output voltage stays within +/-10 V
@@ -196,9 +205,11 @@ classdef SynthPalDevice < handle
             % channels in 'Normal' mode, and all output channels linked to trigger channel 1 and not to trigger
             % channel 2. They match the settings the device starts with.
             obj.frequency = 100;
-            obj.waveform = 'Sine';
-            obj.restingVoltage = 0; % First: 0 V is valid with any amplitude the device may hold
+            % In this order, each is valid whatever the device holds: 0 V rests with any waveform and amplitude, 5 V
+            % is then a valid amplitude for any waveform, and a sine wave is then valid
+            obj.restingVoltage = 0;
             obj.amplitude = 5;
+            obj.waveform = 'Sine';
             obj.playDuration = 1;
             obj.triggerMode = 'Normal';
             obj.linkTriggerChannel1 = true;
@@ -288,6 +299,8 @@ classdef SynthPalDevice < handle
 
         function set.waveform(obj, names)
             codes = obj.namesToCodes(names, obj.WaveformNames, 4, 'waveform', 'output channel');
+            obj.checkLevels(obj.WaveformNames(codes+1), obj.roundHalfEven(obj.amplitude*1e6),... %#ok<MCSUP>
+                            obj.roundHalfEven(obj.restingVoltage*1e6), 'waveform'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetWaveform, uint8(codes));
                 obj.confirmWrite('setting waveform');
@@ -296,11 +309,13 @@ classdef SynthPalDevice < handle
         end
 
         function set.amplitude(obj, volts)
-            volts = obj.checkVolts(volts, 'amplitude', 0, 20);
+            % Only a fixed voltage can be negative: checkLevels() applies each channel's limits
+            volts = obj.checkVolts(volts, 'amplitude', -10, 20,...
+                                   ' (0 to 20 peak to peak, or -10 to 10 on a Fixed Voltage channel)');
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(microvolts, obj.roundHalfEven(obj.restingVoltage*1e6), 'amplitude'); %#ok<MCSUP>
+            obj.checkLevels(obj.waveform, microvolts, obj.roundHalfEven(obj.restingVoltage*1e6), 'amplitude'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
-                obj.writeCommand(obj.OpSetAmplitude, typecast(uint32(microvolts), 'uint8'));
+                obj.writeCommand(obj.OpSetAmplitude, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting amplitude');
             end
             obj.amplitude = volts;
@@ -309,7 +324,7 @@ classdef SynthPalDevice < handle
         function set.restingVoltage(obj, volts)
             volts = obj.checkVolts(volts, 'restingVoltage', -10, 10);
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'restingVoltage'); %#ok<MCSUP>
+            obj.checkLevels(obj.waveform, obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'restingVoltage'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting restingVoltage');
@@ -442,27 +457,47 @@ classdef SynthPalDevice < handle
             obj.confirmWrite('setting the trigger channel links');
         end
 
-        function checkLevels(obj, amplitudes_uV, restingVoltages_uV, setting)
-            % Checks that each channel's waveform stays within -10 V to 10 V
+        function checkLevels(obj, waveforms, amplitudes_uV, restingVoltages_uV, setting)
+            % Checks that each channel's levels suit its waveform, and keep its output within -10 V to 10 V, as the
+            % device does. setting is the one being changed, for the advice in the message.
+            advice = '';
+            if strcmp(setting, 'waveform')
+                advice = ' Change amplitude first.';
+            end
             for i = 1:4
-                if 2*abs(restingVoltages_uV(i)) + amplitudes_uV(i) > 2*obj.MaxVoltage_uV
-                    if strcmp(setting, 'amplitude')
-                        other = 'restingVoltage';
-                    else
-                        other = 'amplitude';
+                if strcmp(waveforms{i}, 'Fixed Voltage')
+                    if abs(amplitudes_uV(i)) > obj.MaxVoltage_uV
+                        error(['On channel ' num2str(i) ', a Fixed Voltage of ' num2str(amplitudes_uV(i)/1e6)...
+                               ' V is beyond -10 V to 10 V. Its amplitude is the voltage it steps to.' advice])
+                    end
+                elseif amplitudes_uV(i) < 0
+                    error(['On channel ' num2str(i) ', an amplitude of ' num2str(amplitudes_uV(i)/1e6) ' V is '...
+                           'negative, which only a Fixed Voltage can be: a ' waveforms{i} ' wave''s amplitude is '...
+                           'peak to peak, 0 to 20 V.' advice])
+                elseif 2*abs(restingVoltages_uV(i)) + amplitudes_uV(i) > 2*obj.MaxVoltage_uV
+                    switch setting
+                        case 'amplitude'
+                            advice = ' Change restingVoltage first, or choose a smaller amplitude.';
+                        case 'restingVoltage'
+                            advice = ' Change amplitude first, or choose a smaller restingVoltage.';
+                        otherwise
+                            advice = ' Change amplitude or restingVoltage first.';
                     end
                     error(['On channel ' num2str(i) ', a resting voltage of ' num2str(restingVoltages_uV(i)/1e6)...
                            ' V and an amplitude of ' num2str(amplitudes_uV(i)/1e6) ' V peak to peak would reach '...
                            num2str((abs(restingVoltages_uV(i)) + amplitudes_uV(i)/2)/1e6) ' V. The waveform must '...
-                           'stay within -10 V to 10 V. Change ' other ' first, or choose a smaller ' setting '.'])
+                           'stay within -10 V to 10 V.' advice])
                 end
             end
         end
 
-        function volts = checkVolts(obj, volts, name, low, high)
+        function volts = checkVolts(obj, volts, name, low, high, note)
+            if nargin < 6
+                note = '';
+            end
             volts = obj.expandToChannels(volts, name);
             if ~isnumeric(volts) || ~isreal(volts) || any(~isfinite(volts)) || any(volts < low) || any(volts > high)
-                error([name ' values must be numbers of volts from ' num2str(low) ' to ' num2str(high) '.'])
+                error([name ' values must be numbers of volts from ' num2str(low) ' to ' num2str(high) note '.'])
             end
             volts = double(volts);
         end

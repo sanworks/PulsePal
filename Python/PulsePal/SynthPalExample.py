@@ -53,6 +53,14 @@ S.amplitude[2] = 5
 S.resting_voltage[3] = 0
 S.amplitude[3] = 20          # -10 V to 10 V
 
+# A "Fixed Voltage" channel steps to its amplitude for its play duration,
+# then returns to its resting voltage. Its amplitude is then a voltage,
+# -10 V to 10 V, and only a fixed voltage can be negative. To change a
+# channel's waveform, first give it an amplitude that suits both waveforms:
+# here the 5 V it has is 5 V peak to peak, or a fixed voltage of 5 V.
+S.waveform[4] = "Fixed Voltage"
+S.amplitude[4] = -3          # Steps from 0 V to -3 V when triggered
+
 # Play from software. Channels in the same call start on the same sample, and
 # play for their play duration (1 second by default).
 S.play([1, 2, 3, 4])
@@ -71,8 +79,8 @@ S.stop(1)                    # The output returns to its resting voltage
 
 # TTL triggers. By default, a rising edge on trigger channel 1 plays all four
 # channels. Here channel 4 is moved to trigger channel 2, which is put in
-# gated mode: with a play duration of 0, channel 4 plays for as long as the
-# TTL is high.
+# gated mode: with a play duration of 0, channel 4 holds its fixed voltage
+# for as long as the TTL is high.
 S.link_trigger_channel1[4] = False
 S.link_trigger_channel2[4] = True
 S.trigger_mode[2] = "Gated"

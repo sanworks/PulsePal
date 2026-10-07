@@ -74,7 +74,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define EDIT_REPEAT_MS 200 // While the joystick is held, a value being edited changes this often
 #define CURSOR_BLINK_MS 300 // The cursor under the digit being edited blinks at this rate
 
-const char* const waveformNames[] = {"Sine", "Triangle", "Square", "Sawtooth"}; // Indexed by enum WaveformValue
+const char* const waveformNames[] = {"Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage"}; // Indexed by enum
+                                                                                                 // WaveformValue
 const char* const triggerModeNames[] = {"Normal", "Toggle", "Pulse Gated"}; // Indexed by enum TriggerModeValue
 const char* const offOnNames[] = {"Off", "On"};
 
@@ -199,7 +200,7 @@ void onMenuClick() {
           RefreshTriggerMenu();
         } break;
         case MENU_INPUT_ACTION_MODE: {
-          byte newMode = editChoice(TriggerMode[triggerChannel], MAX_TRIGGER_MODE + 1, triggerModeNames);
+          byte newMode = editChoice(TriggerMode[triggerChannel], MAX_TRIGGER_MODE + 1, triggerModeNames, false);
           noInterrupts();
           TriggerMode[triggerChannel] = newMode;
           interrupts();
@@ -271,7 +272,10 @@ void RefreshActionMenu() {
       write2Screen("< Trigger Now  >", shownPlayState ? "Click to stop" : "Click to play");
     } break;
     case MENU_ACTION_WAVEFORM: {write2Screen("<   Waveform   >", waveformNames[waveform[channel]]);} break;
-    case MENU_ACTION_AMPLITUDE: {write2Screen("<  Amplitude   >", formatVolts(amplitudeMicrovolts[channel], " Vpp"));} break;
+    case MENU_ACTION_AMPLITUDE: { // A fixed voltage is a voltage, not peak to peak
+      bool isFixed = (waveform[channel] == WAVEFORM_FIXED_VOLTAGE);
+      write2Screen("<  Amplitude   >", formatVolts(amplitudeMicrovolts[channel], isFixed ? " V" : " Vpp"));
+    } break;
     case MENU_ACTION_RESTING_VOLTAGE: {write2Screen("<RestingVoltage>", formatVolts(restingVoltageMicrovolts[channel], " V"));} break;
     case MENU_ACTION_PLAY_DURATION: {write2Screen("<Play Duration >", formatDuration(playDurationMicros[channel]));} break;
     case MENU_ACTION_LINK_TRIGGER1: {write2Screen("<Link Trigger 1>", offOnNames[TriggerAddress[0][channel]]);} break;
@@ -292,19 +296,30 @@ void RefreshTriggerMenu() {
 // Edits one setting of an output channel (0-3) with the joystick, and applies it. Voltages are edited in steps of
 // 0.01V and play durations in steps of 0.1ms, as in Pulse Pal firmware. A value set more finely over USB is kept if
 // the edit leaves it unchanged. Amplitudes and resting voltages are limited so that the waveform stays within +/-10V.
+// A fixed voltage's amplitude is a voltage, -10V to 10V, and a new waveform takes the nearest amplitude it can play
+// (fitAmplitude()).
 void editOutputSetting(byte channel, byte action) {
+  bool isFixed = (waveform[channel] == WAVEFORM_FIXED_VOLTAGE);
   switch (action) {
     case MENU_ACTION_WAVEFORM: {
-      byte newWaveform = editChoice(waveform[channel], MAX_WAVEFORM + 1, waveformNames);
+      byte newWaveform = editChoice(waveform[channel], MAX_WAVEFORM + 1, waveformNames, true);
       if (newWaveform != waveform[channel]) {
         waveform[channel] = newWaveform;
+        amplitudeMicrovolts[channel] = fitAmplitude(newWaveform, restingVoltageMicrovolts[channel],
+                                                    amplitudeMicrovolts[channel]);
         updateChannelOutput(channel);
       }
     } break;
     case MENU_ACTION_AMPLITUDE: { // In hundredths of a volt
-      int32_t start = (amplitudeMicrovolts[channel] + 5000) / 10000;
-      int32_t maxValue = ((2 * MAX_VOLTAGE_MICROVOLTS) - (2 * abs(restingVoltageMicrovolts[channel]))) / 10000;
-      int32_t newValue = editNumber(start, 0, maxValue, 2, 2, false, " Vpp");
+      int32_t amplitude = amplitudeMicrovolts[channel];
+      int32_t start = (amplitude >= 0) ? ((amplitude + 5000) / 10000) : -((-amplitude + 5000) / 10000);
+      int32_t newValue;
+      if (isFixed) {
+        newValue = editNumber(start, -MAX_VOLTAGE_MICROVOLTS / 10000, MAX_VOLTAGE_MICROVOLTS / 10000, 2, 2, true, " V");
+      } else {
+        int32_t maxValue = ((2 * MAX_VOLTAGE_MICROVOLTS) - (2 * abs(restingVoltageMicrovolts[channel]))) / 10000;
+        newValue = editNumber(start, 0, maxValue, 2, 2, false, " Vpp");
+      }
       if (newValue != start) {
         amplitudeMicrovolts[channel] = newValue * 10000;
         updateChannelOutput(channel);
@@ -313,7 +328,8 @@ void editOutputSetting(byte channel, byte action) {
     case MENU_ACTION_RESTING_VOLTAGE: { // In hundredths of a volt
       int32_t rest = restingVoltageMicrovolts[channel];
       int32_t start = (rest >= 0) ? ((rest + 5000) / 10000) : -((-rest + 5000) / 10000);
-      int32_t maxValue = ((2 * MAX_VOLTAGE_MICROVOLTS) - (int32_t)amplitudeMicrovolts[channel]) / 20000;
+      int32_t maxValue = isFixed ? (MAX_VOLTAGE_MICROVOLTS / 10000) // Any resting voltage goes with a fixed voltage
+                                 : (((2 * MAX_VOLTAGE_MICROVOLTS) - amplitudeMicrovolts[channel]) / 20000);
       int32_t newValue = editNumber(start, -maxValue, maxValue, 2, 2, true, " V");
       if (newValue != start) {
         restingVoltageMicrovolts[channel] = newValue * 10000;
@@ -335,7 +351,7 @@ void editOutputSetting(byte channel, byte action) {
     case MENU_ACTION_LINK_TRIGGER1:
     case MENU_ACTION_LINK_TRIGGER2: {
       byte triggerChannel = (action == MENU_ACTION_LINK_TRIGGER1) ? 0 : 1;
-      byte newLink = editChoice(TriggerAddress[triggerChannel][channel], 2, offOnNames);
+      byte newLink = editChoice(TriggerAddress[triggerChannel][channel], 2, offOnNames, false);
       noInterrupts();
       TriggerAddress[triggerChannel][channel] = newLink;
       interrupts();
@@ -470,8 +486,10 @@ int32_t editNumber(int32_t startValue, int32_t minValue, int32_t maxValue, byte 
 }
 
 // Edits a choice from a list of names with the joystick, and returns its index when the joystick is clicked. Up moves
-// to the next name and down to the one before, without wrapping, as in Pulse Pal firmware.
-byte editChoice(byte startValue, byte nChoices, const char* const* names) {
+// to the next name and down to the one before, without wrapping, as in Pulse Pal firmware. With downIsNext, the list
+// reads downwards instead, first name at the top: down moves to the next name. The waveform list does this, so that
+// from its first name, the default sine wave, the joystick moves down to the others.
+byte editChoice(byte startValue, byte nChoices, const char* const* names, bool downIsNext) {
   byte value = startValue;
   bool cursorVisible = true;
   uint32_t blinkTime = millis();
@@ -484,11 +502,15 @@ byte editChoice(byte startValue, byte nChoices, const char* const* names) {
       redraw = true;
     }
     ClickerY = analogRead(ClickerYLine);
+    bool up = (ClickerY < ClickerMinThreshold);
+    bool down = (ClickerY > ClickerMaxThreshold);
+    bool toNext = downIsNext ? down : up;
+    bool toPrevious = downIsNext ? up : down;
     bool moved = false;
-    if ((ClickerY < ClickerMinThreshold) && (value < nChoices - 1)) { // Up
+    if (toNext && (value < nChoices - 1)) {
       value++;
       moved = true;
-    } else if ((ClickerY > ClickerMaxThreshold) && (value > 0)) { // Down
+    } else if (toPrevious && (value > 0)) {
       value--;
       moved = true;
     }
