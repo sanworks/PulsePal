@@ -96,7 +96,12 @@ global PulsePalSystem;
     % if 1, "Toggle mode", triggers on low to high and shuts off stimulus
     % train on next high to low. If 2, "Button mode", triggers on low to
     % high and shuts off on high to low.
-    
+    if PulsePalSystem.FirmwareVersion > 21
+        % Firmware v21 played other trigger modes as normal mode. On Pulse Pal 3 with v22 and newer, mode 3 is
+        % param sync mode, in which trigger edges start nothing.
+        TriggerMode(TriggerMode > 2) = 0;
+    end
+
     TimeData = [Params.Phase1Duration; Params.InterPhaseInterval; Params.Phase2Duration; Params.InterPulseInterval; Params.BurstDuration; Params.InterBurstInterval; Params.PulseTrainDuration; Params.PulseTrainDelay];
     
     % Ensure time data is within range
@@ -104,7 +109,7 @@ global PulsePalSystem;
         errordlg(['Non-zero time values must be multiples of ' num2str(PulsePalSystem.MinPulseDuration) ' microseconds. Please check your program matrix.'], 'Invalid program');
     end
     
-    TimeData = uint32(TimeData*PulsePalSystem.CycleFrequency); % Convert to multiple of cycle frequency
+    TimeData = PulsePalTimes2Cycles(TimeData, IsBiphasic, 1:4); % Convert to multiple of cycle frequency
     
     % Arrange program into a single byte-string
     FormattedProgramTimestamps = TimeData(1:end); 

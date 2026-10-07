@@ -40,7 +40,7 @@ function ConfirmBit = ProgramPulsePalParam(Channel, ParamCode, ParamValue)
 % 15 = CustomTrainTarget (0 = pulses, 1 = bursts)
 % 16 = CustomTrainLoop (0 = no, 1 = yes)
 % 17 = RestingVoltage (-10V to +10V)
-% 128 = TriggerMode (1 = normal, 2 = toggle, 3 = gated, FOR TRIGGER CHANNELS ONLY
+% 128 = TriggerMode (0 = normal, 1 = toggle, 2 = pulse gated), FOR TRIGGER CHANNELS ONLY
 
 % For the ParamCode argument, use the number of the parameter (1-17; 128, faster) or optionally, the string
 % (i.e. 'Phase1Voltage' for slower but more readable code)
@@ -96,6 +96,43 @@ if isTimeData
     ParamValue = round(ParamValue*PulsePalSystem.CycleFrequency); % Convert to multiple of 100us
 end
 
+IntervalBytestring = []; % Op 74 for the channel's InterPulseInterval, sent with a change of IsBiphasic (see below)
+if (PulsePalSystem.FirmwareVersion > 21) && ismember(ParamCode, [1 4 6 7])
+    % Firmware v22 and newer refuse some times of 0 that v21 accepted, and PulsePalTimes2Cycles translates them
+    % depending on whether the channel is biphasic.
+    TimeData = ones(8, 1); % Only the times set below can be translated or refused
+    IsBiphasic = PulsePalSystem.Params.IsBiphasic(Channel);
+    if ParamCode == 1
+        IsBiphasic = OriginalValue;
+        TimeData(3) = PulsePalSystem.Params.Phase2Duration(Channel);
+        TimeData(4) = PulsePalSystem.Params.InterPulseInterval(Channel);
+    else
+        TimeData(ParamCode-3) = OriginalValue;
+    end
+    Cycles = PulsePalTimes2Cycles(TimeData, IsBiphasic, Channel);
+    if ParamCode == 1
+        ZeroInterval = (PulsePalSystem.Params.InterPulseInterval(Channel) == 0);
+        if OriginalValue == 0
+            % Only a biphasic channel can hold an interval of 0, which may have been set before this session,
+            % so the device's own value is read (op 93, where each channel's interval is bytes 49-64)
+            PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 93], 'uint8');
+            CurrentParams = PulsePalSerialInterface('read', 178, 'uint8');
+            IntervalPos = 49 + (Channel-1)*4;
+            ZeroInterval = ZeroInterval || (typecast(uint8(CurrentParams(IntervalPos:IntervalPos+3)), 'uint32') == 0);
+            Cycles(4) = 3600*PulsePalSystem.CycleFrequency;
+        end
+        if ZeroInterval
+            % An interval of 0 is sent as 3600s while the channel is monophasic, and as 0 while it is biphasic
+            IntervalBytestring = [PulsePalSystem.OpMenuByte 74 7 Channel typecast(Cycles(4), 'uint8')];
+        end
+    else
+        ParamValue = double(Cycles(ParamCode-3));
+    end
+end
+if (ParamCode == 128) && (PulsePalSystem.FirmwareVersion > 21) && (ParamValue > 2)
+    ParamValue = 0; % Played as normal mode by firmware v21 (see SyncPulsePalParams)
+end
+
 
 % Format data to bytes
 if isTimeData
@@ -106,8 +143,21 @@ end
 
 % Assemble byte string instructing PulsePal to recieve a new single parameter (op code 74) and specify parameter and target channel before data
 Bytestring = [PulsePalSystem.OpMenuByte 74 ParamCode Channel ParamBytes];
+% The device checks each channel's parameters together, and refuses a monophasic channel with an interval of 0:
+% the translated interval goes before a change to monophasic, and after a change to biphasic.
+if ~isempty(IntervalBytestring) && (OriginalValue == 0)
+    PulsePalSerialInterface('write', IntervalBytestring, 'uint8');
+    IntervalConfirmBit = PulsePalSerialInterface('read', 1, 'uint8');
+end
 PulsePalSerialInterface('write', Bytestring, 'uint8');
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+if ~isempty(IntervalBytestring) && (OriginalValue ~= 0)
+    PulsePalSerialInterface('write', IntervalBytestring, 'uint8');
+    IntervalConfirmBit = PulsePalSerialInterface('read', 1, 'uint8');
+end
+if ~isempty(IntervalBytestring)
+    ConfirmBit = min(ConfirmBit, IntervalConfirmBit);
+end
 if ConfirmBit == 1
     if ParamCode == 128
         PulsePalSystem.Params.TriggerMode(Channel) = OriginalValue;

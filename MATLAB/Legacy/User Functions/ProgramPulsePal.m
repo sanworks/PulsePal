@@ -96,8 +96,10 @@ global PulsePalSystem;
     % if 1, "Toggle mode", triggers on low to high and shuts off stimulus
     % train on next high to low. If 2, "Button mode", triggers on low to
     % high and shuts off on high to low.
-    
-    
+    if PulsePalSystem.FirmwareVersion > 21
+        TriggerMode(TriggerMode > 2) = 0; % Played as normal mode by firmware v21 (see SyncPulsePalParams)
+    end
+
     % Convert time data to microseconds
     TimeData = cell2mat(ProgramMatrix(5:12, 2:5));
     
@@ -106,7 +108,7 @@ global PulsePalSystem;
         errordlg(['Non-zero time values must be multiples of ' num2str(PulsePalSystem.MinPulseDuration) ' microseconds. Please check your program matrix.'], 'Invalid program');
     end
     
-    TimeData = uint32(TimeData*PulsePalSystem.CycleFrequency); % Convert to multiple of cycle frequency
+    TimeData = PulsePalTimes2Cycles(TimeData, IsBiphasic, 1:4); % Convert to multiple of cycle frequency
     
     % Arrange program into a single byte-string
     FormattedProgramTimestamps = TimeData(1:end); 

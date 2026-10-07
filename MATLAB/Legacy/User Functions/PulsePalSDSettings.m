@@ -54,7 +54,35 @@ end
 CycleFreq = PulsePalSystem.CycleFrequency;
 RegisterBits = PulsePalSystem.RegisterBits;
 maxBits = 2^RegisterBits - 1;
-if strcmp(Op, 'load')
+if strcmp(Op, 'load') && (PulsePalSystem.FirmwareVersion > 21)
+    % Firmware v22 and newer reply to a load with the confirm byte only, so the parameters are read back with op 93.
+    % They are the file's, or the default parameters if the load failed. Op 93 groups them by parameter: each time,
+    % voltage and byte parameter for output channels 1-4, then the trigger links, then the trigger modes.
+    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 93], 'uint8');
+    Msg = double(PulsePalSerialInterface('read', 178, 'uint8'));
+    Msg = Msg(:)';
+    Times = reshape(double(typecast(uint8(Msg(1:128)), 'uint32')), 4, 8)'/CycleFreq; % Rows: parameters
+    Volts = reshape(double(typecast(uint8(Msg(129:152)), 'uint16')), 4, 3)';
+    Volts = round((((Volts/maxBits)*20)-10)*100)/100;
+    PulsePalSystem.Params.Phase1Duration = Times(1,:);
+    PulsePalSystem.Params.InterPhaseInterval = Times(2,:);
+    PulsePalSystem.Params.Phase2Duration = Times(3,:);
+    PulsePalSystem.Params.InterPulseInterval = Times(4,:);
+    PulsePalSystem.Params.BurstDuration = Times(5,:);
+    PulsePalSystem.Params.InterBurstInterval = Times(6,:);
+    PulsePalSystem.Params.PulseTrainDuration = Times(7,:);
+    PulsePalSystem.Params.PulseTrainDelay = Times(8,:);
+    PulsePalSystem.Params.Phase1Voltage = Volts(1,:);
+    PulsePalSystem.Params.Phase2Voltage = Volts(2,:);
+    PulsePalSystem.Params.RestingVoltage = Volts(3,:);
+    PulsePalSystem.Params.IsBiphasic = Msg(153:156);
+    PulsePalSystem.Params.CustomTrainID = Msg(157:160);
+    PulsePalSystem.Params.CustomTrainTarget = Msg(161:164);
+    PulsePalSystem.Params.CustomTrainLoop = Msg(165:168);
+    PulsePalSystem.Params.LinkTriggerChannel1 = Msg(169:172);
+    PulsePalSystem.Params.LinkTriggerChannel2 = Msg(173:176);
+    PulsePalSystem.Params.TriggerMode = Msg(177:178);
+elseif strcmp(Op, 'load')
     pause(.1);
     if PulsePalSerialInterface('bytesAvailable') > 0
         Pos = 1;

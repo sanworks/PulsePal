@@ -36,3 +36,8 @@ else
     error('Error: Channel state must be 0 (for normal playback) or 1 (for continuous looping)')
 end
 ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8'); % Get confirmation
+if (State == 1) && (ConfirmBit == 1) && (PulsePalSystem.FirmwareVersion > 21)
+    % Firmware v21 started the channel when continuous playback was switched on. Newer firmware waits for a
+    % trigger, so the channel is triggered here (op 77). A channel that is already playing ignores it.
+    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 77 2^(Channel-1)], 'uint8');
+end

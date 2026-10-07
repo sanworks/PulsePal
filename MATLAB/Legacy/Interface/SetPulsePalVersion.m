@@ -39,22 +39,27 @@ if HandShakeOkByte == 75
             PulsePalSystem.MinPulseDuration = round(100); % Minimum user settable pulse duration in microseconds
             PulsePalSystem.Bits = 12;
             PulsePalSystem.RegisterBits = 16;
-        case 22
-            PulsePalSystem.CycleFrequency = round(20000); % Loops x 20k/sec
-            PulsePalSystem.MinPulseDuration = round(100); % Minimum user settable pulse duration in microseconds
-            PulsePalSystem.Bits = 12;
-            PulsePalSystem.RegisterBits = 16;
+        otherwise
+            if PulsePalSystem.FirmwareVersion > 21 % v22 and newer. The device's own values are read with op 94 below
+                PulsePalSystem.CycleFrequency = round(20000); % Loops x 20k/sec
+                PulsePalSystem.MinPulseDuration = round(100); % Minimum user settable pulse duration in microseconds
+                PulsePalSystem.Bits = 12;
+                PulsePalSystem.RegisterBits = 16;
+            end
     end
-    PulsePalSystem.VoltageStep = 20/(2^PulsePalSystem.Bits);
     if PulsePalSystem.FirmwareVersion > 21
-        PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 94], 'uint8'); % Request hardware info 
+        PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 94], 'uint8'); % Request hardware info
         PulsePalSystem.HardwareVersion = PulsePalSerialInterface('read', 1, 'uint8');
         cyclePeriod = PulsePalSerialInterface('read', 1, 'uint32');
         PulsePalSystem.CycleFrequency = 1/(cyclePeriod/1000000);
         PulsePalSystem.MinPulseDuration = ((1/PulsePalSystem.CycleFrequency)*1000000)*2;
         nCustomPulseTrains = PulsePalSerialInterface('read', 1, 'uint8');
         maxCustomPulses = PulsePalSerialInterface('read', 1, 'uint32');
+        if PulsePalSystem.HardwareVersion > 2
+            PulsePalSystem.Bits = 16; % Pulse Pal 3 has a 16-bit DAC
+        end
     end
+    PulsePalSystem.VoltageStep = 20/(2^PulsePalSystem.Bits);
 else
     disp('Error: Pulse Pal returned an incorrect handshake signature.')
 end

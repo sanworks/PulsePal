@@ -112,6 +112,19 @@ catch
         end
         pause(.1);
         SetPulsePalVersion;
+        if (PulsePalSystem.FirmwareVersion > 21) && (PulsePalSystem.HardwareVersion > 2)
+            % Trigger mode 3 (param sync, Pulse Pal 3 only) can be left on by the current MATLAB or Python class. A
+            % trigger channel in that mode starts no pulse trains, and this interface cannot use it, so it is returned
+            % to normal mode (0). Byte 177 of op 93's reply is trigger channel 1's mode, and byte 178 trigger channel 2's.
+            PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 93], 'uint8');
+            CurrentParams = PulsePalSerialInterface('read', 178, 'uint8');
+            for i = 1:2
+                if CurrentParams(176+i) == 3
+                    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 74 128 i 0], 'uint8');
+                    PulsePalSerialInterface('read', 1, 'uint8');
+                end
+            end
+        end
     catch
         if ~UsingOctave
             evalin('base','delete(PulsePalSystem)')

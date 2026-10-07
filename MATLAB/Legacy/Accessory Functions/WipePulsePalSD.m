@@ -34,7 +34,46 @@ if Verbose
 else
     Response = 'y';
 end
-if (lower(Response == 'y'))
+if strcmpi(Response, 'y') && (PulsePalSystem.FirmwareVersion > 21)
+    % Firmware v22 and newer use op 93 to send the current parameters, and wipe the card by formatting it (op 97,
+    % Pulse Pal 3 only). The device replies with lines of status text, the last of which contains '!', and then a
+    % confirm byte, sent once it has reloaded its default parameters, which can be well after the text.
+    Confirmed = 0;
+    if PulsePalSystem.HardwareVersion < 3
+        warning('Pulse Pal 2 cannot wipe its microSD card from MATLAB. Delete settings files with PulsePalSDSettings(FileName, ''delete'').');
+        return
+    end
+    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 97], 'uint8');
+    Msg = [];
+    LineEnd = [];
+    tic;
+    while toc < 30
+        nBytes = PulsePalSerialInterface('bytesAvailable');
+        if nBytes > 0
+            Msg = [Msg double(reshape(PulsePalSerialInterface('read', nBytes, 'uint8'), 1, []))];
+            FlagIndex = find(Msg == '!', 1);
+            if ~isempty(FlagIndex)
+                LineEnd = FlagIndex - 1 + find(Msg(FlagIndex:end) == 10, 1); % 10 = newline
+            end
+            if ~isempty(LineEnd) && (length(Msg) > LineEnd)
+                break
+            end
+        end
+        pause(.01);
+    end
+    if isempty(LineEnd) || (length(Msg) <= LineEnd)
+        error('Error: Pulse Pal did not report the result of wiping its microSD card within 30 seconds.')
+    end
+    Confirmed = Msg(LineEnd+1);
+    PulsePalSystem.Params = DefaultPulsePalParameters; % The device has loaded its default parameters
+    if Verbose
+        if Confirmed == 1
+            disp('microSD card wiped. Default settings restored.');
+        else
+            disp(['microSD card wipe failed: ' strtrim(char(Msg(1:LineEnd)))]);
+        end
+    end
+elseif strcmpi(Response, 'y')
     PulsePalSerialInterface('write', ByteString, 'uint8');
     Confirmed = PulsePalSerialInterface('read', 1, 'uint8');
     if Verbose
