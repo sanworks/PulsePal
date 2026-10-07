@@ -182,6 +182,10 @@ void dacSwitchRange(byte channel, uint16_t code) {
   dacLatch();
 }
 
+// Writes one of the DAC's control registers (setup() only). An LDAC falling edge sooner than about 60ns after the
+// write makes the DAC drop it, as it drops a channel write (rule 4 in AGENTS.md): without the wait, the power up command
+// was lost, and a device started from power on had no output. Starting over other firmware hid it: that firmware had
+// already powered the DAC up.
 void ProgramDAC(byte Data1, byte Data2, byte Data3) {
   digitalWriteFast(LDACPin, HIGH);
   digitalWriteFast(SyncPin, LOW);
@@ -189,6 +193,7 @@ void ProgramDAC(byte Data1, byte Data2, byte Data3) {
   SPI.transfer(Data2);
   SPI.transfer(Data3);
   digitalWriteFast(SyncPin, HIGH);
+  delayNanoseconds(DAC_WRITE_TO_LATCH_NS);
   digitalWriteFast(LDACPin, LOW);
 }
 

@@ -222,10 +222,11 @@ static_assert(F_CPU % TIMER_CLOCK_HZ == 0, "The CPU clock must be a whole multip
 #define DAC_LATCH_US 7.5 // Outputs change this long after each tick of the sample clock: the interrupt's start (up to
                          // about 1us), the writes of 4 channels, and the gap
 #define DAC_LATE_TOLERANCE_US 0.25 // An update whose writes end this much later than planned counts in lateUpdates
-#define DAC_WRITE_TO_LATCH_NS 200 // Time from a write to the latch, for the writes outside the timed updates (dacWriteNow()).
-                                  // The DAC ignores a latch that comes too soon after a write, and keeps its old output:
-                                  // measured on a Pulse Pal 3, 30ns failed and 60ns worked. digitalWrite() alone, the
-                                  // delay in dacLatch(), is shorter than that.
+#define DAC_WRITE_TO_LATCH_NS 200 // Time from a write to the latch, for the writes outside the timed updates (dacWriteNow(),
+                                  // ProgramDAC()). The DAC drops a write followed too soon by a latch: a channel keeps its
+                                  // old output, and a control register write (e.g. power up) is lost. Measured on a Pulse
+                                  // Pal 3, 30ns failed and 60ns worked. digitalWrite() alone, the delay in dacLatch(), is
+                                  // shorter than that.
 
 // The sine wave is read from a table of its first quarter cycle, with linear interpolation (see quarterSine() in
 // Playback.ino). With 4096 steps the interpolation is within 2e-8 of the true sine, under a thousandth of a DAC code.

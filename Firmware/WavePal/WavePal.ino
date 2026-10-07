@@ -158,9 +158,10 @@ enum MenuItem {
 #define PLAYBACK_IRQ_PRIORITY 64 // Priority of the sample clock and trigger interrupts. Both must be equal, so that neither
                                  // interrupts the other in the middle of a DAC write. It is above the USB (128) and
                                  // microSD (96) interrupts, so a USB transfer cannot delay a sample.
-#define DAC_WRITE_TO_LATCH_NS 200 // Time from the last DAC write to the latch, in dacWrite() and dacWriteChannels(). The
-                                  // AD5754R ignores a latch that comes less than about 60ns after the first write since the
-                                  // previous latch, and the outputs keep their old voltages: measured on a Pulse Pal 3, 47ns
+#define DAC_WRITE_TO_LATCH_NS 200 // Time from the last DAC write to the latch, in dacWrite(), dacWriteChannels() and
+                                  // ProgramDAC(). The AD5754R drops the first write since the previous latch if the next
+                                  // latch comes less than about 60ns after it: the outputs keep their old voltages, and a
+                                  // control register write (power up, output range) is lost. Measured on a Pulse Pal 3, 47ns
                                   // failed and 63ns worked. That matters when one channel is written. The digitalWrite()
                                   // call used before took about 50ns, which only just worked.
 #define CHUNK_NONE -1 // Value of bufferChunk[][] for a playback buffer that holds no usable block

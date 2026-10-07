@@ -74,7 +74,12 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
    fixed voltage on one channel. `dacWrite()` and `dacWriteChannels()` therefore wait
    `DAC_WRITE_TO_LATCH_NS` (200 ns) before the latch. The `digitalWrite()` they used before
    took about 50 ns and only just worked: the same wait with a few fewer instructions failed
-   every time.
+   every time. The DAC drops the write itself, so control register writes are lost the same
+   way: `ProgramDAC()` latched a few ns after each one, until it too got the wait. Without it,
+   `setup()` lost the power up command (no output after a power cycle), and every output
+   range change was lost (the outputs stayed in the range the DAC was last left in, by Wave
+   Pal or other firmware). Flashing the device does not reset the DAC, so a test right after
+   flashing over other firmware cannot catch a fault in `setup()`.
 
 ## What runs in the playback interrupts
 
@@ -136,6 +141,7 @@ menu, check:
 - The joystick menu: scroll through the channels, device info, reboot and exit; play and stop
   a channel from its item, and see the item change back when the waveform ends. The splash
   screen shows the Wave Pal logo.
+- After a power cycle (unplug the USB cable, plug it back in), all four outputs play (rule 9).
 - Unplug the USB cable during a waveform load: the device shows "COMM. FAILURE!", and a click
   loads the default settings.
 

@@ -64,11 +64,15 @@ joystick button line as the DAC's SYNC output. Synth Pal needs no microSD card.
    than about 0.25 µs that delays it makes that tick's update late. Never call the screen or
    ArCOM inside one. They do not nest: `interrupts()` ends every section, so do not call a
    function that disables interrupts from inside one.
-4. **A DAC latch needs time after the last write.** The AD5754R ignores an LDAC falling edge
-   that comes sooner than about 60 ns after a write (measured: 30 ns failed, 60 ns worked), and
-   keeps its old output. `digitalWrite()` alone, the delay in `dacLatch()`, is shorter than that.
-   The timed updates leave `DAC_LATCH_GAP_US`, `dacWriteNow()` waits `DAC_WRITE_TO_LATCH_NS`,
-   and `dacSwitchRange()` has its range write in between. Any new write-then-latch needs a gap.
+4. **A DAC latch needs time after the last write.** The AD5754R drops a write when an LDAC
+   falling edge comes sooner than about 60 ns after it (measured: 30 ns failed, 60 ns worked):
+   a channel keeps its old output, and a control register write is lost. `digitalWrite()`
+   alone, the delay in `dacLatch()`, is shorter than that. The timed updates leave
+   `DAC_LATCH_GAP_US`, `dacWriteNow()` and `ProgramDAC()` wait `DAC_WRITE_TO_LATCH_NS`, and
+   `dacSwitchRange()` has its range write in between. Any new write-then-latch needs a gap.
+   `ProgramDAC()` had none, so `setup()` lost the power up command, and a device started from
+   power on had no output. Flashing over other firmware hid this, because the DAC was already
+   powered up: check a change to `setup()` after a power cycle.
 5. **Time DAC updates from `ARM_DWT_CYCCNT`, not the PIT's counter.** See "The time base" in
    `HardwareIO.ino`: polling the PIT placed updates up to 0.14 µs late, because each PIT
    register read takes about 0.1 µs. `tickCycles` follows the period lengths loaded into the
@@ -153,6 +157,9 @@ triggers or the menu, check:
   play and stop a channel from its menu and see the item change back when its play duration
   ends; trigger a trigger channel; screen saver, device info, reset and exit. The splash screen
   shows the Synth Pal logo.
+- After a power cycle (unplug the USB cable, plug it back in), all four outputs play. Flashing
+  the device does not reset the DAC, so a test right after flashing over other firmware cannot
+  catch a fault in `setup()` (rule 4).
 - Unplug the USB cable during a transfer: the device shows "COMM. FAILURE!", playback stops, and
   a click loads the default settings.
 

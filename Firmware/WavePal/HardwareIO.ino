@@ -88,6 +88,9 @@ void dacWriteChannels(byte channelBits) {
   digitalWriteFast(LDACPin, LOW);
 }
 
+// Writes one of the DAC's control registers. An LDAC falling edge sooner than about 60ns after the write makes the DAC
+// drop it (rule 9 in AGENTS.md): without the wait, setup() lost the power up command, so a device started from power
+// on had no output, and setOutputRange() lost the range, so the outputs stayed in whatever range the DAC was left in.
 void ProgramDAC(byte Data1, byte Data2, byte Data3) {
   digitalWriteFast(LDACPin, HIGH);
   digitalWriteFast(SyncPin, LOW);
@@ -95,6 +98,7 @@ void ProgramDAC(byte Data1, byte Data2, byte Data3) {
   SPI.transfer(Data2);
   SPI.transfer(Data3);
   digitalWriteFast(SyncPin, HIGH);
+  delayNanoseconds(DAC_WRITE_TO_LATCH_NS);
   digitalWriteFast(LDACPin, LOW);
 }
 
