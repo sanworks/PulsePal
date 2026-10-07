@@ -39,8 +39,9 @@ ASCII letters of the matching WavePlayer ops (Bpod Analog Output Module), where 
 The Python and MATLAB classes connect in this order:
 
 1. Op 72 (handshake). A Wave Pal replies `87` ('W'). A Pulse Pal replies `75` ('K') to the
-   same op, so each client can tell which firmware a device runs, and say so. The Pulse Pal
-   clients do the same the other way round.
+   same op, and a Synth Pal (`/Firmware/SynthPal`) `83` ('S'), so each client can tell which
+   firmware a device runs, and say so. The Pulse Pal and Synth Pal clients do the same the
+   other way round.
 2. Op 78 ('N'): hardware properties.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
 4. Op 88 ('X') with all four channel bits, then the default settings: ops 83, 82, 79, 68,

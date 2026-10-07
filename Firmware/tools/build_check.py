@@ -20,6 +20,9 @@ Examples:
     # The Wave Pal firmware (Firmware/WavePal), which runs on Pulse Pal 3 only
     python Firmware/tools/build_check.py --sketch wavepal --compare HEAD
 
+    # The Synth Pal firmware (Firmware/SynthPal), which also runs on Pulse Pal 3 only
+    python Firmware/tools/build_check.py --sketch synthpal
+
 Requirements:
   - arduino-cli, with the teensy:avr and arduino:sam cores installed. The Arduino IDE
     ships one; set ARDUINO_CLI to its path if it is not on PATH.
@@ -57,6 +60,11 @@ SKETCHES = {
     "wavepal": {
         "dir": REPO_ROOT / "Firmware" / "WavePal",
         "paths_in_git": ["Firmware/WavePal"],
+        "hardware": [3],
+    },
+    "synthpal": {
+        "dir": REPO_ROOT / "Firmware" / "SynthPal",
+        "paths_in_git": ["Firmware/SynthPal"],
         "hardware": [3],
     },
 }
@@ -247,8 +255,9 @@ def checkout(git_reference, destination, paths_in_git):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sketch", choices=sorted(SKETCHES), default="pulsepal",
-                        help="Firmware to build: pulsepal (Firmware/PulsePal3, the default) or wavepal "
-                             "(Firmware/WavePal, Pulse Pal 3 only)")
+                        help="Firmware to build: pulsepal (Firmware/PulsePal3, the default), wavepal "
+                             "(Firmware/WavePal) or synthpal (Firmware/SynthPal). Wave Pal and Synth Pal run on "
+                             "Pulse Pal 3 only")
     parser.add_argument("--hardware", choices=["2", "3", "both"], default="both",
                         help="Hardware version to build for (default: both)")
     parser.add_argument("--compare", metavar="GIT_REF",

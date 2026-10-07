@@ -8,6 +8,10 @@ https://sanworks.github.io/PulsePal/Python/.
 (`/Firmware/WavePal`), which plays sampled waveforms instead of pulse
 trains. `WavePalExample.py` shows how to use it.
 
+`SynthPal.py` controls a Pulse Pal 3 running Synth Pal firmware
+(`/Firmware/SynthPal`), which plays sine, triangle, square and sawtooth
+waves. `SynthPalExample.py` shows how to use it.
+
 ## Installation
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then open

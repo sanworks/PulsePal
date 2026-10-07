@@ -38,8 +38,9 @@ Every command from the PC is:
 The Python, MATLAB and C++ classes connect in this order:
 
 1. Op 72 (handshake). The reply is `75` ('K') and the firmware version. A device running
-   Wave Pal firmware (`/Firmware/WavePal`) replies `87` ('W') instead, and the Python, MATLAB
-   and C++ classes then say that the device needs Pulse Pal firmware.
+   Wave Pal firmware (`/Firmware/WavePal`) replies `87` ('W') instead, and one running Synth
+   Pal firmware (`/Firmware/SynthPal`) `83` ('S'). The Python, MATLAB and C++ classes then
+   say which firmware the device runs, and that it needs Pulse Pal firmware.
 2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
 3. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
    class leaves this to the program, which calls `setClientIDString()`.

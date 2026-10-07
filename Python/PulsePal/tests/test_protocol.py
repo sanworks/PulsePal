@@ -505,6 +505,25 @@ def test_connecting_to_a_wave_pal_says_so():
     assert not port.is_open
 
 
+def test_connecting_to_a_synth_pal_says_so():
+    """A device running Synth Pal firmware replies 83 ('S') to the handshake, and is named
+    as a Wave Pal is."""
+    port = ClosablePort()
+    port.response = bytearray([83, 1, 0, 0, 0])  # 'S', then Synth Pal firmware v1
+    original_serial = PulsePal.serial.Serial
+    PulsePal.serial.Serial = lambda *args, **kwargs: port
+    try:
+        PulsePal.PulsePalDevice("COM9")
+        raise AssertionError("connected to a Synth Pal")
+    except PulsePal.PulsePalError as error:
+        assert "runs Synth Pal firmware (v1)" in str(error), error
+        assert "SynthPalDevice" in str(error), error
+    finally:
+        PulsePal.serial.Serial = original_serial
+    assert port.writes == [bytes([OP_MENU_BYTE, 72])], port.writes
+    assert not port.is_open
+
+
 def test_a_refused_connection_closes_the_port():
     """Firmware too old or too new for the class, or an error later in the connection,
     must not leave the port open: a second attempt could not open it."""

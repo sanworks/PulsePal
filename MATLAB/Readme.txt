@@ -23,6 +23,14 @@ To control it:
 2. Run W = WavePalDevice('COM3'); % Replace COM3 with the correct USB serial port name
 3. Type 'help WavePalDevice' for an example and a description of its settings.
 
+***MATLAB Control Interface for Synth Pal***
+
+Synth Pal is alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (see
+/Firmware/SynthPal). To control it:
+1. Add this folder ('MATLAB') to the MATLAB path.
+2. Run S = SynthPalDevice('COM3'); % Replace COM3 with the correct USB serial port name
+3. Type 'help SynthPalDevice' for an example and a description of its settings.
+
 ***MATLAB Firmware Load Tool for Pulse Pal***
 
 To load firmware to the device, add the 'Firmware' folder to the MATLAB path and run: LoadPulsePalFirmware;

@@ -313,6 +313,7 @@ class WavePalDevice:
 
     _WAVE_PAL_HANDSHAKE_REPLY = 87  # 'W'
     _PULSE_PAL_HANDSHAKE_REPLY = 75  # 'K': the device runs Pulse Pal firmware
+    _SYNTH_PAL_HANDSHAKE_REPLY = 83  # 'S': the device runs Synth Pal firmware
     _HARDWARE_INFO_FORMAT = "<BBIIII"
     _STATUS_FORMAT = "<B4I4II"
     _DAC_BITMAX = 65535
@@ -863,13 +864,19 @@ class WavePalDevice:
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Wave Pal firmware?"
             ) from exc
-        if reply == self._PULSE_PAL_HANDSHAKE_REPLY:
+        other_firmware = {
+            self._PULSE_PAL_HANDSHAKE_REPLY: ("Pulse Pal",
+                                              "PulsePal.PulsePalDevice"),
+            self._SYNTH_PAL_HANDSHAKE_REPLY: ("Synth Pal",
+                                              "SynthPal.SynthPalDevice"),
+        }
+        if reply in other_firmware:
+            name, client = other_firmware[reply]
             version = struct.unpack("<I", self._read_raw(4))[0]
             raise WavePalError(
-                f"The device on {self.port.port} runs Pulse Pal firmware "
+                f"The device on {self.port.port} runs {name} firmware "
                 f"(v{version}). Load Wave Pal firmware onto it "
-                "(/Firmware/WavePal), or connect with "
-                "PulsePal.PulsePalDevice."
+                f"(/Firmware/WavePal), or connect with {client}."
             )
         if reply != self._WAVE_PAL_HANDSHAKE_REPLY:
             raise WavePalError(

@@ -175,6 +175,14 @@ def test_connecting_to_a_pulse_pal_names_the_firmware_and_closes_the_port():
     assert fake.writes == [command(72)]
 
 
+def test_connecting_to_a_synth_pal_names_the_firmware_and_closes_the_port():
+    fake = FakeWavePal(handshake_reply=83, firmware_version=1)
+    error = expect_error(connect, fake)
+    assert "Synth Pal firmware (v1)" in str(error) and "SynthPalDevice" in str(error), error
+    assert not fake.is_open
+    assert fake.writes == [command(72)]
+
+
 def test_newer_firmware_is_refused():
     fake = FakeWavePal(firmware_version=2)
     error = expect_error(connect, fake)

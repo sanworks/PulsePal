@@ -113,6 +113,7 @@ classdef WavePalDevice < handle
         OpGetPlaybackChecksums = 'Z'
         WavePalHandshakeReply = 87 % 'W'
         PulsePalHandshakeReply = 75 % 'K': the device runs Pulse Pal firmware
+        SynthPalHandshakeReply = 83 % 'S': the device runs Synth Pal firmware
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         OutputRangeLimits = [0 5; 0 10; -5 5; -10 10] % Volts, one row per range
         TriggerModeNames = {'Normal', 'Master', 'Toggle', 'Gated'} % In order of their code on the device
@@ -432,6 +433,11 @@ classdef WavePalDevice < handle
                 version = typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32');
                 error(['The device on ' char(portString) ' runs Pulse Pal firmware (v' num2str(version) ').'...
                        newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with PulsePalDevice.'])
+            end
+            if reply == obj.SynthPalHandshakeReply
+                version = typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32');
+                error(['The device on ' char(portString) ' runs Synth Pal firmware (v' num2str(version) ').'...
+                       newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with SynthPalDevice.'])
             end
             if reply ~= obj.WavePalHandshakeReply
                 error(['The device on ' char(portString) ' returned an unexpected handshake signature.'])

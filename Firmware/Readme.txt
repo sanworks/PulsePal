@@ -25,13 +25,21 @@ when it is triggered by TTL, by software or from the joystick. It is controlled 
 in /Python/PulsePal/WavePal.py. PROTOCOL.md and AGENTS.md in that folder describe its USB protocol and
 code.
 
+/SynthPal
+Synth Pal: alternative firmware for Pulse Pal 3 (Teensy 4.1) that makes it a four channel waveform
+synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, with its own amplitude,
+resting voltage and play duration, when it is triggered by TTL, by software or from the joystick. One
+frequency, 1 Hz to 20 kHz, applies to all four. It is controlled with the Python class in
+/Python/PulsePal/SynthPal.py or the MATLAB class in /MATLAB/@SynthPalDevice. PROTOCOL.md and AGENTS.md in
+that folder describe its USB protocol and code.
+
 /Old
 Archived firmware for earlier hardware and releases, kept for reference and no longer developed.
 
 /tools
-build_check.py compiles the firmware for both hardware versions. It can also compare the compiled
-code with another git revision, function by function, to confirm that an edit did not change
-behavior.
+build_check.py compiles the firmware for both hardware versions, or Wave Pal or Synth Pal (--sketch).
+It can also compare the compiled code with another git revision, function by function, to confirm that
+an edit did not change behavior.
 
 PROTOCOL.md
 The USB serial protocol between the device and its Python, MATLAB and C++ clients: op codes,
