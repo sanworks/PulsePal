@@ -330,8 +330,9 @@ volatile uint32_t playDurationSamples[N_CHANNELS] = {0}; // playDurationMicros i
 volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays
 volatile boolean stopAfterWrite[N_CHANNELS] = {0}; // The channel has stopped: its resting voltage is waiting to be written
 volatile uint32_t phase[N_CHANNELS] = {0}; // Position in the cycle of the next sample to fetch, 0 to samplesPerCycle - 1
-volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the channel was triggered (for the play duration)
-volatile uint32_t sampleSum[N_CHANNELS] = {0}; // Sum of the DAC codes fetched since the channel was triggered, wrapping.
+volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the channel was triggered (for the play duration).
+                                                   // stopChannels() takes out the one it fetched but did not play.
+volatile uint32_t sampleSum[N_CHANNELS] = {0}; // Sum of the DAC codes counted in samplesPlayed, wrapping.
                                                // Op 90 reports it, so that a test can check every sample played.
 volatile uint32_t longestHandlerCycles = 0; // Longest run of handler(), in CPU cycles, since the last status request (op 71)
 volatile uint32_t lateUpdates = 0; // DAC updates that may have come later than DAC_LATCH_US after their tick, since the

@@ -307,6 +307,10 @@ void startChannels(byte channelBits) {
 void stopChannels(byte channelBits) {
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(channelBits, i) && isPlaying(i)) {
+      // The resting voltage replaces the sample fetched for the next tick, so that sample is never played: take it
+      // out of the counts that op 90 reports. (A channel that ends at its play duration fetches no extra sample.)
+      samplesPlayed[i]--;
+      sampleSum[i] -= dacValue[i];
       endPlayback(i);
     }
   }

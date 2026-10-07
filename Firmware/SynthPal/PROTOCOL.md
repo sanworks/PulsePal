@@ -83,7 +83,12 @@ after the client closes. Op 99 works as in Pulse Pal firmware (see its
 addresses, so they carry over when a device changes firmware.
 
 Op 90 is for testing, like Wave Pal's op 90: `/Python/PulsePal/tests/synthpal_hardware_test.py`
-and `/MATLAB/tests/testSynthPalDevice.m` use it to check the samples a device played.
+and `/MATLAB/tests/testSynthPalDevice.m` use it to check the samples a device played. While a
+channel plays, its count includes its next sample, which is computed one sample period before it
+reaches the output. Once the channel has stopped, the count and the sum are of the samples that
+reached the output, however it stopped: at the end of its play duration, or by op 88, a toggle or
+gated trigger edge, or the menu. A frequency change during playback rescales the count to the new
+sampling rate (it keeps the time left to play), so after one the count is no longer exact.
 
 Every setting takes effect at once, also during playback. A new frequency keeps each playing
 channel's place in its cycle and the time it has left to play. A new play duration counts from
