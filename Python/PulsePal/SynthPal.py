@@ -5,8 +5,9 @@ Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output
 channel plays a sine, triangle, square or sawtooth wave, or steps to a
 fixed voltage, when it is triggered: by a TTL pulse on a trigger channel,
 from software, or from the thumb joystick. Each channel has its own
-waveform, amplitude, resting voltage and play duration, and one
-frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four.
+waveform, amplitude, mean voltage, resting voltage, play duration, and
+on and off ramps, and one frequency, 1 Hz to 20 kHz in steps of 0.01 Hz,
+applies to all four.
 
 Everything is accessed through `SynthPalDevice`. Import it, connect to
 the device's serial port, set the waveforms, and trigger, e.g.
@@ -49,9 +50,27 @@ channel number, 1 or 2.
 
 Voltages are in volts, times in seconds, and frequencies in Hz. A
 channel's waveform swings `amplitude / 2` above and below its
-`resting_voltage`, and must stay within -10 V to 10 V. A `"Fixed Voltage"`
+`mean_voltage`, and must stay within -10 V to 10 V. A `"Fixed Voltage"`
 channel steps to its `amplitude`, a voltage from -10 V to 10 V, for its
-play duration.
+play duration. Between playbacks, a channel outputs its
+`resting_voltage`, and its `on_ramp_duration` and `off_ramp_duration`
+fade it in from there and back to it (see "Ramps" below).
+
+## Ramps
+
+A channel's on ramp follows each trigger, and fades its waveform in from
+the resting voltage: its amplitude rises linearly from 0 to its full
+amplitude, and its mean from the resting voltage to the mean voltage (a
+fixed voltage ramps from the resting voltage to its voltage). The play
+duration follows at full amplitude, then the off ramp fades back to the
+resting voltage. The off ramp also follows a stop: `stop()`, a toggle or
+gated trigger, or the joystick. So the ramps lengthen playback: from a
+trigger to rest takes `on_ramp_duration + play_duration +
+off_ramp_duration`. During its off ramp, a channel counts as stopping: a
+trigger fades it in again from where it is, without restarting its
+waveform's cycle, and plays its play duration again. A channel stopped
+during its on ramp fades out from where it is, at the off ramp's rate.
+The output never jumps.
 
 ## License
 
@@ -159,7 +178,10 @@ class DeviceStatus:
     `SynthPalDevice.status`."""
 
     playing: list
-    """Numbers of the output channels that are playing, e.g. `[1, 3]`."""
+    """Numbers of the output channels that are playing, e.g. `[1, 3]`.
+
+    A channel in its off ramp counts as playing until it reaches its
+    resting voltage."""
 
     samples_per_cycle: int
     """Samples in one cycle of the waveform. See
@@ -170,7 +192,8 @@ class DeviceStatus:
     channel number, with index 0 unused, e.g. `"-5V:5V"`.
 
     Each channel uses the range with the finest voltage steps that holds
-    its whole waveform: `"0V:5V"` (76 uV steps), then `"0V:10V"` or
+    its whole waveform and its resting voltage: `"0V:5V"` (76 uV steps),
+    then `"0V:10V"` or
     `"-5V:5V"` (153 uV), then `"-10V:10V"` (305 uV).
     """
 
@@ -315,7 +338,10 @@ class SynthPalDevice:
     _OP_SET_WAVEFORM = ord("W")
     _OP_SET_AMPLITUDE = ord("A")
     _OP_SET_RESTING_VOLTAGE = ord("V")
+    _OP_SET_MEAN_VOLTAGE = ord("M")
     _OP_SET_PLAY_DURATION = ord("D")
+    _OP_SET_ON_RAMP_DURATION = ord("B")
+    _OP_SET_OFF_RAMP_DURATION = ord("E")
     _OP_SET_TRIGGER_LINKS = ord("I")
     _OP_SET_TRIGGER_MODE = ord("T")
     _OP_PLAY = ord("P")
@@ -353,14 +379,21 @@ class SynthPalDevice:
         # The device's defaults, which set_defaults() programs once connected
         self._amplitude_uv = [None, *[5_000_000] * 4]
         self._resting_uv = [None, *[0] * 4]
+        self._mean_uv = [None, *[0] * 4]
         self._waveform = ChannelSettings(
             "waveform", ["Sine"] * 4, self, "_apply_waveform")
         self._amplitude = ChannelSettings(
             "amplitude", [5.0] * 4, self, "_apply_amplitude")
         self._resting_voltage = ChannelSettings(
             "resting_voltage", [0.0] * 4, self, "_apply_resting_voltage")
+        self._mean_voltage = ChannelSettings(
+            "mean_voltage", [0.0] * 4, self, "_apply_mean_voltage")
         self._play_duration = ChannelSettings(
             "play_duration", [1.0] * 4, self, "_apply_play_duration")
+        self._on_ramp_duration = ChannelSettings(
+            "on_ramp_duration", [0.0] * 4, self, "_apply_on_ramp_duration")
+        self._off_ramp_duration = ChannelSettings(
+            "off_ramp_duration", [0.0] * 4, self, "_apply_off_ramp_duration")
         self._trigger_mode = ChannelSettings(
             "trigger_mode", ["Normal"] * 2, self, "_apply_trigger_mode")
         self._link_trigger_channel1 = ChannelSettings(
@@ -455,20 +488,24 @@ class SynthPalDevice:
         """Program the default settings on the device.
 
         The defaults are a frequency of 100 Hz, and on every output
-        channel a sine wave of 5 V peak to peak around a resting voltage
-        of 0 V, played for 1 second. Both trigger channels are in normal
-        mode, and all output channels are linked to trigger channel 1 and
-        not to trigger channel 2. They match the settings the device
-        starts with.
+        channel a sine wave of 5 V peak to peak around a mean voltage of
+        0 V, resting at 0 V, played for 1 second with no ramps. Both
+        trigger channels are in normal mode, and all output channels are
+        linked to trigger channel 1 and not to trigger channel 2. They
+        match the settings the device starts with.
         """
         self.frequency = 100
-        # In this order, each is valid whatever the device holds: 0 V rests
-        # with any waveform and amplitude, 5 V is then a valid amplitude for
-        # any waveform, and a sine wave is then valid
+        # In this order, each is valid whatever the device holds: a
+        # resting voltage goes with any waveform, a mean of 0 V with any
+        # amplitude, 5 V is then a valid amplitude for any waveform, and a
+        # sine wave is then valid
         self.resting_voltage = 0
+        self.mean_voltage = 0
         self.amplitude = 5
         self.waveform = "Sine"
         self.play_duration = 1
+        self.on_ramp_duration = 0
+        self.off_ramp_duration = 0
         self.trigger_mode = "Normal"
         self._set_trigger_links([True] * 4, [False] * 4)
 
@@ -567,13 +604,14 @@ class SynthPalDevice:
         Indexed by channel number (see "Channel settings" above). For the
         periodic waveforms, it is peak to peak, 0 to 20 V: the waveform
         swings `amplitude / 2` above and below the channel's
-        `resting_voltage`, so it must stay within -10 V to 10 V:
-        `abs(resting_voltage) + amplitude / 2 <= 10`. To raise the
-        amplitude beyond what the resting voltage allows, change the
-        resting voltage first.
+        `mean_voltage`, so it must stay within -10 V to 10 V:
+        `abs(mean_voltage) + amplitude / 2 <= 10`. To raise the
+        amplitude beyond what the mean voltage allows, change the mean
+        voltage first.
 
         For a `"Fixed Voltage"` channel, it is the voltage the channel
-        steps to, -10 V to 10 V, with any resting voltage.
+        steps to, -10 V to 10 V, with any resting voltage. The mean
+        voltage does not apply to it.
 
         Set to the nearest microvolt. A change applies to playback in
         progress.
@@ -589,9 +627,8 @@ class SynthPalDevice:
         """The resting voltage of each output channel, in volts.
 
         Indexed by channel number (see "Channel settings" above). -10 to
-        10 V. The channel outputs it while idle, and a periodic waveform
-        has this mean. With the `amplitude`, it must keep the waveform
-        within -10 V to 10 V (see `SynthPalDevice.amplitude`). Set to the
+        10 V, with any waveform. The channel outputs it while idle, and
+        its ramps start and end there (see "Ramps" above). Set to the
         nearest microvolt. A change applies to playback in progress.
         """
         return self._resting_voltage
@@ -601,22 +638,78 @@ class SynthPalDevice:
         self._resting_voltage._assign(values)
 
     @property
+    def mean_voltage(self):
+        """The mean voltage of each output channel's waveform, in volts.
+
+        Indexed by channel number (see "Channel settings" above). -10 to
+        10 V. A periodic waveform swings around it at full amplitude,
+        and must stay within -10 V to 10 V with the `amplitude`:
+        `abs(mean_voltage) + amplitude / 2 <= 10`. It may differ from the
+        `resting_voltage`, which the channel outputs between playbacks:
+        the ramps move the mean between the two (see "Ramps" above). A
+        `"Fixed Voltage"` ignores it. Set to the nearest microvolt. A
+        change applies to playback in progress.
+        """
+        return self._mean_voltage
+
+    @mean_voltage.setter
+    def mean_voltage(self, values):
+        self._mean_voltage._assign(values)
+
+    @property
     def play_duration(self):
         """How long each output channel plays after a trigger, in seconds.
 
         Indexed by channel number (see "Channel settings" above). Up to
         `DeviceInfo.max_play_duration` (3600 s). `0` plays until the
-        channel is stopped. The channel stops when the duration has
-        elapsed, part way through a cycle if need be, and returns to its
-        resting voltage. Durations are counted in samples, rounded to the
-        nearest one, and a nonzero duration lasts at least one sample. A
-        change applies to playback in progress.
+        channel is stopped. It counts at full amplitude, after the on
+        ramp. The channel stops when the duration has elapsed, part way
+        through a cycle if need be, and returns to its resting voltage,
+        over its off ramp. Durations are counted in samples, rounded to
+        the nearest one, and a nonzero duration lasts at least one sample.
+        A change applies to playback in progress.
         """
         return self._play_duration
 
     @play_duration.setter
     def play_duration(self, values):
         self._play_duration._assign(values)
+
+    @property
+    def on_ramp_duration(self):
+        """How long each output channel fades in after a trigger, in seconds.
+
+        Indexed by channel number (see "Channel settings" above). Up to
+        `DeviceInfo.max_play_duration` (3600 s); `0` (the default) for no
+        ramp. Over it, the amplitude rises linearly from 0 V peak to peak
+        to the `amplitude`, and the mean from the `resting_voltage` to the
+        `mean_voltage`, before the play duration (see "Ramps" above).
+        Counted in samples, as `play_duration` is. A change applies to
+        playback in progress: a ramp under way keeps the level it has
+        reached, and goes on at the new rate.
+        """
+        return self._on_ramp_duration
+
+    @on_ramp_duration.setter
+    def on_ramp_duration(self, values):
+        self._on_ramp_duration._assign(values)
+
+    @property
+    def off_ramp_duration(self):
+        """How long each output channel fades out when it stops, in seconds.
+
+        Indexed by channel number (see "Channel settings" above). Up to
+        `DeviceInfo.max_play_duration` (3600 s); `0` (the default) for no
+        ramp. Over it, the amplitude falls linearly to 0 V peak to peak,
+        and the mean to the `resting_voltage`, after the play duration or
+        a stop (see "Ramps" above). Counted in samples, as
+        `play_duration` is. A change applies to playback in progress.
+        """
+        return self._off_ramp_duration
+
+    @off_ramp_duration.setter
+    def off_ramp_duration(self, values):
+        self._off_ramp_duration._assign(values)
 
     @property
     def trigger_mode(self):
@@ -839,7 +932,10 @@ class SynthPalDevice:
             f"waveform: {list(self._waveform)}\n"
             f"amplitude: {list(self._amplitude)}\n"
             f"resting_voltage: {list(self._resting_voltage)}\n"
+            f"mean_voltage: {list(self._mean_voltage)}\n"
             f"play_duration: {list(self._play_duration)}\n"
+            f"on_ramp_duration: {list(self._on_ramp_duration)}\n"
+            f"off_ramp_duration: {list(self._off_ramp_duration)}\n"
             f"trigger_mode: {list(self._trigger_mode)}\n"
             f"link_trigger_channel1: {list(self._link_trigger_channel1)}\n"
             f"link_trigger_channel2: {list(self._link_trigger_channel2)}"
@@ -918,7 +1014,7 @@ class SynthPalDevice:
                 )
             names.append(matches[0])
         self._check_output_levels(names, self._amplitude_uv[1:],
-                                  self._resting_uv[1:], "waveform")
+                                  self._mean_uv[1:], "waveform")
         self._write_command(
             self._OP_SET_WAVEFORM,
             bytes(WAVEFORMS.index(name) for name in names),
@@ -941,7 +1037,7 @@ class SynthPalDevice:
                     "negative"))
         microvolts = [round(v * 1e6) for v in volts]
         self._check_output_levels(self._waveform[1:], microvolts,
-                                  self._resting_uv[1:], "amplitude")
+                                  self._mean_uv[1:], "amplitude")
         self._write_command(self._OP_SET_AMPLITUDE,
                             struct.pack("<4i", *microvolts))
         self._read_ack("setting amplitude")
@@ -949,24 +1045,35 @@ class SynthPalDevice:
         return volts
 
     def _apply_resting_voltage(self, values):
+        # Any resting voltage within -10 V to 10 V goes with any waveform
         volts = [self._to_volts(value, "resting_voltage", -10, 10)
                  for value in values]
         microvolts = [round(v * 1e6) for v in volts]
-        self._check_output_levels(self._waveform[1:], self._amplitude_uv[1:],
-                                  microvolts, "resting_voltage")
         self._write_command(self._OP_SET_RESTING_VOLTAGE,
                             struct.pack("<4i", *microvolts))
         self._read_ack("setting resting_voltage")
         self._resting_uv[1:] = microvolts
         return volts
 
-    def _check_output_levels(self, waveforms, amplitudes_uv, resting_uv,
+    def _apply_mean_voltage(self, values):
+        volts = [self._to_volts(value, "mean_voltage", -10, 10)
+                 for value in values]
+        microvolts = [round(v * 1e6) for v in volts]
+        self._check_output_levels(self._waveform[1:], self._amplitude_uv[1:],
+                                  microvolts, "mean_voltage")
+        self._write_command(self._OP_SET_MEAN_VOLTAGE,
+                            struct.pack("<4i", *microvolts))
+        self._read_ack("setting mean_voltage")
+        self._mean_uv[1:] = microvolts
+        return volts
+
+    def _check_output_levels(self, waveforms, amplitudes_uv, means_uv,
                              setting):
         """Check that each channel's levels suit its waveform, and keep
         its output within -10 V to 10 V, as the device does. `setting` is
         the one being changed, for the advice in the message."""
-        for channel, (waveform, amplitude, resting) in enumerate(
-                zip(waveforms, amplitudes_uv, resting_uv), start=1):
+        for channel, (waveform, amplitude, mean) in enumerate(
+                zip(waveforms, amplitudes_uv, means_uv), start=1):
             if waveform == FIXED_VOLTAGE:
                 if abs(amplitude) > self._MAX_VOLTAGE_UV:
                     raise SynthPalError(
@@ -985,15 +1092,15 @@ class SynthPalDevice:
                     + (" Change amplitude first." if setting ==
                        "waveform" else "")
                 )
-            elif 2 * abs(resting) + amplitude > 2 * self._MAX_VOLTAGE_UV:
-                other = {"amplitude": "resting_voltage",
-                         "resting_voltage": "amplitude",
-                         "waveform": "amplitude or resting_voltage"}[setting]
+            elif 2 * abs(mean) + amplitude > 2 * self._MAX_VOLTAGE_UV:
+                other = {"amplitude": "mean_voltage",
+                         "mean_voltage": "amplitude",
+                         "waveform": "amplitude or mean_voltage"}[setting]
                 raise SynthPalError(
-                    f"On channel {channel}, a resting voltage of "
-                    f"{resting / 1e6:g} V and an amplitude of "
+                    f"On channel {channel}, a mean voltage of "
+                    f"{mean / 1e6:g} V and an amplitude of "
                     f"{amplitude / 1e6:g} V peak to peak would reach "
-                    f"{(abs(resting) + amplitude / 2) / 1e6:g} V. The "
+                    f"{(abs(mean) + amplitude / 2) / 1e6:g} V. The "
                     "waveform must stay within -10 V to 10 V. Change "
                     f"{other} first"
                     + (f", or choose a smaller {setting}."
@@ -1001,25 +1108,39 @@ class SynthPalDevice:
                 )
 
     def _apply_play_duration(self, values):
+        return self._apply_duration(values, "play_duration",
+                                    "0 (play until stopped)",
+                                    self._OP_SET_PLAY_DURATION)
+
+    def _apply_on_ramp_duration(self, values):
+        return self._apply_duration(values, "on_ramp_duration",
+                                    "0 (no ramp)",
+                                    self._OP_SET_ON_RAMP_DURATION)
+
+    def _apply_off_ramp_duration(self, values):
+        return self._apply_duration(values, "off_ramp_duration",
+                                    "0 (no ramp)",
+                                    self._OP_SET_OFF_RAMP_DURATION)
+
+    def _apply_duration(self, values, name, zero_meaning, op):
         durations = []
         for value in values:
             if isinstance(value, bool) or not isinstance(value, numbers.Real):
                 raise SynthPalError(
-                    f"play_duration must be in seconds. Received {value!r}."
+                    f"{name} must be in seconds. Received {value!r}."
                 )
             duration = float(value)
             if not math.isfinite(duration) or not \
                     0 <= duration <= self.info.max_play_duration:
                 raise SynthPalError(
-                    "play_duration must be 0 (play until stopped) or a "
-                    "positive number of seconds up to "
-                    f"{self.info.max_play_duration:g}. Received {value!r}."
+                    f"{name} must be {zero_meaning} or a positive number "
+                    f"of seconds up to {self.info.max_play_duration:g}. "
+                    f"Received {value!r}."
                 )
             durations.append(duration)
         microseconds = [round(d * 1e6) for d in durations]
-        self._write_command(self._OP_SET_PLAY_DURATION,
-                            struct.pack("<4I", *microseconds))
-        self._read_ack("setting play_duration")
+        self._write_command(op, struct.pack("<4I", *microseconds))
+        self._read_ack(f"setting {name}")
         return durations
 
     def _apply_trigger_mode(self, values):

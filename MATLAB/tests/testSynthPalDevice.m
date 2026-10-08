@@ -8,9 +8,9 @@
 %
 % The device counts the samples each channel plays and sums their DAC codes. The tests compare these with values
 % worked out here from the settings, independently of SynthPalDevice, so a mistake in how it encodes frequencies,
-% voltages or durations fails: play durations in samples, the resting voltage's DAC code (the mean of any whole
-% number of cycles), the codes of a square wave's high half (resting voltage plus half the amplitude), and the code
-% of a fixed voltage.
+% voltages or durations fails: play durations in samples, the mean voltage's DAC code (the mean of any whole
+% number of cycles), the codes of a square wave's high half (mean voltage plus half the amplitude), the code of a
+% fixed voltage, and playbacks lengthened by their ramps.
 % /Python/PulsePal/tests/synthpal_hardware_test.py tests the firmware's synthesis itself, code by code.
 
 %{
@@ -35,8 +35,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testSynthPalDevice(portString)
 tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAreExactInSamples, ...
-    @testRestingVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
-    @testInfiniteDurationAndStop, ...
+    @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
+    @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testInvalidArgumentsAreRefused};
 S = SynthPalDevice(portString);
 nFailed = 0;
@@ -79,8 +79,10 @@ assert(S.info.minFrequency == 1 && S.info.maxFrequency == 20000, 'frequency limi
 assert(S.info.maxPlayDuration == 3600, 'maximum play duration');
 assert(S.frequency == 100 && S.samplesPerCycle == 1000 && S.samplingRate == 100000, 'default frequency');
 assert(isequal(S.waveform, {'Sine', 'Sine', 'Sine', 'Sine'}), 'default waveform');
-assert(isequal(S.amplitude, [5 5 5 5]) && isequal(S.restingVoltage, [0 0 0 0]), 'default levels');
+assert(isequal(S.amplitude, [5 5 5 5]) && isequal(S.restingVoltage, [0 0 0 0]) && ...
+    isequal(S.meanVoltage, [0 0 0 0]), 'default levels');
 assert(isequal(S.playDuration, [1 1 1 1]), 'default play duration');
+assert(isequal(S.onRampDuration, [0 0 0 0]) && isequal(S.offRampDuration, [0 0 0 0]), 'default ramps');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
 assert(isequal(S.linkTriggerChannel1, true(1,4)) && isequal(S.linkTriggerChannel2, false(1,4)), 'default links');
 status = S.status();
@@ -115,13 +117,14 @@ for i = 1:numel(frequencies)
 end
 end
 
-function testRestingVoltageIsTheMean(S)
-% Over whole cycles the codes average to the resting voltage's code, in each channel's range
+function testMeanVoltageIsTheMean(S)
+% Over whole cycles the codes average to the mean voltage's code, in each channel's range, whatever the resting voltage
 S.frequency = 1000;
-restingVoltages = [2.5 -2.25 6 -7.5];
+meanVoltages = [2.5 -2.25 6 -7.5];
+restingVoltages = [0 1 -3 -7.5];
 amplitudes = [4 3 6 5];
 for i = 1:4
-    setLevels(S, i, amplitudes(i), restingVoltages(i));
+    setLevels(S, i, amplitudes(i), meanVoltages(i), restingVoltages(i));
 end
 S.waveform = {'Sine', 'Triangle', 'Square', 'Sawtooth'};
 S.playDuration = 0.02; % 20 cycles
@@ -130,16 +133,16 @@ waitUntilStopped(S, 1:4, 2);
 [samplesPlayed, sums] = S.playbackChecksums();
 for i = 1:4
     assert(samplesPlayed(i) == 2000, 'channel %d played %d samples', i, samplesPlayed(i));
-    limits = rangeLimits(restingVoltages(i), amplitudes(i));
-    restCode = (restingVoltages(i) - limits(1))/(limits(2) - limits(1))*65536;
+    limits = rangeLimits(meanVoltages(i), amplitudes(i), restingVoltages(i));
+    meanVoltageCode = (meanVoltages(i) - limits(1))/(limits(2) - limits(1))*65536;
     meanCode = sums(i)/2000;
-    assert(abs(meanCode - restCode) <= 0.5, 'channel %d: mean code %.3f, resting voltage code %.3f', ...
-        i, meanCode, restCode);
+    assert(abs(meanCode - meanVoltageCode) <= 0.5, 'channel %d: mean code %.3f, mean voltage code %.3f', ...
+        i, meanCode, meanVoltageCode);
 end
 end
 
 function testAmplitudeOfASquareWave(S)
-% The first half of a square wave's cycle is the resting voltage plus half the amplitude
+% The first half of a square wave's cycle is the mean voltage plus half the amplitude
 S.frequency = 500; % 200 samples per cycle
 setLevels(S, 2, 3.3, -1);
 S.waveform{2} = 'Square';
@@ -157,7 +160,7 @@ cases = {2, 2.5, '0V:5V'; 8, 5, '0V:10V'; 1, 0, '-5V:5V'; 2, -4, '-5V:5V'; 12, 0
 for i = 1:size(cases, 1)
     setLevels(S, 3, cases{i,1}, cases{i,2});
     ranges = S.status().outputRanges;
-    assert(strcmp(ranges{3}, cases{i,3}), 'amplitude %g V at %g V: range %s, expected %s', ...
+    assert(strcmp(ranges{3}, cases{i,3}), 'amplitude %g V around %g V: range %s, expected %s', ...
         cases{i,1}, cases{i,2}, ranges{3}, cases{i,3});
 end
 end
@@ -187,6 +190,24 @@ expectError(@() setProperty(S, 'amplitude', [1 1 10.5 1])); % Beyond 10 V
 expectError(@() setProperty(S, 'amplitude', [-1 1 1 1])); % Channel 1 plays a sine wave
 assert(strcmp(S.waveform{3}, 'Fixed Voltage') && isequal(S.amplitude, amplitudes), 'a refused setting was changed');
 setChannel(S, 3, 'Sine', 5, 0);
+end
+
+function testRampsLengthenPlayback(S)
+% From a trigger to rest takes the on ramp, the play duration and the off ramp, each in samples
+S.frequency = 1000; % 100 kHz
+setChannel(S, 2, 'Triangle', 6, -1, 2);
+ramps = [0.0123 0.0071; 0.00001 0; 0 0.00001; 0.02 0.03];
+for i = 1:size(ramps, 1)
+    S.onRampDuration(2) = ramps(i, 1);
+    S.playDuration(2) = 0.005;
+    S.offRampDuration(2) = ramps(i, 2);
+    S.play(2);
+    waitUntilStopped(S, 2, 2);
+    checkPlayed(S, 2, expectedSamples(S, ramps(i, 1), true) + 500 + expectedSamples(S, ramps(i, 2), true));
+end
+S.onRampDuration(2) = 0;
+S.offRampDuration(2) = 0;
+setChannel(S, 2, 'Sine', 5, 0);
 end
 
 function testInfiniteDurationAndStop(S)
@@ -233,17 +254,20 @@ expectError(@() setProperty(S, 'waveform', 'Ramp'));
 expectError(@() setProperty(S, 'waveform', {'Sine', 'Sine'}));
 expectError(@() setProperty(S, 'amplitude', [3 1 1 1])); % 9 V + 1.5 V on channel 1
 expectError(@() setProperty(S, 'amplitude', 20.1));
-expectError(@() setProperty(S, 'restingVoltage', [-9.5 0 0 0])); % -9.5 V - 1 V on channel 1
+expectError(@() setProperty(S, 'meanVoltage', [-9.5 0 0 0])); % -9.5 V - 1 V on channel 1
+expectError(@() setProperty(S, 'meanVoltage', 10.5));
 expectError(@() setProperty(S, 'restingVoltage', 10.5));
 expectError(@() setProperty(S, 'playDuration', -1));
 expectError(@() setProperty(S, 'playDuration', 3600.5));
+expectError(@() setProperty(S, 'onRampDuration', -0.001));
+expectError(@() setProperty(S, 'offRampDuration', 3600.5));
 expectError(@() setProperty(S, 'triggerMode', 'Master'));
 expectError(@() setProperty(S, 'triggerMode', {'Normal', 'Normal', 'Normal', 'Normal'}));
 expectError(@() setProperty(S, 'linkTriggerChannel1', [1 0 2 0]));
 expectError(@() S.play([1 7]));
 expectError(@() S.play([]));
 expectError(@() S.setScreenSaver(2));
-assert(S.amplitude(1) == 2 && S.restingVoltage(1) == 9, 'a refused level was changed');
+assert(S.amplitude(1) == 2 && S.meanVoltage(1) == 9 && S.restingVoltage(1) == 9, 'a refused level was changed');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'a refused trigger mode was changed');
 setLevels(S, 1, 5, 0);
 end
@@ -265,26 +289,39 @@ end
 
 % --- Helpers ---
 
-function setLevels(S, channel, amplitude, restingVoltage)
-% Sets a channel's amplitude and resting voltage in an order the device accepts from any earlier levels
+function setLevels(S, channel, amplitude, meanVoltage, restingVoltage)
+% Sets a channel's amplitude, mean and resting voltage (the mean voltage, unless given) in an order the device accepts
+% from any earlier levels
+if nargin < 5
+    restingVoltage = meanVoltage;
+end
 S.amplitude(channel) = 0;
 S.restingVoltage(channel) = restingVoltage;
+S.meanVoltage(channel) = meanVoltage;
 S.amplitude(channel) = amplitude;
 end
 
-function setChannel(S, channel, waveform, amplitude, restingVoltage)
+function setChannel(S, channel, waveform, amplitude, restingVoltage, meanVoltage)
 % Sets a channel's waveform and levels in an order the device accepts from any earlier settings: an amplitude of 0
-% goes with any waveform and resting voltage
+% goes with any waveform, resting and mean voltage. The mean voltage is the resting voltage, unless given.
+if nargin < 6
+    meanVoltage = restingVoltage;
+end
 S.amplitude(channel) = 0;
 S.waveform{channel} = waveform;
 S.restingVoltage(channel) = restingVoltage;
+S.meanVoltage(channel) = meanVoltage;
 S.amplitude(channel) = amplitude;
 end
 
-function limits = rangeLimits(restingVoltage, amplitude)
-% The output range the device should choose, as in "Output ranges" in /Firmware/SynthPal/PROTOCOL.md
-low = restingVoltage - amplitude/2;
-high = restingVoltage + amplitude/2;
+function limits = rangeLimits(meanVoltage, amplitude, restingVoltage)
+% The output range the device should choose, as in "Output ranges" in /Firmware/SynthPal/PROTOCOL.md: the first that
+% holds the waveform and the resting voltage (the mean voltage, unless given)
+if nargin < 3
+    restingVoltage = meanVoltage;
+end
+low = min(restingVoltage, meanVoltage - amplitude/2);
+high = max(restingVoltage, meanVoltage + amplitude/2);
 if low >= 0 && high <= 5
     limits = [0 5];
 elseif low >= 0 && high <= 10
@@ -296,9 +333,13 @@ else
 end
 end
 
-function n = expectedSamples(S, duration)
-% A play duration in samples at the current sampling rate, as the device rounds it
+function n = expectedSamples(S, duration, zeroIsZero)
+% A play duration in samples at the current sampling rate, as the device rounds it. A nonzero duration lasts at least
+% one sample. With zeroIsZero (for a ramp), 0 stays 0.
 n = max(1, round(round(duration*1e6)*S.samplingRate/1e6));
+if nargin > 2 && zeroIsZero && duration == 0
+    n = 0;
+end
 end
 
 function checkPlayed(S, channel, nExpected, expectedSum)

@@ -56,9 +56,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            11    Exit -> MENU_TOP (MENU_ITEM_EXIT)
 // MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now: plays the channel, or stops it while it plays. The
 //                                                  second line says which. Trigger modes do not apply here.
-//                                            2-7   Edit the waveform, amplitude, resting voltage, play duration, and
-//                                                  the links to trigger channels 1 and 2 (enum OutputChannelAction)
-//                                            8     Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
+//                                            2-10  Edit the waveform, amplitude, resting voltage, mean voltage, play
+//                                                  duration, on ramp, off ramp, and the links to trigger channels 1
+//                                                  and 2 (enum OutputChannelAction)
+//                                            11    Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
 // MENU_TRIGGER_CHANNEL  SelectedInputAction  1     Trigger now: acts as a rising edge on the trigger channel, in its
 //                                                  trigger mode. In gated mode, no falling edge follows: the channels
 //                                                  play for their play duration, or until stopped.
@@ -277,7 +278,10 @@ void RefreshActionMenu() {
       write2Screen("<  Amplitude   >", formatVolts(amplitudeMicrovolts[channel], isFixed ? " V" : " Vpp"));
     } break;
     case MENU_ACTION_RESTING_VOLTAGE: {write2Screen("<RestingVoltage>", formatVolts(restingVoltageMicrovolts[channel], " V"));} break;
-    case MENU_ACTION_PLAY_DURATION: {write2Screen("<Play Duration >", formatDuration(playDurationMicros[channel]));} break;
+    case MENU_ACTION_MEAN_VOLTAGE: {write2Screen("< Mean Voltage >", formatVolts(meanVoltageMicrovolts[channel], " V"));} break;
+    case MENU_ACTION_PLAY_DURATION: {write2Screen("<Play Duration >", formatDuration(playDurationMicros[channel], "Infinite"));} break;
+    case MENU_ACTION_ON_RAMP: {write2Screen("<   On Ramp    >", formatDuration(onRampMicros[channel], "None"));} break;
+    case MENU_ACTION_OFF_RAMP: {write2Screen("<   Off Ramp   >", formatDuration(offRampMicros[channel], "None"));} break;
     case MENU_ACTION_LINK_TRIGGER1: {write2Screen("<Link Trigger 1>", offOnNames[TriggerAddress[0][channel]]);} break;
     case MENU_ACTION_LINK_TRIGGER2: {write2Screen("<Link Trigger 2>", offOnNames[TriggerAddress[1][channel]]);} break;
     default: {write2Screen("<     Exit     >", " ");} break; // MENU_ACTION_EXIT
@@ -295,9 +299,9 @@ void RefreshTriggerMenu() {
 
 // Edits one setting of an output channel (0-3) with the joystick, and applies it. Voltages are edited in steps of
 // 0.01V and play durations in steps of 0.1ms, as in Pulse Pal firmware. A value set more finely over USB is kept if
-// the edit leaves it unchanged. Amplitudes and resting voltages are limited so that the waveform stays within +/-10V.
-// A fixed voltage's amplitude is a voltage, -10V to 10V, and a new waveform takes the nearest amplitude it can play
-// (fitAmplitude()).
+// the edit leaves it unchanged. Amplitudes and mean voltages are limited so that the waveform stays within +/-10V. A
+// fixed voltage's amplitude is a voltage, -10V to 10V, and a new waveform takes the nearest amplitude it can play
+// (fitAmplitude()). The resting voltage may be anywhere within +/-10V.
 void editOutputSetting(byte channel, byte action) {
   bool isFixed = (waveform[channel] == WAVEFORM_FIXED_VOLTAGE);
   switch (action) {
@@ -305,7 +309,7 @@ void editOutputSetting(byte channel, byte action) {
       byte newWaveform = editChoice(waveform[channel], MAX_WAVEFORM + 1, waveformNames, true);
       if (newWaveform != waveform[channel]) {
         waveform[channel] = newWaveform;
-        amplitudeMicrovolts[channel] = fitAmplitude(newWaveform, restingVoltageMicrovolts[channel],
+        amplitudeMicrovolts[channel] = fitAmplitude(newWaveform, meanVoltageMicrovolts[channel],
                                                     amplitudeMicrovolts[channel]);
         updateChannelOutput(channel);
       }
@@ -317,7 +321,7 @@ void editOutputSetting(byte channel, byte action) {
       if (isFixed) {
         newValue = editNumber(start, -MAX_VOLTAGE_MICROVOLTS / 10000, MAX_VOLTAGE_MICROVOLTS / 10000, 2, 2, true, " V");
       } else {
-        int32_t maxValue = ((2 * MAX_VOLTAGE_MICROVOLTS) - (2 * abs(restingVoltageMicrovolts[channel]))) / 10000;
+        int32_t maxValue = ((2 * MAX_VOLTAGE_MICROVOLTS) - (2 * abs(meanVoltageMicrovolts[channel]))) / 10000;
         newValue = editNumber(start, 0, maxValue, 2, 2, false, " Vpp");
       }
       if (newValue != start) {
@@ -325,14 +329,21 @@ void editOutputSetting(byte channel, byte action) {
         updateChannelOutput(channel);
       }
     } break;
-    case MENU_ACTION_RESTING_VOLTAGE: { // In hundredths of a volt
-      int32_t rest = restingVoltageMicrovolts[channel];
-      int32_t start = (rest >= 0) ? ((rest + 5000) / 10000) : -((-rest + 5000) / 10000);
-      int32_t maxValue = isFixed ? (MAX_VOLTAGE_MICROVOLTS / 10000) // Any resting voltage goes with a fixed voltage
-                                 : (((2 * MAX_VOLTAGE_MICROVOLTS) - amplitudeMicrovolts[channel]) / 20000);
+    case MENU_ACTION_RESTING_VOLTAGE: // In hundredths of a volt
+    case MENU_ACTION_MEAN_VOLTAGE: {
+      bool isRest = (action == MENU_ACTION_RESTING_VOLTAGE);
+      int32_t voltage = isRest ? restingVoltageMicrovolts[channel] : meanVoltageMicrovolts[channel];
+      int32_t start = (voltage >= 0) ? ((voltage + 5000) / 10000) : -((-voltage + 5000) / 10000);
+      // Any resting voltage goes with the waveform, and any mean voltage with a fixed voltage, which ignores it
+      int32_t maxValue = (isRest || isFixed) ? (MAX_VOLTAGE_MICROVOLTS / 10000)
+                                             : (((2 * MAX_VOLTAGE_MICROVOLTS) - amplitudeMicrovolts[channel]) / 20000);
       int32_t newValue = editNumber(start, -maxValue, maxValue, 2, 2, true, " V");
       if (newValue != start) {
-        restingVoltageMicrovolts[channel] = newValue * 10000;
+        if (isRest) {
+          restingVoltageMicrovolts[channel] = newValue * 10000;
+        } else {
+          meanVoltageMicrovolts[channel] = newValue * 10000;
+        }
         updateChannelOutput(channel);
       }
     } break;
@@ -346,6 +357,22 @@ void editOutputSetting(byte channel, byte action) {
         }
         durations[channel] = (uint32_t)newValue * 100;
         setPlayDurations(durations);
+      }
+    } break;
+    case MENU_ACTION_ON_RAMP: // In tenths of a millisecond
+    case MENU_ACTION_OFF_RAMP: {
+      bool isOn = (action == MENU_ACTION_ON_RAMP);
+      int32_t start = ((isOn ? onRampMicros[channel] : offRampMicros[channel]) + 50) / 100;
+      int32_t newValue = editNumber(start, 0, MAX_PLAY_DURATION_MICROS / 100, 4, 4, false, " s");
+      if (newValue != start) {
+        uint32_t onRamps[N_CHANNELS];
+        uint32_t offRamps[N_CHANNELS];
+        for (byte i = 0; i < N_CHANNELS; i++) {
+          onRamps[i] = onRampMicros[i];
+          offRamps[i] = offRampMicros[i];
+        }
+        (isOn ? onRamps : offRamps)[channel] = (uint32_t)newValue * 100;
+        setRampDurations(onRamps, offRamps);
       }
     } break;
     case MENU_ACTION_LINK_TRIGGER1:
@@ -376,12 +403,12 @@ const char* formatVolts(int32_t microvolts, const char* units) {
   return text;
 }
 
-// Formats a play duration in microseconds for the screen, rounded to 0.1ms, e.g. "1.5000 s", or "Infinite" for 0. The
-// returned buffer is reused by the next call.
-const char* formatDuration(uint32_t micros) {
+// Formats a duration in microseconds for the screen, rounded to 0.1ms, e.g. "1.5000 s", or zeroText for 0 ("Infinite"
+// for a play duration, "None" for a ramp). The returned buffer is reused by the next call.
+const char* formatDuration(uint32_t micros, const char* zeroText) {
   static char text[17];
   if (micros == 0) {
-    return "Infinite";
+    return zeroText;
   }
   uint32_t tenthsOfMs = (micros + 50) / 100;
   snprintf(text, sizeof(text), "%lu.%04lu s", (unsigned long)(tenthsOfMs / 10000), (unsigned long)(tenthsOfMs % 10000));

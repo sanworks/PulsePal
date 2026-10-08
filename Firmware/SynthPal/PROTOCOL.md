@@ -2,8 +2,9 @@
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output channel plays a sine,
 triangle, square or sawtooth wave, or steps to a fixed voltage, when it is triggered, with its own
-amplitude, resting voltage and play duration, at one frequency shared by all four channels. This
-page is the reference for its USB serial protocol, as of Synth Pal firmware v1.
+amplitude, mean voltage, resting voltage, play duration, and on and off ramps, at one frequency
+shared by all four channels. This page is the reference for its USB serial protocol, as of Synth
+Pal firmware v1.
 
 | Client | Location |
 |---|---|
@@ -43,10 +44,11 @@ The Python and MATLAB classes connect in this order:
    so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal.
 2. Op 78 ('N'): hardware properties and limits.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
-4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 86, 65, 87, 68,
-   84 and 73. In this order each is valid whatever the device holds (see [Levels](#levels)): a
-   resting voltage of 0 V (op 86) goes with any waveform and amplitude, the default amplitude
-   of 5 V (op 65) then goes with any waveform, and a sine wave (op 87) then goes with both.
+4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 86, 77, 65, 87,
+   68, 66, 69, 84 and 73. In this order each is valid whatever the device holds (see
+   [Levels](#levels)): a resting voltage (op 86) goes with any waveform, a mean voltage of 0 V
+   (op 77) with any amplitude, the default amplitude of 5 V (op 65) then goes with any waveform,
+   and a sine wave (op 87) then goes with both.
 
 When they close, they send op 81, which puts "Synth Pal v3.0" back on the screen.
 
@@ -66,12 +68,15 @@ so that it is not taken for the next command.
 | 87 | `W` | Set waveforms | 4 bytes, one per output channel, see [Waveforms](#waveforms) | 1 / 0 |
 | 65 | `A` | Set amplitudes | 4 int32, one per output channel, in µV: peak to peak, 0 to 20000000, or for a fixed voltage the voltage, -10000000 to 10000000. See [Levels](#levels) | 1 / 0 |
 | 86 | `V` | Set resting voltages | 4 int32, one per output channel: in µV, -10000000 to 10000000. See [Levels](#levels) | 1 / 0 |
-| 68 | `D` | Set play durations | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 plays until stopped | 1 / 0 |
+| 77 | `M` | Set mean voltages | 4 int32, one per output channel: in µV, -10000000 to 10000000. See [Levels](#levels) | 1 / 0 |
+| 68 | `D` | Set play durations | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 plays until stopped. See [Ramps](#ramps) | 1 / 0 |
+| 66 | `B` | Set on ramp durations (at the Beginning) | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 for no ramp. See [Ramps](#ramps) | 1 / 0 |
+| 69 | `E` | Set off ramp durations (at the End) | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 for no ramp. See [Ramps](#ramps) | 1 / 0 |
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
 | 80 | `P` | Play (soft trigger) | Channel bits (uint8) | none |
 | 88 | `X` | Stop | Channel bits (uint8) | none |
-| 71 | `G` | Get status | none | Playing channel bits (uint8), samples per cycle (uint32), the output range of channels 1-4 (4 uint8, see [Output ranges](#output-ranges)), longest sample clock interrupt since the previous op 71, in nanoseconds (uint32), late output updates since the previous op 71 (uint32, see [Timing](#timing)) |
+| 71 | `G` | Get status | none | Playing channel bits (uint8: a channel in its off ramp counts as playing, until it reaches its resting voltage), samples per cycle (uint32), the output range of channels 1-4 (4 uint8, see [Output ranges](#output-ranges)), longest sample clock interrupt since the previous op 71, in nanoseconds (uint32), late output updates since the previous op 71 (uint32, see [Timing](#timing)) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
 | 81 | `Q` | Disconnect: show the device's own name on the top screen again | none | none |
 | 99 | `c` | Set the screen saver | State (uint8: 0 off, 1 on), timeout in seconds (uint16, 1-65535) | 1 / 0 |
@@ -92,8 +97,10 @@ gated trigger edge, or the menu. A frequency change during playback rescales the
 sampling rate (it keeps the time left to play), so after one the count is no longer exact.
 
 Every setting takes effect at once, also during playback. A new frequency keeps each playing
-channel's place in its cycle and the time it has left to play. A new play duration counts from
-the channel's trigger: a channel that has already played longer stops on its next sample.
+channel's place in its cycle, the time it has left to play and the level its ramp has reached. A
+new play duration counts from the end of the channel's on ramp: a channel that has already played
+longer stops on its next sample (and starts its off ramp). A new ramp duration applies to a ramp
+under way from the level it has reached.
 
 ## Frequency and sampling
 
@@ -124,14 +131,14 @@ sampling rate in use, and a nonzero duration lasts at least one sample.
 
 | Code | Name | One cycle, from the trigger |
 |---|---|---|
-| 0 | Sine | Starts at the resting voltage, rising. Peak at a quarter cycle, trough at three quarters |
-| 1 | Triangle | Starts at the resting voltage, rising. Peak at a quarter cycle, trough at three quarters |
+| 0 | Sine | Starts at the mean voltage, rising. Peak at a quarter cycle, trough at three quarters |
+| 1 | Triangle | Starts at the mean voltage, rising. Peak at a quarter cycle, trough at three quarters |
 | 2 | Square | High for the first half cycle, low for the second |
 | 3 | Sawtooth | Rises in equal steps from its lowest voltage, at the first sample, to its highest, at the last, then falls back |
 | 4 | Fixed Voltage | Not periodic: steps to the amplitude, a voltage, and holds it for the play duration |
 
-A channel that stops, at the end of its play duration or otherwise, returns to its resting
-voltage on the next sample, part way through a cycle if need be.
+A channel without an off ramp that stops, at the end of its play duration or otherwise, returns
+to its resting voltage on the next sample, part way through a cycle if need be.
 
 A fixed voltage plays like the other waveforms: it starts on the sample clock, as they do (about
 8 µs after a trigger when no channel plays), lasts its play duration in samples, and stops and
@@ -141,40 +148,45 @@ rate that its play duration is counted in.
 
 ## Levels
 
-A channel's waveform swings half its amplitude above and below its resting voltage. It outputs
-the resting voltage while it is idle, and the resting voltage is the waveform's mean. The whole
-waveform must stay within -10 V to 10 V:
+A channel's waveform swings half its amplitude above and below its mean voltage, which is the
+waveform's mean. The whole waveform must stay within -10 V to 10 V:
 
 ```
-2 * |resting voltage| + amplitude <= 20 V
+2 * |mean voltage| + amplitude <= 20 V
 ```
+
+The channel outputs its resting voltage while it is idle, anywhere within -10 V to 10 V, with
+any waveform. The ramps lead from it to the waveform and back (see [Ramps](#ramps)); without
+them, the output steps from the resting voltage to the waveform at a trigger, and back when it
+stops.
 
 A fixed voltage (waveform 4) reads the amplitude differently: the amplitude is the voltage the
-output steps to, -10 V to 10 V, and may be negative. Any resting voltage within -10 V to 10 V
-goes with it. Only a fixed voltage takes a negative amplitude.
+output steps to, -10 V to 10 V, and may be negative. The mean voltage does not apply to it. Only
+a fixed voltage takes a negative amplitude.
 
-Op 65 checks the new amplitudes against the waveforms and resting voltages the device holds, op
-86 the new resting voltages against its waveforms and amplitudes, and op 87 the new waveforms
-against its amplitudes and resting voltages. Each replies 0 if any channel would break these
-rules. So to raise an amplitude beyond what a channel's resting voltage allows, send the resting
-voltage first; and to change a waveform, send an amplitude that suits both the old waveform and
-the new one first (an amplitude of 0 goes with every waveform and resting voltage), or change
-the amplitude after the waveform. For example, from a fixed voltage of -5 V to a sine wave of
-4 V peak to peak: op 65 with 4 V, then op 87.
+Op 65 checks the new amplitudes against the waveforms and mean voltages the device holds, op 77
+the new mean voltages against its waveforms and amplitudes, and op 87 the new waveforms against
+its amplitudes and mean voltages. Each replies 0 if any channel would break these rules. So to
+raise an amplitude beyond what a channel's mean voltage allows, send the mean voltage first; and
+to change a waveform, send an amplitude that suits both the old waveform and the new one first
+(an amplitude of 0 goes with every waveform and mean voltage), or change the amplitude after the
+waveform. For example, from a fixed voltage of -5 V to a sine wave of 4 V peak to peak: op 65
+with 4 V, then op 87.
 
-Each sample is the resting voltage's DAC code plus an offset rounded half away from zero, so
-samples the same distance above and below the resting voltage are the same number of codes from
-it: when the resting voltage falls exactly on a DAC code (as 0 V does in the bipolar ranges), the
-mean of any whole number of cycles is exactly that code. A fixed voltage is rounded to its
+At full amplitude, each sample is the mean voltage's DAC code plus an offset rounded half away
+from zero, so samples the same distance above and below the mean voltage are the same number of
+codes from it: when the mean voltage falls exactly on a DAC code (as 0 V does in the bipolar
+ranges), the mean of any whole number of cycles is exactly that code. A fixed voltage is rounded to its
 nearest DAC code, as the resting voltage is. The top of a range is one DAC step above the DAC's
 highest code, so a waveform that reaches it stops one step short.
 
 ### Output ranges
 
 The DAC is an AD5754R with its internal 2.5 V reference, and each output channel has its own
-output range. The device chooses it from the channel's amplitude and resting voltage: the first
-range in this order that holds the whole waveform, which gives the finest steps. For a fixed
-voltage, the range holds both the fixed voltage and the resting voltage.
+output range. The device chooses it from the channel's levels: the first range in this order
+that holds the whole waveform and the resting voltage, which gives the finest steps (the ramps
+stay between the two). For a fixed voltage, the range holds the fixed voltage and the resting
+voltage.
 
 | Index | Range | Step |
 |---|---|---|
@@ -188,6 +200,36 @@ the channel's current sample together, so the output shows its old code in the n
 for a fraction of a microsecond. The zero code calibration that Pulse Pal firmware stores in
 EEPROM (Pulse Pal op 96) is applied in the -10 V to 10 V range, the range it was measured in.
 
+## Ramps
+
+Each channel can fade in after a trigger, and fade out when it stops. At an envelope e, from 0 to
+1, the output is the resting voltage plus e times (the waveform at full amplitude minus the
+resting voltage): the amplitude scales with e, and the waveform's mean moves in a straight line
+from the resting voltage to the mean voltage. A fixed voltage ramps in a straight line from the
+resting voltage to its voltage.
+
+- **On ramp** (op 66), N samples: the envelope rises linearly, 0, 1/N, ... (N-1)/N. The first
+  sample after the trigger is the resting voltage.
+- **Play duration** (op 68), at full amplitude. It counts from the end of the on ramp.
+- **Off ramp** (op 69), M samples: the envelope falls linearly, 1, (M-1)/M, ... 1/M, and the
+  next sample is the resting voltage. It starts at the end of the play duration, or when the
+  channel is stopped: op 88, a toggle or gated trigger edge, the menu, or a comm failure.
+
+So the ramps lengthen playback: from a trigger to the resting voltage takes the on ramp, the play
+duration and the off ramp, each rounded to whole samples as play durations are (see
+[Frequency and sampling](#frequency-and-sampling)). With a play duration of 0, the channel plays
+at full amplitude until it is stopped. A ramp of 0 (the default) means no ramp: the output steps.
+
+The envelope never jumps:
+
+- A channel stopped during its on ramp falls from the level it has reached, at the off ramp's
+  rate (taking that fraction of the off ramp).
+- A channel in its off ramp counts as stopping. A trigger (or op 80) starts it again: it rises
+  from the level it has reached, at the on ramp's rate, without starting its waveform's cycle
+  again, then plays its play duration again and its off ramp. With no on ramp, it returns to
+  full amplitude at once.
+- A change of a ramp's duration (op 66 or 69) applies to that ramp from the level it has reached.
+
 ## Triggers
 
 Each trigger channel has a trigger mode (op 84). These are Pulse Pal's trigger modes, with the
@@ -199,7 +241,9 @@ same codes. An edge on a trigger channel acts on the output channels linked to i
 | 1 | Toggle | Starts idle channels, and stops channels that are playing | Nothing |
 | 2 | Gated | Starts idle channels. Channels that are playing ignore it | Stops the channels, unless the other trigger channel is also gated, linked to them, and still high |
 
-With a play duration of 0, a channel in gated mode plays for exactly as long as the TTL is high.
+A channel in its off ramp counts as idle here: a rising edge starts it again (see
+[Ramps](#ramps)). With a play duration of 0, a channel in gated mode plays for exactly as long as
+the TTL is high, plus its off ramp.
 A soft trigger (op 80) starts idle channels, and channels that are playing ignore it, as in Pulse
 Pal firmware. Op 88 stops channels.
 
@@ -229,6 +273,6 @@ finishes.
 ## Default settings
 
 At startup and after a comm failure: 100 Hz, and on every output channel a sine wave of 5 V peak
-to peak around a resting voltage of 0 V, played for 1 second. Both trigger channels in normal
+to peak around a mean voltage of 0 V, resting at 0 V, played for 1 second, with no ramps. Both trigger channels in normal
 mode, and output channels 1-4 linked to trigger channel 1 and not to trigger channel 2. The
 Python and MATLAB classes program the same defaults when they connect.

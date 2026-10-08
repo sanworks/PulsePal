@@ -31,10 +31,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   endPlayback()
 //   fetchNextSample()
 //   handler()
+//   continueRamp()
 //   takePendingOutput()
 //   startChannels()
 //   stopChannels()
 //   isPlaying()
+//   isOutputActive()
 //   trigger1ISR(), trigger2ISR()
 //   handleTriggerLine()
 //   processTriggerEdge()
@@ -66,10 +68,27 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // them). While any channel writes, handler() takes about 7.5us of each sample period; loop() runs in the rest.
 //
 // Synthesis. Each sample is computed when it is fetched (synthesizeCode()), from the channel's waveform at its phase,
-// scaled by the amplitude around the resting voltage, in DAC codes of the channel's output range. Each channel has its
-// own output range on the DAC, the one with the finest steps that holds its whole waveform (Settings.ino). A fixed
-// voltage (WAVEFORM_FIXED_VOLTAGE) is the same code on every sample, so it is written once, as it starts: it plays like
-// the other waveforms (start, play duration, stop, triggers), on the same sample clock.
+// scaled by the amplitude around the mean voltage, in DAC codes of the channel's output range. Each channel has its
+// own output range on the DAC, the one with the finest steps that holds its whole waveform and its resting voltage
+// (Settings.ino). A fixed voltage (WAVEFORM_FIXED_VOLTAGE) is the same code on every sample, so it is written once, as it
+// starts: it plays like the other waveforms (start, ramps, play duration, stop, triggers), on the same sample clock.
+//
+// Ramps. Each sample has an envelope, 0 to 1, which fades the waveform in from the resting voltage and back to it: at
+// envelope e, the output is the resting voltage plus e times (the waveform at full amplitude minus the resting voltage).
+// So the amplitude scales with e, and the waveform's mean moves in a straight line from the resting voltage to the mean
+// voltage (for a fixed voltage, the output itself does). A playing channel is in one of three stages (rampStage[]):
+//   STAGE_ON_RAMP   onRampSamples samples after each start, with envelopes 0, 1/N, 2/N ... (N-1)/N: the first sample
+//                   is the resting voltage, and the envelope rises linearly to 1 at the end of the on ramp.
+//   STAGE_HOLD      playDurationSamples samples (or until stopped) at full amplitude.
+//   STAGE_OFF_RAMP  offRampSamples samples with envelopes 1, (M-1)/M ... 1/M, then the resting voltage, and the channel
+//                   stops. The off ramp starts when the play duration ends, or when the channel is stopped (op 88, the
+//                   menu, a toggle or gated trigger, a comm failure).
+// So the ramps lengthen playback: from a trigger to the resting voltage takes the on ramp, the play duration and the
+// off ramp. The ramps count in steps (rampPosition[]), so they are exact to the sample. A channel stopped part way
+// through its on ramp falls from the envelope it has reached, at the off ramp's rate; a channel triggered again during
+// its off ramp (which counts as stopping, as in isPlaying()) rises from the envelope it has reached, at the on ramp's
+// rate, without starting its waveform's cycle again, and plays its play duration again: the output never jumps. With no
+// ramps (0, the default), the first sample is at full amplitude and a stop fetches the resting voltage at once.
 //
 // Starting. A channel starts at phase 0 of its waveform. If the sample clock is stopped (no channel was playing), the
 // trigger computes the first samples, starts the clock from that moment, and latches them DAC_LATCH_US later, as on
@@ -78,13 +97,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // plays can start up to one sample period after its trigger. The channels share the clock, so this cannot be avoided
 // without disturbing the others.
 //
-// Stopping. When a channel's play duration has elapsed, or it is stopped (op 88, the menu, a toggle or gated trigger),
+// Stopping. When a channel's play duration has elapsed, or it is stopped, and its off ramp is over (or it has none),
 // handler() fetches its resting voltage instead of a sample, writes it on the next tick, and stops the channel
 // (stopAfterWrite). When no channel plays, handler() stops the clock.
 //
-// Changing settings. The frequency, play durations and trigger settings take effect at once, also during playback: a
-// new frequency keeps each playing channel's phase and the time it has left to play. A channel's waveform, amplitude and
-// resting voltage are handed to handler() in pendingOutput[], and it takes one channel's at a time, on a tick, after the
+// Changing settings. The frequency, play durations, ramps and trigger settings take effect at once, also during
+// playback: a new frequency keeps each playing channel's phase, the time it has left to play and its place in its
+// ramps, and new ramp durations keep the envelope a ramp has reached. A channel's waveform, amplitude, mean and resting
+// voltage are handed to handler() in pendingOutput[], and it takes one channel's at a time, on a tick, after the
 // DAC update (takePendingOutput()). If the output range changes, the DAC then needs a range write and a code write for
 // that channel, and its output shows the old code in the new range for a fraction of a microsecond, too short to see on a
 // scope (switching from +/-5V to +/-10V during playback). Settings.ino has the details.
@@ -154,18 +174,32 @@ static inline float unitWaveform(byte shape, uint32_t n) {
   }
 }
 
-// The DAC code of sample n (0 to samplesPerCycle - 1) of a channel's waveform, in the channel's output range. The
-// offset from the resting voltage's code is rounded half away from zero, so samples the same distance above and below
-// the resting voltage are the same number of codes from it: when the resting voltage falls on a DAC code (as 0V does in
-// the bipolar ranges), the waveform's mean is exactly that code. Adding the offset to the code in floating point first
-// would round values above 32768 more coarsely than those below it.
-static inline uint16_t synthesizeCode(byte channel, uint32_t n) {
+// The DAC code of sample n (0 to samplesPerCycle - 1) of a channel's waveform, at an envelope (see "Ramps" above), in
+// the channel's output range. At full amplitude (envelope 1), the offset from the mean voltage's code is rounded half
+// away from zero, so samples the same distance above and below the mean voltage are the same number of codes from it:
+// when the mean voltage falls on a DAC code (as 0V does in the bipolar ranges), the waveform's mean is exactly that
+// code. Adding the offset to the code in floating point first would round values above 32768 more coarsely than those
+// below it. In a ramp, the envelope scales the offset from the resting voltage's code instead. The multiply-adds are
+// fused (fmaf()) by name, so that they round once whatever the compiler would choose, as the hardware test's model
+// expects: the compiler fused the full amplitude one, unasked, once the ramps were added.
+static inline uint16_t synthesizeCode(byte channel, uint32_t n, float envelope) {
   const ChannelOutput &out = activeOutput[channel];
-  if (out.waveform == WAVEFORM_FIXED_VOLTAGE) { // Not periodic, and not centred on the resting voltage
-    return out.fixedCode;
+  if (envelope <= 0.0f) {
+    return out.restCode;
   }
-  float offset = out.restCodeFraction + (out.halfAmplitudeCodes * unitWaveform(out.waveform, n));
-  int32_t code = (int32_t)out.restCode + (int32_t)roundf(offset);
+  bool isFixed = (out.waveform == WAVEFORM_FIXED_VOLTAGE); // Not periodic, and not around the mean voltage
+  int32_t code;
+  if (envelope >= 1.0f) {
+    if (isFixed) {
+      return out.fixedCode;
+    }
+    float offset = fmaf(out.halfAmplitudeCodes, unitWaveform(out.waveform, n), out.meanCodeFraction);
+    code = (int32_t)out.meanCode + (int32_t)roundf(offset);
+  } else {
+    float target = isFixed ? out.rampOffsetCodes
+                           : fmaf(out.halfAmplitudeCodes, unitWaveform(out.waveform, n), out.rampOffsetCodes);
+    code = (int32_t)out.restCode + (int32_t)roundf(fmaf(target, envelope, out.restCodeFraction));
+  }
   if (code < 0) {
     return 0;
   }
@@ -187,14 +221,41 @@ static inline void endPlayback(byte channel) {
   stopAfterWrite[channel] = true;
 }
 
-// Fetches the next sample of a playing channel into dacValue[], for the next tick. Called from the playback
-// interrupts, or from loop() with interrupts disabled.
+// Fetches the next sample of a playing channel into dacValue[], for the next tick, and moves the channel on through its
+// ramps and play duration (see "Ramps" above). Called from the playback interrupts, or from loop() with interrupts
+// disabled.
 static inline void fetchNextSample(byte channel) {
-  if (playDurationSamples[channel] && (samplesPlayed[channel] >= playDurationSamples[channel])) {
-    endPlayback(channel); // The play duration has elapsed
-    return;
+  float envelope = 1.0f;
+  switch (rampStage[channel]) {
+    case STAGE_ON_RAMP: {
+      uint32_t position = rampPosition[channel];
+      if (position < onRampSamples[channel]) {
+        envelope = (float)position * onRampReciprocal[channel];
+        rampPosition[channel] = position + 1;
+        break;
+      }
+      rampStage[channel] = STAGE_HOLD; // The on ramp is over (or there is none)
+    } // Fall through
+    case STAGE_HOLD: {
+      if (!playDurationSamples[channel] || (holdSamples[channel] < playDurationSamples[channel])) {
+        holdSamples[channel]++;
+        break;
+      }
+      rampStage[channel] = STAGE_OFF_RAMP; // The play duration has elapsed: the off ramp starts from full amplitude
+      rampPosition[channel] = offRampSamples[channel];
+    } // Fall through
+    default: { // STAGE_OFF_RAMP
+      uint32_t position = rampPosition[channel];
+      if (position == 0) {
+        endPlayback(channel); // The off ramp is over (or there is none)
+        return;
+      }
+      envelope = (position >= offRampSamples[channel]) ? 1.0f : ((float)position * offRampReciprocal[channel]);
+      rampPosition[channel] = position - 1;
+    } break;
   }
-  uint16_t code = synthesizeCode(channel, phase[channel]);
+  uint16_t code = synthesizeCode(channel, phase[channel], envelope);
+  fetchedEnvelope[channel] = envelope;
   setNextCode(channel, code);
   sampleSum[channel] += code;
   samplesPlayed[channel]++;
@@ -244,6 +305,20 @@ void handler() {
   }
 }
 
+// Places a playing channel's next sample one step of its ramp on from the envelope of the sample it fetched last, in the
+// ramp it is in (rampStage[]): so a channel that starts again in its off ramp, stops in its on ramp, or whose ramp
+// lengths change keeps the envelope it has reached, and goes on at its ramp's rate (see "Ramps" above). The step is
+// rounded: a jump of at most half a step. Interrupt context, or loop() with interrupts disabled.
+static inline void continueRamp(byte channel) {
+  float envelope = fetchedEnvelope[channel];
+  if (rampStage[channel] == STAGE_ON_RAMP) { // Rising from the fetched sample (with no on ramp, to full amplitude)
+    rampPosition[channel] = (uint32_t)(((double)envelope * onRampSamples[channel]) + 0.5) + 1;
+  } else if (rampStage[channel] == STAGE_OFF_RAMP) { // Falling from it (with no off ramp, to the resting voltage)
+    uint32_t steps = (uint32_t)(((double)envelope * offRampSamples[channel]) + 0.5);
+    rampPosition[channel] = (steps > 0) ? (steps - 1) : 0;
+  }
+}
+
 // Takes a channel's new output settings from pendingOutput[] (see updateChannelOutput() in Settings.ino), and puts its
 // output at the new settings at once: the resting voltage if it is idle, or the sample on its output now if it plays.
 // A change of output range is written to the DAC between the code and the latch (dacSwitchRange()). A playing channel
@@ -256,11 +331,11 @@ void takePendingOutput(byte channel) {
   activeOutput[channel] = pendingOutput[channel];
   // The zero code calibration was measured in the -10V to 10V range, so it is only applied there
   activeCalibration[channel] = (activeOutput[channel].range == RANGE_PLUS_MINUS_10V) ? ZeroCodeCalibration[channel] : 0;
-  boolean channelPlays = isPlaying(channel);
+  boolean channelPlays = isOutputActive(channel);
   uint16_t code = activeOutput[channel].restCode;
   if (channelPlays) {
     uint32_t current = (phase[channel] == 0) ? (samplesPerCycle - 1) : (phase[channel] - 1); // The sample latched last
-    code = synthesizeCode(channel, current);
+    code = synthesizeCode(channel, current, fetchedEnvelope[channel]);
   }
   if (activeOutput[channel].range != oldRange) {
     dacSwitchRange(channel, code);
@@ -269,13 +344,20 @@ void takePendingOutput(byte channel) {
   }
 }
 
-// Starts the selected channels (one bit per channel) from phase 0 of their waveforms. Channels that are playing are
-// left alone. Interrupt context, or loop() with interrupts disabled.
+// Starts the selected channels (one bit per channel) from phase 0 of their waveforms, at the start of their on ramps.
+// Channels that are playing are left alone. A channel in its off ramp rises again from the envelope it has reached,
+// where its waveform is (see "Ramps" above). Interrupt context, or loop() with interrupts disabled.
 void startChannels(byte channelBits) {
   byte toStart = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(channelBits, i) && !isPlaying(i)) {
-      bitSet(toStart, i);
+      if (isOutputActive(i)) { // In its off ramp
+        rampStage[i] = STAGE_ON_RAMP;
+        continueRamp(i);
+        holdSamples[i] = 0; // The play duration starts again
+      } else {
+        bitSet(toStart, i);
+      }
     }
   }
   if (!toStart) {
@@ -284,6 +366,9 @@ void startChannels(byte channelBits) {
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(toStart, i)) {
       phase[i] = 0;
+      rampStage[i] = STAGE_ON_RAMP;
+      rampPosition[i] = 0;
+      holdSamples[i] = 0;
       samplesPlayed[i] = 0;
       sampleSum[i] = 0;
       stopAfterWrite[i] = false;
@@ -308,23 +393,35 @@ void startChannels(byte channelBits) {
   }
 }
 
-// Stops the selected channels (one bit per channel). Their outputs return to their resting voltages on the next tick.
+// Stops the selected channels (one bit per channel). A channel with an off ramp starts it, from the envelope of the
+// sample fetched for the next tick (see "Ramps" above). One without returns to its resting voltage on the next tick.
 // Interrupt context, or loop() with interrupts disabled.
 void stopChannels(byte channelBits) {
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(channelBits, i) && isPlaying(i)) {
-      // The resting voltage replaces the sample fetched for the next tick, so that sample is never played: take it
-      // out of the counts that op 90 reports. (A channel that ends at its play duration fetches no extra sample.)
-      samplesPlayed[i]--;
-      sampleSum[i] -= dacValue[i];
-      endPlayback(i);
+      if (offRampSamples[i]) { // The sample fetched for the next tick plays, and the off ramp goes on from it
+        rampStage[i] = STAGE_OFF_RAMP;
+        continueRamp(i);
+      } else {
+        // The resting voltage replaces the sample fetched for the next tick, so that sample is never played: take it
+        // out of the counts that op 90 reports. (A channel that ends at its play duration fetches no extra sample.)
+        samplesPlayed[i]--;
+        sampleSum[i] -= dacValue[i];
+        endPlayback(i);
+      }
     }
   }
 }
 
-// True if a channel is playing. A channel that has stopped and is waiting for its resting voltage to be written counts
-// as stopped, so that a trigger can start it again at once.
+// True if a channel is playing: in its on ramp, or at full amplitude. A channel in its off ramp, or that has stopped and
+// is waiting for its resting voltage to be written, counts as stopping, so that a trigger can start it again at once.
 boolean isPlaying(byte channel) {
+  return playing[channel] && !stopAfterWrite[channel] && (rampStage[channel] != STAGE_OFF_RAMP);
+}
+
+// True if a channel's output is not at its resting voltage, or will not be after the next tick: it is playing, or in
+// its off ramp. Op 71 reports these channels as playing.
+boolean isOutputActive(byte channel) {
   return playing[channel] && !stopAfterWrite[channel];
 }
 

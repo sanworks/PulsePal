@@ -1,16 +1,19 @@
 % SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four
 % channel waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
 % fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with play(), or from the thumb
-% joystick. Each channel has its own waveform, amplitude, resting voltage and play duration, and one frequency, 1 Hz
-% to 20 kHz in steps of 0.01 Hz, applies to all four.
+% joystick. Each channel has its own waveform, amplitude, mean voltage, resting voltage, play duration, and on and off
+% ramps, and one frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four.
 %
 % Example:
 %   S = SynthPalDevice('COM3');        % Replace COM3 with the device's port. serialportlist lists them.
 %   S.frequency = 440;                 % Hz, all channels
 %   S.waveform{1} = 'Triangle';
 %   S.amplitude(1) = 4;                % Volts peak to peak
-%   S.restingVoltage(1) = 1;           % The waveform swings 2 V above and below 1 V
+%   S.meanVoltage(1) = 1;              % The waveform swings 2 V above and below 1 V
+%   S.restingVoltage(1) = -1;          % The output between playbacks
 %   S.playDuration(1) = 0.5;           % Seconds. 0 plays until stopped.
+%   S.onRampDuration(1) = 0.01;        % Seconds to fade in from the resting voltage. 0 for no ramp.
+%   S.offRampDuration(1) = 0.02;       % Seconds to fade back to it
 %   S.play(1);
 %   S.triggerMode{2} = 'Gated';        % Trigger channel 2
 %   clear S                            % Releases the port. The device keeps playing, and TTL triggers still work.
@@ -20,11 +23,20 @@
 % with one element per trigger channel. A single value sets all channels, e.g. S.waveform = 'Square'. Voltages are in
 % volts, times in seconds, and the frequency in Hz.
 %
-% Levels. A channel's waveform swings amplitude/2 above and below its restingVoltage, which the channel outputs while
-% idle, and which is the waveform's mean. It must stay within -10 V to 10 V: abs(restingVoltage) + amplitude/2 <= 10.
-% To raise an amplitude beyond what the resting voltage allows, change the resting voltage first. A 'Fixed Voltage'
-% channel's amplitude is instead the voltage it steps to, -10 V to 10 V, with any resting voltage. The device picks
-% each channel's output range for the finest voltage steps: see status().
+% Levels. A channel's waveform swings amplitude/2 above and below its meanVoltage. It must stay within -10 V to 10 V:
+% abs(meanVoltage) + amplitude/2 <= 10. To raise an amplitude beyond what the mean voltage allows, change the mean
+% voltage first. A 'Fixed Voltage' channel's amplitude is instead the voltage it steps to, -10 V to 10 V, and the mean
+% voltage does not apply to it. Between playbacks, a channel outputs its restingVoltage, which may be anywhere within
+% -10 V to 10 V. The device picks each channel's output range for the finest voltage steps: see status().
+%
+% Ramps. After each trigger, a channel's on ramp (onRampDuration) fades its waveform in from the resting voltage: its
+% amplitude rises linearly from 0 to its full amplitude, and its mean from the resting voltage to the mean voltage (a
+% fixed voltage ramps from the resting voltage to its voltage). The play duration follows at full amplitude, then the
+% off ramp (offRampDuration) fades back to the resting voltage. The off ramp also follows a stop: stop(), a toggle or
+% gated trigger, or the joystick. So the ramps lengthen playback: from a trigger to rest takes onRampDuration +
+% playDuration + offRampDuration. During its off ramp a channel counts as stopping: a trigger fades it in again from
+% where it is, without restarting its waveform's cycle, and plays its play duration again. A channel stopped during its
+% on ramp fades out from where it is, at the off ramp's rate. The output never jumps.
 %
 % Waveforms start at the trigger: 'Sine' and 'Triangle' at the resting voltage, rising; 'Square' high for the first
 % half of each cycle; 'Sawtooth' rising from its lowest voltage to its highest, and falling back at the cycle's end.
@@ -86,10 +98,13 @@ classdef SynthPalDevice < handle
                                                     % in progress.
         amplitude = [5 5 5 5] % 1x4, in volts: peak to peak, 0 to 20, or on a 'Fixed Voltage' channel the voltage it
                               % steps to, -10 to 10. See "Levels" above.
-        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle, and a periodic
-                                   % waveform's mean. See "Levels" above.
-        playDuration = [1 1 1 1] % 1x4, in seconds: how long the channel plays after a trigger, up to
-                                 % info.maxPlayDuration. 0 plays until stopped. Counted in samples.
+        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle. See "Levels" above.
+        meanVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. A periodic waveform's mean. See "Levels" above.
+        playDuration = [1 1 1 1] % 1x4, in seconds: how long the channel plays at full amplitude after its on ramp, up
+                                 % to info.maxPlayDuration. 0 plays until stopped. Counted in samples.
+        onRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades in after a trigger, up to
+                                   % info.maxPlayDuration. 0 for no ramp. See "Ramps" above.
+        offRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades out when it stops. 0 for no ramp.
         triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle' or 'Gated'.
                                            % See "Triggers" above. Not case sensitive.
         linkTriggerChannel1 = true(1,4) % 1x4. true if trigger channel 1 triggers the output channel
@@ -122,7 +137,10 @@ classdef SynthPalDevice < handle
         OpSetWaveform = 'W'
         OpSetAmplitude = 'A'
         OpSetRestingVoltage = 'V'
+        OpSetMeanVoltage = 'M'
         OpSetPlayDuration = 'D'
+        OpSetOnRampDuration = 'B'
+        OpSetOffRampDuration = 'E'
         OpSetTriggerLinks = 'I'
         OpSetTriggerMode = 'T'
         OpPlay = 'P'
@@ -201,16 +219,20 @@ classdef SynthPalDevice < handle
 
         function setDefaults(obj)
             % Programs the default settings on the device: a frequency of 100 Hz, and on every output channel a
-            % sine wave of 5 V peak to peak around a resting voltage of 0 V, played for 1 second. Both trigger
-            % channels in 'Normal' mode, and all output channels linked to trigger channel 1 and not to trigger
-            % channel 2. They match the settings the device starts with.
+            % sine wave of 5 V peak to peak around a mean voltage of 0 V, resting at 0 V, played for 1 second with no
+            % ramps. Both trigger channels in 'Normal' mode, and all output channels linked to trigger channel 1 and
+            % not to trigger channel 2. They match the settings the device starts with.
             obj.frequency = 100;
-            % In this order, each is valid whatever the device holds: 0 V rests with any waveform and amplitude, 5 V
-            % is then a valid amplitude for any waveform, and a sine wave is then valid
+            % In this order, each is valid whatever the device holds: a resting voltage goes with any waveform, a
+            % mean of 0 V with any amplitude, 5 V is then a valid amplitude for any waveform, and a sine wave is
+            % then valid
             obj.restingVoltage = 0;
+            obj.meanVoltage = 0;
             obj.amplitude = 5;
             obj.waveform = 'Sine';
             obj.playDuration = 1;
+            obj.onRampDuration = 0;
+            obj.offRampDuration = 0;
             obj.triggerMode = 'Normal';
             obj.linkTriggerChannel1 = true;
             obj.linkTriggerChannel2 = false;
@@ -235,11 +257,12 @@ classdef SynthPalDevice < handle
 
         function deviceStatus = status(obj)
             % Returns the device's playback state, as a struct with fields:
-            % playing: numbers of the output channels that are playing, e.g. [1 3]
+            % playing: numbers of the output channels that are playing, e.g. [1 3]. A channel in its off ramp counts
+            %          as playing until it reaches its resting voltage.
             % samplesPerCycle: samples in one cycle of the waveform
             % outputRanges: 1x4 cell array, the output range the device chose for each channel: the one with the
-            %               finest steps that holds its waveform: '0V:5V' (76 uV steps), then '0V:10V' or '-5V:5V'
-            %               (153 uV), then '-10V:10V' (305 uV)
+            %               finest steps that holds its waveform and its resting voltage: '0V:5V' (76 uV steps), then
+            %               '0V:10V' or '-5V:5V' (153 uV), then '-10V:10V' (305 uV)
             % longestInterrupt_us: longest run of the device's sample clock interrupt since the previous call to
             %                      status(), in microseconds. It must stay below the sample period.
             % lateUpdates: output updates since the previous call to status() that may have come later than their
@@ -300,7 +323,7 @@ classdef SynthPalDevice < handle
         function set.waveform(obj, names)
             codes = obj.namesToCodes(names, obj.WaveformNames, 4, 'waveform', 'output channel');
             obj.checkLevels(obj.WaveformNames(codes+1), obj.roundHalfEven(obj.amplitude*1e6),... %#ok<MCSUP>
-                            obj.roundHalfEven(obj.restingVoltage*1e6), 'waveform'); %#ok<MCSUP>
+                            obj.roundHalfEven(obj.meanVoltage*1e6), 'waveform'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetWaveform, uint8(codes));
                 obj.confirmWrite('setting waveform');
@@ -313,7 +336,7 @@ classdef SynthPalDevice < handle
             volts = obj.checkVolts(volts, 'amplitude', -10, 20,...
                                    ' (0 to 20 peak to peak, or -10 to 10 on a Fixed Voltage channel)');
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(obj.waveform, microvolts, obj.roundHalfEven(obj.restingVoltage*1e6), 'amplitude'); %#ok<MCSUP>
+            obj.checkLevels(obj.waveform, microvolts, obj.roundHalfEven(obj.meanVoltage*1e6), 'amplitude'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetAmplitude, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting amplitude');
@@ -322,9 +345,8 @@ classdef SynthPalDevice < handle
         end
 
         function set.restingVoltage(obj, volts)
-            volts = obj.checkVolts(volts, 'restingVoltage', -10, 10);
+            volts = obj.checkVolts(volts, 'restingVoltage', -10, 10); % Any resting voltage goes with any waveform
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(obj.waveform, obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'restingVoltage'); %#ok<MCSUP>
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting restingVoltage');
@@ -332,23 +354,42 @@ classdef SynthPalDevice < handle
             obj.restingVoltage = volts;
         end
 
+        function set.meanVoltage(obj, volts)
+            volts = obj.checkVolts(volts, 'meanVoltage', -10, 10);
+            microvolts = obj.roundHalfEven(volts*1e6);
+            obj.checkLevels(obj.waveform, obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'meanVoltage'); %#ok<MCSUP>
+            if obj.initialized %#ok<MCSUP>
+                obj.writeCommand(obj.OpSetMeanVoltage, typecast(int32(microvolts), 'uint8'));
+                obj.confirmWrite('setting meanVoltage');
+            end
+            obj.meanVoltage = volts;
+        end
+
         function set.playDuration(obj, seconds)
-            seconds = obj.expandToChannels(seconds, 'playDuration');
-            maxDuration = 3600;
-            if isstruct(obj.info) %#ok<MCSUP>
-                maxDuration = obj.info.maxPlayDuration; %#ok<MCSUP>
-            end
-            if ~isnumeric(seconds) || ~isreal(seconds) || any(~isfinite(seconds)) || any(seconds < 0) || ...
-                    any(seconds > maxDuration)
-                error(['playDuration must be 0 (play until stopped) or a positive number of seconds up to '...
-                       num2str(maxDuration) '.'])
-            end
-            seconds = double(seconds);
+            seconds = obj.checkDurations(seconds, 'playDuration', '0 (play until stopped)');
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetPlayDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting playDuration');
             end
             obj.playDuration = seconds;
+        end
+
+        function set.onRampDuration(obj, seconds)
+            seconds = obj.checkDurations(seconds, 'onRampDuration', '0 (no ramp)');
+            if obj.initialized %#ok<MCSUP>
+                obj.writeCommand(obj.OpSetOnRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
+                obj.confirmWrite('setting onRampDuration');
+            end
+            obj.onRampDuration = seconds;
+        end
+
+        function set.offRampDuration(obj, seconds)
+            seconds = obj.checkDurations(seconds, 'offRampDuration', '0 (no ramp)');
+            if obj.initialized %#ok<MCSUP>
+                obj.writeCommand(obj.OpSetOffRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
+                obj.confirmWrite('setting offRampDuration');
+            end
+            obj.offRampDuration = seconds;
         end
 
         function set.triggerMode(obj, modes)
@@ -457,7 +498,21 @@ classdef SynthPalDevice < handle
             obj.confirmWrite('setting the trigger channel links');
         end
 
-        function checkLevels(obj, waveforms, amplitudes_uV, restingVoltages_uV, setting)
+        function seconds = checkDurations(obj, seconds, name, zeroMeaning)
+            % Checks a duration for each output channel: 0 to info.maxPlayDuration seconds
+            seconds = obj.expandToChannels(seconds, name);
+            maxDuration = 3600;
+            if isstruct(obj.info)
+                maxDuration = obj.info.maxPlayDuration;
+            end
+            if ~isnumeric(seconds) || ~isreal(seconds) || any(~isfinite(seconds)) || any(seconds < 0) || ...
+                    any(seconds > maxDuration)
+                error([name ' must be ' zeroMeaning ' or a positive number of seconds up to ' num2str(maxDuration) '.'])
+            end
+            seconds = double(seconds);
+        end
+
+        function checkLevels(obj, waveforms, amplitudes_uV, meanVoltages_uV, setting)
             % Checks that each channel's levels suit its waveform, and keep its output within -10 V to 10 V, as the
             % device does. setting is the one being changed, for the advice in the message.
             advice = '';
@@ -474,18 +529,18 @@ classdef SynthPalDevice < handle
                     error(['On channel ' num2str(i) ', an amplitude of ' num2str(amplitudes_uV(i)/1e6) ' V is '...
                            'negative, which only a Fixed Voltage can be: a ' waveforms{i} ' wave''s amplitude is '...
                            'peak to peak, 0 to 20 V.' advice])
-                elseif 2*abs(restingVoltages_uV(i)) + amplitudes_uV(i) > 2*obj.MaxVoltage_uV
+                elseif 2*abs(meanVoltages_uV(i)) + amplitudes_uV(i) > 2*obj.MaxVoltage_uV
                     switch setting
                         case 'amplitude'
-                            advice = ' Change restingVoltage first, or choose a smaller amplitude.';
-                        case 'restingVoltage'
-                            advice = ' Change amplitude first, or choose a smaller restingVoltage.';
+                            advice = ' Change meanVoltage first, or choose a smaller amplitude.';
+                        case 'meanVoltage'
+                            advice = ' Change amplitude first, or choose a smaller meanVoltage.';
                         otherwise
-                            advice = ' Change amplitude or restingVoltage first.';
+                            advice = ' Change amplitude or meanVoltage first.';
                     end
-                    error(['On channel ' num2str(i) ', a resting voltage of ' num2str(restingVoltages_uV(i)/1e6)...
+                    error(['On channel ' num2str(i) ', a mean voltage of ' num2str(meanVoltages_uV(i)/1e6)...
                            ' V and an amplitude of ' num2str(amplitudes_uV(i)/1e6) ' V peak to peak would reach '...
-                           num2str((abs(restingVoltages_uV(i)) + amplitudes_uV(i)/2)/1e6) ' V. The waveform must '...
+                           num2str((abs(meanVoltages_uV(i)) + amplitudes_uV(i)/2)/1e6) ' V. The waveform must '...
                            'stay within -10 V to 10 V.' advice])
                 end
             end

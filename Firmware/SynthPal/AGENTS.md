@@ -2,10 +2,10 @@
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware (Teensy 4.1): a four channel waveform
 synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
-fixed voltage, with its own amplitude, resting voltage and play duration, when a TTL edge, a USB
-command or the joystick menu triggers it. One frequency, 1 Hz to 20 kHz in steps of 0.01 Hz,
-applies to all four. The USB protocol is in `PROTOCOL.md` in this folder. Read this page before
-changing anything here.
+fixed voltage, with its own amplitude, mean voltage, resting voltage, play duration, and linear
+on and off ramps, when a TTL edge, a USB command or the joystick menu triggers it. One
+frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four. The USB protocol is in
+`PROTOCOL.md` in this folder. Read this page before changing anything here.
 
 ## Where things are
 
@@ -101,16 +101,23 @@ joystick button line as the DAC's SYNC output. Synth Pal needs no microSD card.
 | Trigger channels | `trigger1ISR()`, `trigger2ISR()` | Every edge on the trigger inputs |
 
 They call `startChannels()`, `stopChannels()`, `processTriggerEdge()`,
-`releaseGatedChannels()`, `takePendingOutput()`, `fetchNextSample()`, `startSampleClock()`,
-`stopSampleClock()` and the DAC functions. Shared with `loop()`: the playback state
-(`playing`, `stopAfterWrite`, `phase`, `samplesPlayed`, ...), the sample clock variables,
-`activeOutput`, `pendingOutput`, `pendingOutputChannels`, `playDurationSamples`, the trigger
-settings (`TriggerMode`, `TriggerAddress`) and the DAC state.
+`releaseGatedChannels()`, `takePendingOutput()`, `fetchNextSample()`, `continueRamp()`,
+`startSampleClock()`, `stopSampleClock()` and the DAC functions. Shared with `loop()`: the
+playback state (`playing`, `stopAfterWrite`, `phase`, `rampStage`, `rampPosition`,
+`holdSamples`, `fetchedEnvelope`, `samplesPlayed`, ...), the sample clock variables,
+`activeOutput`, `pendingOutput`, `pendingOutputChannels`, `playDurationSamples`, the ramp
+lengths (`onRampSamples`, `offRampSamples` and their reciprocals), the trigger settings
+(`TriggerMode`, `TriggerAddress`) and the DAC state.
+
+A channel in its off ramp is `playing` but not `isPlaying()`: a trigger starts it again, as if
+it had stopped, and `isOutputActive()` (op 71's playing bits, the settings that rescale a
+playing channel) still counts it. "Ramps" in `Playback.ino` explains the stages and why the
+envelope never jumps.
 
 Measured on a Pulse Pal 3 (op 71): `handler()` takes up to 7.5 µs of each 10 µs sample period
 while any channel's code changes, mostly waiting for the fixed update time, and 0 late updates
-in 10 s of four channels playing sine waves at 100 kHz. `loop()` gets the rest, so the menu and
-USB replies are slower during playback than when idle.
+in 10 s of four channels playing sine waves at 100 kHz, 4 s of it in their ramps (7.07 µs).
+`loop()` gets the rest, so the menu and USB replies are slower during playback than when idle.
 
 ## Checks
 
@@ -127,12 +134,16 @@ cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3
 ```
 
 It checks every sample played against a model of the firmware's synthesis, which computes each
-DAC code as `synthesizeCode()` does, in single precision (`expected_cycle()`): every waveform at
+DAC code as `synthesizeCode()` does, in single precision (`ChannelModel`): every waveform at
 4, 32 and 12868 samples per cycle, each output range, fixed voltages and their ranges, means
-exactly at the resting voltage, play durations exact to the sample, frequency and setting
-changes during playback, a channel joining a running clock, the firmware's own checks of the
-levels (with commands sent past the class's checks), and the timing budget with four channels.
-A change to the synthesis must change the model too.
+exactly at the mean voltage, whatever the resting voltage, play durations exact to the sample,
+every code of the on and off ramps, a stop at full amplitude, a trigger during the off ramp,
+frequency and setting changes during playback, a channel joining a running clock, the
+firmware's own checks of the levels (with commands sent past the class's checks), and the
+timing budget with four channels in their ramps. A change to the synthesis must change the
+model too. `synthesizeCode()`'s multiply-adds are explicit `fmaf()` calls, so that each rounds
+once whatever the compiler would do: it fused the full amplitude one by itself when the ramps
+were added, and the model went one code wrong in a few samples.
 
 The MATLAB class has its own test (about 15 s, verified with R2025a):
 
@@ -146,8 +157,12 @@ A change to the protocol needs both classes, `/Python/PulsePal/SynthPal.py` and
 Only a scope, a TTL source and a person can check the rest. After a change to playback,
 triggers or the menu, check:
 
-- Each waveform on a scope, with levels in each output range: shape, frequency, amplitude, and
-  the resting voltage between playbacks. A square wave's edges should be within a few tens of ns
+- Each waveform on a scope, with levels in each output range: shape, frequency, amplitude, mean
+  voltage, and the resting voltage between playbacks.
+- Ramps on a scope: the amplitude and the mean rise and fall in straight lines over the on and
+  off ramps, a fixed voltage ramps in a straight line, a gated channel ramps off from the falling
+  edge, and a channel triggered during its off ramp (or stopped during its on ramp) turns back
+  without a jump. A square wave's edges should be within a few tens of ns
   of evenly spaced, also at frequencies whose sample period is not a whole number of timer ticks
   (300 Hz, 333.33 Hz).
 - Trigger latency: from a TTL edge to the first sample, with all channels idle (about 8 µs), and
@@ -158,12 +173,14 @@ triggers or the menu, check:
 - The joystick menu: edit each setting of an output channel, the frequency and the trigger mode;
   play and stop a channel from its menu and see the item change back when its play duration
   ends; trigger a trigger channel; screen saver, device info, reset and exit. The splash screen
-  shows the Synth Pal logo. The waveform list reads downwards, Sine at the top: down moves to
-  Triangle, and on to Fixed Voltage (the other lists, as in Pulse Pal firmware, move to their
-  next item with up). With "Fixed Voltage": the amplitude shows in V (not Vpp) and edits
-  from -10.00 to +10.00 V, the resting voltage edits over the whole -10 V to 10 V, and switching
-  the waveform to and from it takes the nearest amplitude that suits the new waveform
-  (`fitAmplitude()`: a fixed voltage of -5 V becomes 5 Vpp; 20 Vpp becomes 10 V).
+  shows the Synth Pal logo. Mean Voltage follows Resting Voltage, and On Ramp and Off Ramp
+  follow Play Duration; a ramp of 0 shows "None". The mean voltage edits within what the
+  amplitude allows, and the resting voltage over the whole -10 V to 10 V. The waveform list
+  reads downwards, Sine at the top: down moves to Triangle, and on to Fixed Voltage (the other
+  lists, as in Pulse Pal firmware, move to their next item with up). With "Fixed Voltage": the
+  amplitude shows in V (not Vpp) and edits from -10.00 to +10.00 V, and switching the waveform
+  to and from it takes the nearest amplitude that suits the new waveform (`fitAmplitude()`: a
+  fixed voltage of -5 V becomes 5 Vpp; 20 Vpp becomes 10 V).
 - After a power cycle (unplug the USB cable, plug it back in), all four outputs play. Flashing
   the device does not reset the DAC, so a test right after flashing over other firmware cannot
   catch a fault in `setup()` (rule 4).

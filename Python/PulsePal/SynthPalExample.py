@@ -39,19 +39,27 @@ print(f"Synth Pal firmware v{S.info.firmware_version}")
 S.frequency = 440
 print(f"{S.samples_per_cycle} samples per cycle at {S.sampling_rate:.0f} Hz")
 
-# Each output channel has its own waveform, amplitude (peak to peak) and
-# resting voltage (the voltage between playbacks, and the waveform's mean).
-# Channel settings are lists indexed by channel number (index 0 is unused),
-# and setting an element programs the device at once.
+# Each output channel has its own waveform, amplitude (peak to peak), mean
+# voltage (the waveform's mean) and resting voltage (the voltage between
+# playbacks). Channel settings are lists indexed by channel number (index 0
+# is unused), and setting an element programs the device at once.
 S.waveform = ["Sine", "Triangle", "Square", "Sawtooth"]
 S.amplitude[1] = 4           # Swings from -2 V to 2 V
-S.resting_voltage[2] = 2.5   # Swings from 0 V to 5 V around 2.5 V
+S.mean_voltage[2] = 2.5      # Swings from 0 V to 5 V around 2.5 V...
 S.amplitude[2] = 5
+S.resting_voltage[2] = -1    # ...and rests at -1 V between playbacks
 
 # The waveform must stay within -10 V to 10 V. To raise an amplitude beyond
-# what the resting voltage allows, change the resting voltage first.
-S.resting_voltage[3] = 0
+# what the mean voltage allows, change the mean voltage first.
+S.mean_voltage[3] = 0
 S.amplitude[3] = 20          # -10 V to 10 V
+
+# Ramps fade a channel in from its resting voltage after each trigger, and
+# back to it when it stops: the amplitude rises from 0, and the mean from
+# the resting voltage to the mean voltage, in straight lines. They lengthen
+# playback: channel 2 now plays for 0.1 + 1 + 0.2 seconds.
+S.on_ramp_duration[2] = 0.1  # Seconds
+S.off_ramp_duration[2] = 0.2
 
 # A "Fixed Voltage" channel steps to its amplitude for its play duration,
 # then returns to its resting voltage. Its amplitude is then a voltage,

@@ -118,7 +118,8 @@ void processUSBCommands() {
       // is no amplitude for a sine wave)
       bool valid = allAtMost(newWaveforms, N_CHANNELS, MAX_WAVEFORM);
       for (byte i = 0; i < N_CHANNELS; i++) {
-        valid = valid && isValidOutputLevel(newWaveforms[i], restingVoltageMicrovolts[i], amplitudeMicrovolts[i]);
+        valid = valid && isValidOutputLevel(newWaveforms[i], restingVoltageMicrovolts[i], meanVoltageMicrovolts[i],
+                                            amplitudeMicrovolts[i]);
       }
       if (!valid) {
         PPUSB.writeByte(0);
@@ -139,7 +140,8 @@ void processUSBCommands() {
                                                                     // fixed voltage can be negative.
       bool valid = true;
       for (byte i = 0; i < N_CHANNELS; i++) {
-        valid = valid && isValidOutputLevel(waveform[i], restingVoltageMicrovolts[i], newAmplitudes[i]);
+        valid = valid && isValidOutputLevel(waveform[i], restingVoltageMicrovolts[i], meanVoltageMicrovolts[i],
+                                            newAmplitudes[i]);
       }
       if (!valid) {
         PPUSB.writeByte(0);
@@ -159,7 +161,7 @@ void processUSBCommands() {
       PPUSB.readUint32Array((uint32_t*)newVoltages, N_CHANNELS); // Two's complement, so the bytes are the same
       bool valid = true;
       for (byte i = 0; i < N_CHANNELS; i++) {
-        valid = valid && isValidOutputLevel(waveform[i], newVoltages[i], amplitudeMicrovolts[i]);
+        valid = valid && isValidOutputLevel(waveform[i], newVoltages[i], meanVoltageMicrovolts[i], amplitudeMicrovolts[i]);
       }
       if (!valid) {
         PPUSB.writeByte(0);
@@ -168,6 +170,26 @@ void processUSBCommands() {
       for (byte i = 0; i < N_CHANNELS; i++) {
         if (newVoltages[i] != restingVoltageMicrovolts[i]) {
           restingVoltageMicrovolts[i] = newVoltages[i];
+          updateChannelOutput(i);
+        }
+      }
+      PPUSB.writeByte(1);
+    } break;
+
+    case OP_SET_MEAN_VOLTAGE: { // Op 77 ('M'). One int32 per output channel, in microvolts.
+      int32_t newVoltages[N_CHANNELS];
+      PPUSB.readUint32Array((uint32_t*)newVoltages, N_CHANNELS); // Two's complement, so the bytes are the same
+      bool valid = true;
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        valid = valid && isValidOutputLevel(waveform[i], restingVoltageMicrovolts[i], newVoltages[i], amplitudeMicrovolts[i]);
+      }
+      if (!valid) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        if (newVoltages[i] != meanVoltageMicrovolts[i]) {
+          meanVoltageMicrovolts[i] = newVoltages[i];
           updateChannelOutput(i);
         }
       }
@@ -186,6 +208,26 @@ void processUSBCommands() {
         break;
       }
       setPlayDurations(newDurations);
+      PPUSB.writeByte(1);
+    } break;
+
+    case OP_SET_ON_RAMP_DURATION: // Op 66 ('B'). One uint32 per output channel, in microseconds. 0 = no ramp.
+    case OP_SET_OFF_RAMP_DURATION: { // Op 69 ('E'). The same.
+      uint32_t newDurations[N_CHANNELS];
+      PPUSB.readUint32Array(newDurations, N_CHANNELS);
+      bool valid = true;
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        valid = valid && (newDurations[i] <= MAX_PLAY_DURATION_MICROS);
+      }
+      if (!valid) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      if (CommandByte == OP_SET_ON_RAMP_DURATION) {
+        setRampDurations(newDurations, offRampMicros);
+      } else {
+        setRampDurations(onRampMicros, newDurations);
+      }
       PPUSB.writeByte(1);
     } break;
 
@@ -238,7 +280,7 @@ void processUSBCommands() {
       byte ranges[N_CHANNELS];
       noInterrupts();
       for (byte i = 0; i < N_CHANNELS; i++) {
-        if (isPlaying(i)) {
+        if (isOutputActive(i)) {
           bitSet(playingBits, i);
         }
         ranges[i] = activeOutput[i].range;

@@ -22,9 +22,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // SYNTH PAL FIRMWARE for Pulse Pal 3 hardware
 //
 // Synth Pal turns a Pulse Pal 3 into a four channel waveform synthesizer. Each output channel plays a sine, triangle,
-// square or sawtooth wave, with its own amplitude (peak to peak), resting voltage (the voltage between playbacks, and the
-// waveform's mean) and play duration, when it is triggered: by a TTL edge on a trigger channel, by a command from the PC,
-// or from the thumb joystick menu. A channel can instead play a fixed voltage, its amplitude, for its play duration.
+// square or sawtooth wave, with its own amplitude (peak to peak), mean voltage, resting voltage (the voltage between
+// playbacks) and play duration, when it is triggered: by a TTL edge on a trigger channel, by a command from the PC, or
+// from the thumb joystick menu. A channel can instead play a fixed voltage, its amplitude, for its play duration. Linear
+// on and off ramps can fade each channel in from its resting voltage, and back to it.
 // One frequency, 1Hz to 20kHz in steps of 0.01Hz, applies to all four channels.
 // Samples are computed as they play, at a sampling rate that is a multiple of the frequency, so that every cycle is
 // rendered the same way. The DAC's output range is chosen for each channel, to give its waveform the finest steps.
@@ -100,7 +101,10 @@ enum OpCode {
   OP_SET_AMPLITUDE = 'A',             // 65. Amplitude of each output channel, in microvolts: peak to peak, or the voltage
                                       // of a fixed voltage
   OP_SET_RESTING_VOLTAGE = 'V',       // 86. Resting voltage of each output channel, in microvolts
+  OP_SET_MEAN_VOLTAGE = 'M',          // 77. Mean voltage of each output channel's waveform, in microvolts
   OP_SET_PLAY_DURATION = 'D',         // 68. Play duration of each output channel, in microseconds. 0 = until stopped
+  OP_SET_ON_RAMP_DURATION = 'B',      // 66. On ramp of each output channel, at the Beginning of playback, in microseconds
+  OP_SET_OFF_RAMP_DURATION = 'E',     // 69. Off ramp of each output channel, at the End of playback, in microseconds
   OP_SET_TRIGGER_LINKS = 'I',         // 73. Links from the trigger channels to the output channels
   OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each trigger channel. See enum TriggerModeValue
   OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel)
@@ -168,10 +172,20 @@ enum OutputChannelAction {
   MENU_ACTION_WAVEFORM = 2,
   MENU_ACTION_AMPLITUDE = 3,
   MENU_ACTION_RESTING_VOLTAGE = 4,
-  MENU_ACTION_PLAY_DURATION = 5,
-  MENU_ACTION_LINK_TRIGGER1 = 6,
-  MENU_ACTION_LINK_TRIGGER2 = 7,
-  MENU_ACTION_EXIT = 8                // The last item
+  MENU_ACTION_MEAN_VOLTAGE = 5,
+  MENU_ACTION_PLAY_DURATION = 6,
+  MENU_ACTION_ON_RAMP = 7,
+  MENU_ACTION_OFF_RAMP = 8,
+  MENU_ACTION_LINK_TRIGGER1 = 9,
+  MENU_ACTION_LINK_TRIGGER2 = 10,
+  MENU_ACTION_EXIT = 11               // The last item
+};
+
+// Values of rampStage[], each playing channel's place in its envelope. See "Ramps" in Playback.ino.
+enum RampStage {
+  STAGE_ON_RAMP = 0,                  // Fading in from the resting voltage. Every start begins here, even with no on ramp
+  STAGE_HOLD = 1,                     // Full amplitude around the mean voltage, for the play duration
+  STAGE_OFF_RAMP = 2                  // Fading back to the resting voltage
 };
 
 // Values of SelectedInputAction, the item selected in MENU_TRIGGER_CHANNEL
@@ -189,7 +203,7 @@ enum TriggerChannelAction {
 #define MAX_FREQUENCY_CENTIHZ 2000000 // 20kHz
 #define MAX_AMPLITUDE_MICROVOLTS 20000000 // 20V peak to peak
 #define MAX_VOLTAGE_MICROVOLTS 10000000 // Every voltage on an output stays within +/-10V
-#define MAX_PLAY_DURATION_MICROS 3600000000UL // 1 hour. 0 plays until stopped.
+#define MAX_PLAY_DURATION_MICROS 3600000000UL // 1 hour. 0 plays until stopped. Also the longest on and off ramp.
 
 // Default settings, at startup and after a comm failure. The Python and MATLAB classes program the same ones.
 #define DEFAULT_FREQUENCY_CENTIHZ 10000 // 100Hz
@@ -289,8 +303,12 @@ SPISettings DACSettings(30000000, MSBFIRST, SPI_MODE2); // The AD5754R's maximum
 uint32_t frequencyCentiHz = DEFAULT_FREQUENCY_CENTIHZ; // Frequency of all output channels, in hundredths of a Hz
 byte waveform[N_CHANNELS] = {0}; // See enum WaveformValue
 int32_t amplitudeMicrovolts[N_CHANNELS] = {0}; // Peak to peak (0 or more), or the voltage of WAVEFORM_FIXED_VOLTAGE
-int32_t restingVoltageMicrovolts[N_CHANNELS] = {0}; // The output while the channel is idle, and a periodic waveform's mean
-uint32_t playDurationMicros[N_CHANNELS] = {0}; // How long the channel plays after each trigger. 0 = until stopped.
+int32_t restingVoltageMicrovolts[N_CHANNELS] = {0}; // The output while the channel is idle
+int32_t meanVoltageMicrovolts[N_CHANNELS] = {0}; // A periodic waveform's mean, while it plays at full amplitude
+uint32_t playDurationMicros[N_CHANNELS] = {0}; // How long the channel plays at full amplitude after its on ramp. 0 = until
+                                               // stopped.
+uint32_t onRampMicros[N_CHANNELS] = {0}; // How long the channel fades in after each trigger. 0 = no on ramp.
+uint32_t offRampMicros[N_CHANNELS] = {0}; // How long the channel fades out when it stops. 0 = no off ramp.
 volatile byte TriggerAddress[2][N_CHANNELS] = {0}; // Output channels triggered by trigger channel 1 (row 1) and 2 (row 2)
 volatile byte TriggerMode[2] = {0}; // One per trigger channel. See enum TriggerModeValue
 
@@ -324,19 +342,32 @@ struct ChannelOutput {
   byte range;                 // See enum OutputRange
   uint16_t restCode;          // The DAC code nearest the resting voltage: the code output while the channel is idle
   float restCodeFraction;     // The resting voltage's exact code minus restCode, -0.5 to 0.5
+  uint16_t meanCode;          // The DAC code nearest the mean voltage, which a periodic waveform swings around
+  float meanCodeFraction;     // The mean voltage's exact code minus meanCode, -0.5 to 0.5
   float halfAmplitudeCodes;   // Half the peak to peak amplitude, in DAC codes
   uint16_t fixedCode;         // WAVEFORM_FIXED_VOLTAGE: the DAC code nearest the amplitude, played on every sample
+  float rampOffsetCodes;      // Where the ramps lead from the resting voltage, in DAC codes: the mean voltage's exact
+                              // code minus the resting voltage's, or for a fixed voltage the fixed voltage's
 };
 ChannelOutput activeOutput[N_CHANNELS]; // What the channel plays now, and the range the DAC has for it
 ChannelOutput pendingOutput[N_CHANNELS]; // New values from loop(), waiting for handler() (see pendingOutputChannels)
 volatile byte pendingOutputChannels = 0; // One bit per channel whose pendingOutput[] handler() has not taken yet
 volatile uint32_t playDurationSamples[N_CHANNELS] = {0}; // playDurationMicros in samples. 0 = until stopped.
+volatile uint32_t onRampSamples[N_CHANNELS] = {0}; // onRampMicros in samples. 0 = no on ramp.
+volatile uint32_t offRampSamples[N_CHANNELS] = {0}; // offRampMicros in samples. 0 = no off ramp.
+volatile float onRampReciprocal[N_CHANNELS] = {0}; // 1 / onRampSamples, which the envelope is multiplied by
+volatile float offRampReciprocal[N_CHANNELS] = {0}; // 1 / offRampSamples
 
 // Playback state of each output channel. Changed by the playback interrupts, and by loop() with interrupts disabled.
-volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays
+volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays, off ramp included
 volatile boolean stopAfterWrite[N_CHANNELS] = {0}; // The channel has stopped: its resting voltage is waiting to be written
 volatile uint32_t phase[N_CHANNELS] = {0}; // Position in the cycle of the next sample to fetch, 0 to samplesPerCycle - 1
-volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the channel was triggered (for the play duration).
+volatile byte rampStage[N_CHANNELS] = {0}; // See enum RampStage
+volatile uint32_t rampPosition[N_CHANNELS] = {0}; // In a ramp, the step of the next sample: its envelope is rampPosition
+                                                  // times the ramp's reciprocal. Counts up in the on ramp, down in the off.
+volatile uint32_t holdSamples[N_CHANNELS] = {0}; // Samples fetched at full amplitude since the on ramp (for the play duration)
+volatile float fetchedEnvelope[N_CHANNELS] = {0}; // The envelope of the sample fetched last, 0 to 1 (takePendingOutput())
+volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the channel started from rest, ramps included.
                                                    // stopChannels() takes out the one it fetched but did not play.
 volatile uint32_t sampleSum[N_CHANNELS] = {0}; // Sum of the DAC codes counted in samplesPlayed, wrapping.
                                                // Op 90 reports it, so that a test can check every sample played.
