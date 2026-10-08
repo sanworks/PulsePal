@@ -148,9 +148,10 @@ classdef WavePalDevice < handle
             if isunix
                 defaultBaudRate = 4000000;
             end
-            % On Windows, serialport delivers each reply about 16 ms after it arrives, so every command that waits for a
-            % confirm byte took 16 ms. .NET's SerialPort takes about 0.3 ms (see pulsepal.DotNetSerialPort). It is not
-            % available if MATLAB has been set to use .NET (Core) with dotnetenv, and serialport is used then.
+            % On Windows, MATLAB's serialport delivers each reply about 16 ms after it arrives, so every command that
+            % waits for a confirm byte would take 16 ms. .NET's SerialPort takes about 0.3 ms (see
+            % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
+            % and serialport is used then.
             if pulsepal.DotNetSerialPort.isAvailable()
                 obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else

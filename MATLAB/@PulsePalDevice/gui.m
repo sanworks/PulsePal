@@ -1,3 +1,6 @@
+% Opens the parameter editor window, e.g. P.gui(), or brings an open one to the front. The window edits its own copy
+% of the parameters, and its Load to Device button programs the device with them.
+
 %{
 ----------------------------------------------------------------------------
 

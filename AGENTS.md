@@ -47,6 +47,45 @@ Past bugs came from this coupling, so check both sides:
   different command for trains 3 and 4.
 - The last byte of op 97's reply arrived after the clients had stopped reading, and was
   taken as the reply to the next command.
+- MATLAB rounded times halfway between two timer cycles away from zero, and Python to the
+  even cycle, so 125 µs played as 150 µs from MATLAB and as 100 µs from Python.
+
+## Working on the clients
+
+The Python classes (`/Python/PulsePal/`) and the MATLAB classes (`/MATLAB/@*Device/`) share
+these conventions. Keep them in new code.
+
+- **Check values before sending.** A value the device cannot play raises an error, and
+  nothing is sent. The device refuses most such values too, but it then resets them, so the
+  client's copy would no longer describe what the device plays. When the device does refuse a
+  value, the Python `PulsePalDevice` reads the parameter back (op 93).
+- **Round halfway values to the even integer** when converting to timer cycles, DAC codes,
+  microseconds or microvolts, as Python's `round()` and the C++ class do. MATLAB's `round()`
+  and integer casts round halves away from zero, so the MATLAB classes call
+  `roundHalfEven()`.
+- **Read every reply.** An unread reply is taken as the reply to the next command, and every
+  reply after it is read one byte late. In MATLAB, `read()` returns `[]` with only a warning
+  when a reply does not arrive, and `[] ~= 1` is false, so check `isempty()` first.
+- **MATLAB help text comes first.** `help` shows a file's first comment block, so each class
+  file starts with its help, above the `%{ ... %}` license block; with the license first,
+  `help` shows only "{". The same goes for a method in a file of its own, such as
+  `@PulsePalDevice/gui.m`. A method in the class file takes its help from the comment block
+  right after its `function` line.
+- **MATLAB on Windows uses `pulsepal.DotNetSerialPort`**, not `serialport`. On Windows,
+  `serialport` delivers each reply about 15.6 ms after it arrives (its reader sleeps one
+  Windows timer tick between polls; measured on R2020b and R2025b), and .NET's SerialPort
+  about 0.3 ms after. `DotNetSerialPort` disposes of the port's stream itself, with its
+  finalizer suppressed, because some .NET Framework versions throw from that finalizer after
+  a device is unplugged with its port open (4.8.1 did not, when a Teensy was rebooted into its
+  bootloader with the port open). Where .NET Framework is not available (macOS, Linux, or
+  MATLAB set to .NET Core with `dotnetenv`), the classes use `serialport`.
+- **Copies to keep in step.** `WavePal.py` and `SynthPal.py` each have a `ChannelSettings`
+  class; all three Python modules have `serialportlist()`, `_port_is_free()` and a table of
+  the other firmwares' handshake replies; the three MATLAB constructors share their port setup
+  and handshake. A fix to one usually belongs in all of them.
+- **The Python GUI** (`PulsePalGUI.py`) sizes some parts in pixels, measured against Windows'
+  9 point Segoe UI, and scales them with the desktop's font (`_scaled()`). Check a layout
+  change with a larger desktop font, as on Ubuntu, and in dark mode, which uses the clam theme.
 
 ## Checks you can run without a device
 

@@ -179,6 +179,8 @@ class DeviceStatus:
     """
 
 
+# SynthPal.py has a copy of this class, which also serves its two trigger
+# channels. A fix to one usually belongs in both.
 class ChannelSettings(list):
     """One setting per output channel, indexed by channel number.
 

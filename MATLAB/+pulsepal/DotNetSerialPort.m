@@ -1,11 +1,11 @@
-% DotNetSerialPort is a USB serial port for PulsePalDevice on Windows, using .NET's System.IO.Ports.SerialPort. It has
-% the part of serialport's interface that PulsePalDevice uses: write(), read(), NumBytesAvailable, setDTR() and Port.
+% DotNetSerialPort is a USB serial port for PulsePalDevice, WavePalDevice and SynthPalDevice on Windows, using .NET's
+% System.IO.Ports.SerialPort. It has the part of serialport's interface that those classes use: write(), read(),
+% flush(), NumBytesAvailable, setDTR(), Timeout and Port.
 %
-% Why: MATLAB's serialport delivers each reply about 15.6 ms after the device sends it on Windows, because its
-% background reader sleeps for one tick of the Windows timer between polls of the port. A Pulse Pal replies in well
-% under 1 ms, so every command that waits for a confirm byte took about 16 ms. .NET's SerialPort waits on the port
-% itself: a round trip takes about 0.3 ms, as from Python, and an open, idle port costs no CPU. Measurements:
-% /Firmware/tools/UsbLatencyTest/README.md.
+% Why: on Windows, MATLAB's serialport delivers each reply about 15.6 ms after the device sends it, because its
+% background reader sleeps for one tick of the Windows timer between polls of the port (R2020b to R2025b). A Pulse Pal
+% replies in well under 1 ms, so every command that waits for a confirm byte would take about 16 ms. .NET's SerialPort
+% waits on the port itself: a round trip takes about 0.3 ms, as from Python, and an open, idle port costs no CPU.
 %
 %   port = pulsepal.DotNetSerialPort('COM3');
 %   write(port, [213 72], 'uint8');
@@ -107,10 +107,9 @@ classdef DotNetSerialPort < handle
                 obj.throwPortError(err, "open");
             end
             obj.SerialPort = sp;
-            % Older .NET Framework versions could throw from this stream's finalizer, on the finalizer thread where
-            % nothing can catch it, after a USB serial device was unplugged with its port open. 4.8.1 does not (tested by
-            % rebooting a Teensy into its bootloader with the port open), but closePort() disposes of the stream itself
-            % anyway, so the finalizer never runs.
+            % Some .NET Framework versions throw from this stream's finalizer, on the finalizer thread where nothing can
+            % catch it, if a USB serial device is unplugged while its port is open, which can crash MATLAB. closePort()
+            % disposes of the stream itself, so the finalizer never needs to run.
             obj.BaseStream = sp.BaseStream;
             System.GC.SuppressFinalize(obj.BaseStream);
         end

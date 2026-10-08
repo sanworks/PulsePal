@@ -299,10 +299,10 @@ class PulsePalGUI:
 
     # Width of the custom train text boxes, in characters. This is only
     # a floor: the boxes expand to fill the Custom Pulse Trains panel,
-    # which the wider Output Channels panel above sizes. Asking for the
-    # full width here instead made this panel the widest in the window,
-    # which stretched the panels above it past their own content and
-    # widened the window again whenever a scrollbar appeared.
+    # which the wider Output Channels panel above sizes. Keep it small: a
+    # floor as wide as the panel makes this panel the widest in the
+    # window, stretching the panels above it, and the window grows again
+    # whenever a scrollbar appears.
     _TRAIN_TEXT_COLUMNS = 20
 
     # Height of those boxes, in rows. Four reaches just past the bottom
@@ -1010,16 +1010,15 @@ class PulsePalGUI:
         fire.pack(fill="both", expand=True)
         self._tooltip(fire, "Trigger the selected output channels")
 
-        # A fixed 45 px is only wide enough for "FIRE" in fonts as
-        # narrow as Windows' 9 point Segoe UI, and clipped the label
-        # under the larger fonts of Linux desktops. Fitting it takes the
-        # width of the text plus the room the theme leaves around it,
-        # which is 10 px under vista and 16 under clam, the theme dark
-        # mode switches to. A button cannot be asked for that room
-        # directly, and its requested width is no help: themes ask for a
-        # standard button width, 11 characters under vista, which has
-        # nothing to do with the label. Text longer than that minimum
-        # leaves the theme's own padding as the difference.
+        # The button must fit "FIRE" in the desktop's font: 45 px is
+        # enough for Windows' 9 point Segoe UI, but not for the larger
+        # fonts of Linux desktops. That takes the width of the text plus
+        # the room the theme leaves around it (10 px under vista, 16 under
+        # clam, which dark mode uses). Tk cannot report that room, and a
+        # button's requested width is a theme minimum (11 characters under
+        # vista) unrelated to its label. So a probe button with a label
+        # longer than that minimum is measured: its width minus its text's
+        # width is the theme's padding.
         style = ttk.Style(self._root)
         spec = style.lookup("TButton", "font") or "TkDefaultFont"
         button_font = tkfont.Font(root=self._root, font=spec)
@@ -1085,11 +1084,10 @@ class PulsePalGUI:
         panel.pack(fill="x", padx=10, pady=(8, 0), ipady=4)
 
         # The channel selector spans the first row of fields only, so
-        # that the second row starts at the panel's left edge as it does
-        # in the MATLAB GUI. Placing both rows beside the selector
-        # instead indented the second one by the selector's width, which
-        # widened the window and left the first row short of the right
-        # edge, as a gap after the Loop checkbox.
+        # that the second row starts at the panel's left edge, as in the
+        # MATLAB GUI. With both rows beside the selector, the second row
+        # would be indented by the selector's width, widening the window
+        # and leaving a gap after the first row's last field.
         channels = ttk.LabelFrame(panel, text="Channel")
         channels.grid(row=0, column=0, padx=6, pady=4, sticky="nw")
         self._tooltip(channels, "Select an output channel to edit")
@@ -1343,12 +1341,11 @@ class PulsePalGUI:
             widget.pack(padx=(self._scaled(2 * self._INDICATOR_OFFSET), 0))
         else:
             # Widened to its label where the label is the longer of the
-            # two, as the MATLAB GUI sizes the same fields. A field is
-            # otherwise as wide as the characters asked of it, which
-            # leaves labels such as "Custom Train ID" overhanging their
-            # field by more the larger the desktop's UI font is. The
-            # holder takes its width from the wider of the pair, so this
-            # never widens the column.
+            # two, as the MATLAB GUI sizes the same fields. Otherwise a
+            # field is as wide as the characters asked of it, and labels
+            # such as "Custom Train ID" overhang their field, more so with
+            # a larger desktop font. The holder takes the width of the
+            # wider of the pair, so this never widens the column.
             widget.pack(anchor="w", fill="x")
         if tooltip:
             self._tooltip(widget, tooltip)

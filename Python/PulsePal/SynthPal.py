@@ -232,6 +232,8 @@ class DeviceStatus:
     """
 
 
+# A copy of WavePal.ChannelSettings, for any number of channels, so that it
+# also serves the two trigger channels. A fix to one usually belongs in both.
 class ChannelSettings(list):
     """One setting per channel, indexed by channel number.
 

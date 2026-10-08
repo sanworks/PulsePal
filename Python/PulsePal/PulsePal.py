@@ -344,11 +344,12 @@ class PulsePalDevice:
     """
 
     playback_mode: list
-    """Continuous playback mode of parametric pulse trains after being triggered
+    """Whether each output channel plays its pulse train once or until stopped.
 
-    - `0` plays the pulse train once until pulse_train_duration seconds
-    - `1` plays the pulse train indefinitely, ignoring pulse_train_duration
-    
+    `0` plays the pulse train once per trigger, for
+    `PulsePalDevice.pulse_train_duration`. `1` plays it until the channel
+    is stopped, ignoring `PulsePalDevice.pulse_train_duration`
+    (`/Firmware/PROTOCOL.md` calls this continuous loop mode).
     """
 
     trigger_mode: list
@@ -503,7 +504,8 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the device does not return the expected
-                handshake, or its firmware is older than v21, or its
+                handshake (for example, it runs Wave Pal or Synth Pal
+                firmware), or its firmware is older than v21, or its
                 firmware is newer than this module supports. The port is
                 closed again before any error is raised.
             serial.SerialException: If the serial port cannot be opened.
@@ -689,9 +691,9 @@ class PulsePalDevice:
     def set_default_params(self):
         """Reset the local copy of all parameters to their defaults.
 
-        The defaults are a 1 ms, +5 V monophasic pulse every 10 ms for
-        1 second, on all four output channels, linked to trigger channel
-        1 in normal trigger mode.
+        The defaults are monophasic +5 V pulses of 1 ms, 10 ms apart, for
+        1 second, resting at 0 V, on all four output channels, linked to
+        trigger channel 1, with both trigger channels in normal mode.
 
         This updates only the local copy. Call
         `PulsePalDevice.sync_to_device` to program the device with them.
@@ -738,7 +740,7 @@ class PulsePalDevice:
             voltage_bits,
             "uint16",
         )
-        self._read_ack("set_fixed_voltage()")
+        self._read_ack("set_voltage()")
 
     def set_calibration(self, channel, voltage_offset):
         """Calibrate the zero code of an output channel.
@@ -770,7 +772,7 @@ class PulsePalDevice:
                 "voltage_offset for zero code calibration must be in range "
                 "[-0.1, 0.1]"
             )
-        # To the nearest DAC code, halves to even, as the MATLAB class rounds it (int() truncated)
+        # To the nearest DAC code, halfway values to the even one, as the MATLAB class rounds it
         voltage_bits = int(round(voltage_offset * (1 / (20 / 65536))))
         self._write_serial(
             (self._OP_MENU_BYTE, 96, channel - 1),
@@ -966,7 +968,7 @@ class PulsePalDevice:
             "uint8",
         )
         self._read_ack(
-            "program_trigger_channel_param()",
+            "set_trigger_param()",
             on_refusal=lambda: self._refresh_trigger_mode(channel),
         )
 
@@ -1232,15 +1234,14 @@ class PulsePalDevice:
         """
         trigger_byte = 0
 
-        # Options 2 & 3: Only one argument was provided
+        # One argument: a channel number, or a list of them. Op 77 takes one bit per channel, channel 1 in bit 0.
         if channel2 is None and channel3 is None and channel4 is None:
-            # A single channel number, or a list of them (ch1=bit0, ch2=bit1, etc.)
             for ch in self._output_channel_numbers(channel1, "trigger()"):
                 trigger_byte |= (1 << (ch - 1))
 
-        # Option 1: Original input scheme (logicals for each channel)
+        # More than one argument: a 0 or 1 flag per channel, as in the legacy triggerOutputChannels()
         else:
-            # Fallback to 0 if an argument was omitted via kwargs
+            # A flag left out, e.g. trigger(channel1=1, channel3=1), is 0
             flags = [0 if flag is None else flag for flag in (channel1, channel2, channel3, channel4)]
             for bit, flag in enumerate(flags):
                 if not (isinstance(flag, numbers.Integral) and flag in (0, 1)):
@@ -1314,17 +1315,25 @@ class PulsePalDevice:
     def stop(self, channels=None):
         """Stop pulse trains currently playing on the device.
 
-        Every output channel returns to its
-        `PulsePalDevice.resting_voltage`.
+        The stopped channels return to their
+        `PulsePalDevice.resting_voltage`. A soft trigger that has not
+        started its channel yet is cancelled too.
+
+        ```python
+        P.stop()           # all output channels
+        P.stop([1, 3, 4])  # channels 1, 3 and 4
+        ```
 
         Args:
-            channels (list or tuple, optional): A list of channels to stop, e.g.,
-                [1, 3, 4] to stop playback on Ch1, Ch3, and Ch4, or a single
-                channel number. NumPy integers and arrays are accepted. Default is
-                None, which stops all channels. (Requires firmware v22+)
+            channels: An output channel number 1-4, or a list of them
+                (NumPy integers and arrays are accepted). `None`, the
+                default, stops all channels. Stopping some channels
+                requires firmware v22 or newer.
 
         Raises:
             PulsePalError: If a channel number is not 1-4.
+            ValueError: If channels are given and the firmware is older
+                than v22.
         """
         bit_code = 15  # Default: 15 (binary 1111) stops all channels
 
@@ -1334,10 +1343,10 @@ class PulsePalDevice:
 
             bit_code = 0
             for ch in self._output_channel_numbers(channels, "stop()"):
-                # Bitwise OR (|=) handles the summation, safely ignoring duplicate channel entries
+                # One bit per channel, channel 1 in bit 0. A channel listed twice sets its bit once
                 bit_code |= 1 << (ch - 1)
 
-        # Send
+        # Firmware v21 has only op 80, which stops all channels
         if self.info.firmware_version < 22:
             self._write_serial((self._OP_MENU_BYTE, 80), "uint8")
         else:
@@ -1472,9 +1481,12 @@ class PulsePalDevice:
     def close(self, send_disconnect=True):
         """Close the connection to the device, and the GUI if open.
 
-        Safe to call more than once; later calls do nothing. Called
-        automatically when leaving a `with` block and when the object is
-        garbage collected.
+        The device stops all output channels when the client disconnects,
+        and shows its own name on its screen again. Safe to call more
+        than once; later calls do nothing. Called automatically when
+        leaving a `with` block and when the object is garbage collected,
+        so pulse trains also stop when the last reference to the object
+        goes, e.g. when a function that created it returns.
 
         Args:
             send_disconnect: If `True`, tell the device that the client
@@ -1693,7 +1705,7 @@ class PulsePalDevice:
         if datatype not in self._STRUCT_FORMATS:
             raise PulsePalError(
                 f"Error: {datatype} is not a data type supported by "
-                "PulsePalObject."
+                "PulsePalDevice."
             )
         return datatype
 
@@ -1750,7 +1762,7 @@ class PulsePalDevice:
             datatype,
         )
         self._read_ack(
-            "program_output_channel_param()",
+            "set_output_param()",
             on_refusal=lambda: self._refresh_output_param(param_code, (channel,)),
         )
         self._set_output_param_value(param_code, channel, value)

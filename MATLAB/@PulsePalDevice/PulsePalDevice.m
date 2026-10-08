@@ -1,3 +1,96 @@
+% PulsePalDevice controls a Pulse Pal on a USB serial port. Pulse Pal plays precisely timed voltage pulse trains on
+% four output channels, started from MATLAB with trigger(), by TTL pulses on its two trigger channels, or from its
+% thumb joystick. This class supports Pulse Pal 2 and Pulse Pal 3, with firmware v21 or newer.
+%
+% Example:
+%   P = PulsePalDevice('COM3');          % Replace COM3 with Pulse Pal's port. serialportlist lists them.
+%   P.phase1Voltage(1) = 5;              % Volts, on output channel 1
+%   P.phase1Duration(1) = 0.001;         % Seconds: 1 ms pulses,
+%   P.interPulseInterval(1) = 0.049;     % 49 ms apart (end of one to start of the next), so 20 pulses per second,
+%   P.pulseTrainDuration(1) = 2;         % for 2 seconds
+%   P.trigger(1);                        % Plays the pulse train on output channel 1
+%   P.triggerMode(2) = 1;                % Trigger channel 2 in toggle mode (see "Trigger modes" below)
+%   clear P                              % Releases the port. Pulse Pal stops all output channels.
+%
+% Parameters are properties, with one element per channel: the output channel parameters below are 1x4, so
+% P.phase1Voltage(2) belongs to output channel 2, and triggerMode is 1x2, one element per trigger channel. With
+% autoSync on (the default), assigning a parameter programs the device at once. With autoSync off, assignments change
+% only this object's copy of the parameters, and syncToDevice() sends all of them in one command:
+%   P.autoSync = false;
+%   P.phase1Voltage = [5 5 2.5 2.5];
+%   P.phase1Duration = [0.001 0.001 0.002 0.002];
+%   P.syncToDevice();
+%   P.autoSync = true;
+%
+% Units. Voltages are in volts, -10 to 10. Times are in seconds, rounded to the nearest cycle of the device's timer
+% (50 us). Phase durations, the inter-pulse interval and the pulse train duration are at least 100 us
+% (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's trigger channel detects reliably. A value out
+% of range raises an error, and nothing is sent.
+%
+% Output channel parameters (1x4):
+%   isBiphasic           0: monophasic pulses, phase 1 only. 1: biphasic pulses: phase 1, interPhaseInterval, phase 2
+%   phase1Voltage        Voltage of the first phase of each pulse
+%   phase2Voltage        Voltage of the second phase (biphasic pulses only)
+%   restingVoltage       Voltage between pulses, and while the channel is idle
+%   phase1Duration       Duration of the first phase
+%   interPhaseInterval   Time at the resting voltage between the two phases (biphasic pulses only)
+%   phase2Duration       Duration of the second phase (biphasic pulses only)
+%   interPulseInterval   Time from the end of one pulse to the start of the next
+%   burstDuration        Duration of each burst of pulses. 0 for no bursts: pulses continue for the whole train
+%   interBurstInterval   Time at the resting voltage between bursts, when burstDuration is not 0
+%   pulseTrainDuration   Duration of the pulse train
+%   pulseTrainDelay      Time from the trigger to the start of the pulse train
+%   linkTriggerChannel1  1 if a TTL on trigger channel 1 triggers the output channel, 0 if not
+%   linkTriggerChannel2  1 if a TTL on trigger channel 2 triggers the output channel, 0 if not
+%   customTrainID        0 plays the pulse train defined above. 1 or more plays that custom train instead, loaded
+%                        with sendCustomPulseTrain() or sendCustomWaveform(): 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2
+%   customTrainTarget    0: a custom train's times are pulse onsets. 1: they are burst onsets
+%   customTrainLoop      1 repeats a custom train until pulseTrainDuration has elapsed. 0 plays it once
+%   playbackMode         0 plays the pulse train once per trigger. 1 (continuous loop mode) plays it until the channel
+%                        is stopped, ignoring pulseTrainDuration
+% A pulse starts only if it fits. In a burst, its first phase, or a biphasic pulse's whole pulse, must end before the
+% burst does. A biphasic pulse must also end by the end of the train; the end of the train cuts a monophasic pulse
+% short. The parameter guide, https://sites.google.com/site/pulsepalwiki/parameter-guide, has diagrams.
+%
+% Trigger modes (triggerMode, 1x2, one per trigger channel):
+%   0  Normal: a rising edge starts the pulse trains of the linked output channels. Edges during a train are ignored.
+%   1  Toggle: as 0, but a rising edge during a train stops it.
+%   2  Pulse gated: the trains play only while the TTL is high.
+%   3  Param sync (Pulse Pal 3 only): a rising edge starts and stops nothing. It loads the parameters most recently
+%      sent by syncToDevice(): this is how the next trial's parameters are sent during the current trial and applied
+%      the instant it starts. An idle output channel takes them in the timer cycle the edge is detected. One that is
+%      playing a pulse train finishes it on the parameters it started with, and takes the new ones the moment it
+%      ends, so the next trigger plays a whole train with the new parameters. A channel in continuous loop mode has
+%      no train end, so it keeps its parameters until something stops it.
+%      Only syncToDevice() waits for the edge: with autoSync on, assigning a parameter programs the device at once,
+%      also in param sync mode. So leaving param sync mode means assigning triggerMode with autoSync on; a trigger
+%      mode sent by syncToDevice() takes effect at the next edge. A param sync channel's links to output channels are
+%      ignored: to start trains on the same edge, wire the TTL to the other trigger channel too (the parameters load
+%      first). Connecting, and setDefaultParams(), take both trigger channels out of param sync mode.
+%   P.triggerMode(2) = 3;                % Sent at once
+%   P.autoSync = false;
+%   P.phase1Voltage = [2 2 2 2];
+%   P.syncToDevice();                    % Stored: trigger channel 2's next rising edge applies it
+%   P.autoSync = true;
+%
+% Methods (help PulsePalDevice.trigger, and so on, describes each one):
+%   trigger(channels)                    Starts the pulse trains of output channels, e.g. P.trigger([1 3])
+%   stop(channels)                       Stops pulse trains: P.stop() stops all of them, P.stop([1 3]) some
+%   setVoltage(channel, voltage)         Holds an output channel at a fixed voltage until it is triggered
+%   sendCustomPulseTrain(trainID, pulseTimes, voltages)    Loads a custom pulse train
+%   sendCustomWaveform(trainID, samplingPeriod, voltages)  Loads a sampled waveform, as a custom pulse train
+%   syncToDevice()                       With autoSync off, sends every parameter to the device in one command
+%   syncFromDevice()                     Reads every parameter from the device into the properties
+%   setDefaultParams()                   Programs the default parameters
+%   saveParameters(fileName)             Saves the parameters to a .mat file; loadParameters(fileName) loads them
+%   sdSettings(fileName, op)             Saves, loads or deletes a settings file on the device's microSD card
+%   gui()                                Opens the parameter editor window
+%   setScreenSaver(state, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
+% info holds the connected device's hardware and firmware versions, and its limits.
+%
+% The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, /Python/PulsePal/PulsePal.py, has the
+% same parameters with snake_case names, but there an assignment changes only the local copy until sync_to_device().
+
 %{
 ----------------------------------------------------------------------------
 
@@ -19,49 +112,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
 classdef PulsePalDevice < handle
+    % The class help is at the top of this file, above the license: MATLAB's help shows the first comment block in
+    % a file, and a license block there would hide it.
+
     properties
-        Port % Serial port: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport. Both have write(), read(), NumBytesAvailable and setDTR()
-        info % Information about the connected device
-        autoSync = true; % If true, changing parameter fields automatically updates PulsePal device. Otherwise, use 'sync' method.
-        isBiphasic % Remaining properties are parameters. See descriptions at: https://sites.google.com/site/pulsepalwiki/parameter-guide
-        phase1Voltage
-        phase2Voltage
-        restingVoltage
-        phase1Duration
-        interPhaseInterval
-        phase2Duration
-        interPulseInterval
-        burstDuration
-        interBurstInterval
-        pulseTrainDuration
-        pulseTrainDelay
-        linkTriggerChannel1
-        linkTriggerChannel2
-        customTrainID
-        customTrainTarget
-        customTrainLoop
-        playbackMode
-        triggerMode % Response of each trigger channel to an incoming TTL pulse. Two elements, one per trigger channel.
-                    % 0 = normal: a rising edge starts the pulse train, and edges during the train are ignored.
-                    % 1 = toggle: as 0, but a rising edge during the train stops it.
-                    % 2 = pulse gated: the train runs only while the trigger TTL is high.
-                    % 3 = param sync (Pulse Pal 3 only): a rising edge does not start or stop a train. Instead it
-                    %     loads the parameter set most recently sent by syncToDevice(). This is how the parameters
-                    %     of the next trial are sent during the current trial and applied the instant it starts.
-                    %     An output channel that is idle at the edge takes its new parameters within the timer
-                    %     cycle the edge is detected. One that is playing a pulse train finishes that train on the
-                    %     parameters it started with and takes the new ones the moment it ends, so a train that
-                    %     runs past the end of a trial keeps one shape throughout, and the next trigger plays a
-                    %     whole train with the new parameters. A channel in continuous playbackMode has no train
-                    %     end, so it keeps its parameters until something stops it.
-                    %     While either trigger channel is in param sync mode, ONLY syncToDevice() is held back.
-                    %     Assigning to a parameter property with autoSync on still programs the device immediately.
-                    %     Leaving param sync mode therefore means assigning to triggerMode with autoSync on; a
-                    %     trigger mode sent by syncToDevice() does not take effect until a sync edge arrives.
-                    %     Links to output channels are ignored for a param sync channel. To start a train on the
-                    %     same edge, wire the TTL to the other trigger channel as well.
-                    %     setDefaultParams(), which the constructor calls, takes both trigger channels out of param
-                    %     sync mode, so that the default parameters reach the device instead of waiting for a TTL.
+        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
+        info % Properties of the connected device: hardware and firmware versions, and its limits
+        autoSync = true; % true: assigning a parameter programs the device at once. false: syncToDevice() sends them all
+        isBiphasic % 1x4. 0 for monophasic pulses, 1 for biphasic. See "Output channel parameters" above
+        phase1Voltage % 1x4, volts
+        phase2Voltage % 1x4, volts. Biphasic pulses only
+        restingVoltage % 1x4, volts. Between pulses, and while the channel is idle
+        phase1Duration % 1x4, seconds
+        interPhaseInterval % 1x4, seconds. Biphasic pulses only
+        phase2Duration % 1x4, seconds. Biphasic pulses only
+        interPulseInterval % 1x4, seconds, from the end of one pulse to the start of the next
+        burstDuration % 1x4, seconds. 0 for no bursts
+        interBurstInterval % 1x4, seconds
+        pulseTrainDuration % 1x4, seconds
+        pulseTrainDelay % 1x4, seconds from the trigger to the start of the pulse train
+        linkTriggerChannel1 % 1x4. 1 if trigger channel 1 triggers the output channel, 0 if not
+        linkTriggerChannel2 % 1x4. 1 if trigger channel 2 triggers the output channel, 0 if not
+        customTrainID % 1x4. 0 for the pulse train defined by the parameters, or the number of the custom train to play
+        customTrainTarget % 1x4. 0: custom train times are pulse onsets. 1: they are burst onsets
+        customTrainLoop % 1x4. 1 repeats a custom train until pulseTrainDuration has elapsed, 0 plays it once
+        playbackMode % 1x4. 0 plays the pulse train once per trigger, 1 plays it until stopped (continuous loop mode)
+        triggerMode % 1x2, one per trigger channel: 0 normal, 1 toggle, 2 pulse gated, 3 param sync. See "Trigger modes"
     end
 
     properties (Access = private)
@@ -86,7 +162,10 @@ classdef PulsePalDevice < handle
 
     methods
         function obj = PulsePalDevice(varargin)
-            % Constructor method, executed when creating the object
+            % P = PulsePalDevice(portName) connects to the Pulse Pal on a USB serial port, e.g. 'COM3' on Windows or
+            % '/dev/ttyACM0' on Linux, checks that it runs supported Pulse Pal firmware, reads its properties into
+            % info, shows "MATLAB Connected" on its screen, and programs the default parameters (see
+            % setDefaultParams).
 
             % Check for minimum MATLAB version
             MinVer = '9.9';
@@ -102,10 +181,10 @@ classdef PulsePalDevice < handle
             else
                 PortList = obj.findSerialPorts();
                 if ~isempty(PortList)
-                    error(['You must call PulsePalObject with a serial port string argument, e.g. P = PulsePalObject(''COM3'')'... 
+                    error(['You must call PulsePalDevice with a serial port string argument, e.g. P = PulsePalDevice(''COM3'')'...
                            newline 'Detected serial ports are: ' strjoin(PortList, ', ')])
                 else
-                    error('You must call PulsePalObject with a serial port string argument.')
+                    error('You must call PulsePalDevice with a serial port string argument.')
                 end
             end
 
@@ -115,9 +194,10 @@ classdef PulsePalDevice < handle
             if isunix
                 defaultBaudRate = 4000000;
             end
-            % On Windows, serialport delivers each reply about 16 ms after it arrives, so every command that waits for a
-            % confirm byte took 16 ms. .NET's SerialPort takes about 0.3 ms (see pulsepal.DotNetSerialPort). It is not
-            % available if MATLAB has been set to use .NET (Core) with dotnetenv, and serialport is used then.
+            % On Windows, MATLAB's serialport delivers each reply about 16 ms after it arrives, so every command that
+            % waits for a confirm byte would take 16 ms. .NET's SerialPort takes about 0.3 ms (see
+            % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
+            % and serialport is used then.
             if pulsepal.DotNetSerialPort.isAvailable()
                 obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else
@@ -198,7 +278,10 @@ classdef PulsePalDevice < handle
         end
 
         function trigger(obj, channels, varargin)
-            % Soft-trigger output channels. A channel that is already playing a pulse train ignores the trigger.
+            % Starts the pulse trains of output channels, e.g. P.trigger(1) or P.trigger([1 3 4]). The channels start
+            % in the same timer cycle. A channel that is already playing a pulse train ignores the trigger.
+            % P.trigger(1, 3, 4) works too. A character string is read as a binary number, with channel 1 as its last
+            % digit: P.trigger('1101') triggers channels 1, 3 and 4, as in the legacy interface.
             if ischar(channels)
                 TriggerAddress = bin2dec(channels);
             else
@@ -216,9 +299,9 @@ classdef PulsePalDevice < handle
         end
 
         function stop(obj, varargin)
-            % Stop ongoing playback
-            % Optional arg (requires firmware v22+): an array with a list of channels to stop, e.g.
-            % [1 3 4] to stop playback on Ch1, Ch3, and Ch4. Default = all channels.
+            % Stops pulse trains: P.stop() stops all output channels, and P.stop([1 3 4]) stops channels 1, 3 and 4
+            % (firmware v22 or newer). The stopped channels return to their resting voltage. A soft trigger that has
+            % not started its channel yet is cancelled too.
             bitCode = 15; % All channels
             if nargin > 1
                 if obj.firmwareVersion < 22
@@ -238,10 +321,12 @@ classdef PulsePalDevice < handle
         end
 
         function confirmed = syncToDevice(obj)
-            % If autoSync is off, this will sync all parameters at once.
+            % Sends every parameter to the device in one command. Use it with autoSync off: with autoSync on, every
+            % assignment has already reached the device, and syncToDevice() raises an error.
             % On Pulse Pal 3, if either trigger channel is in param sync mode (triggerMode 3), the device stores
             % the parameters instead of programming them, and loads them on the next rising edge of that channel.
-            % The returned confirmation still reports whether every value was in range. See triggerMode above.
+            % It still checks every value at once: an error is raised if one is out of range. See "Trigger modes" in
+            % help PulsePalDevice.
             if obj.autoSync
                 error('autoSync is set to ''true''. syncToDevice() may be used when autoSync is off.')
             end
@@ -249,12 +334,15 @@ classdef PulsePalDevice < handle
         end
 
         function confirmed = syncFromDevice(obj)
-            % Write all parameters from physical device to the properties of PulsePalDevice.
+            % Reads every parameter from the device into the properties, e.g. after they were changed with the
+            % joystick or by loading a settings file. Requires firmware v22 or newer. playbackMode is left as it is:
+            % the device does not report it.
             confirmed = obj.importCurrentParamsFromPulsePal;
         end
 
         function confirmed = setVoltage(obj, channel, voltage)
-            % Sets a fixed output channel voltage. Channel = 1-4. Voltage = volts (-10 to +10)
+            % Holds an output channel at a fixed voltage until it is set again or a pulse train is triggered on it,
+            % e.g. P.setVoltage(4, 2.5). channel: 1-4. voltage: in volts, -10 to 10.
             obj.checkParamRange(voltage, 'Volts', [-10 10], 17);
             voltageBits = obj.volts2Bits(voltage);
             obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
@@ -262,9 +350,10 @@ classdef PulsePalDevice < handle
         end
 
         function setCalibration(obj, channel, voltageOffset)
+            % Sets an output channel's zero code calibration: an offset, in volts from -0.1 to 0.1, that corrects the
+            % DAC's offset error, e.g. P.setCalibration(2, -0.003). Pulse Pal 3 stores it in its EEPROM and applies
+            % it after every power cycle; Pulse Pal 2 keeps it until it is switched off. Requires firmware v22.
             if obj.firmwareVersion > 21
-                % Sets a calibration to correct for DAC zero code error on a single channel.
-                % Calibration is stored to EEPROM and loaded on all future boots.
                 if ~ismember(channel, [1 2 3 4])
                     error('channel must be 1, 2, 3 or 4')
                 end
@@ -313,12 +402,22 @@ classdef PulsePalDevice < handle
         end
 
         function sendCustomPulseTrain(obj, trainID, pulseTimes, voltages)
-            % Sends a custom pulse train to the device. trainId = 1 or 2. pulseTimes = sec. voltages = volts.
+            % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
+            % trainID: 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
+            % pulseTimes: in seconds from the start of the train, increasing, in multiples of 100 us.
+            % voltages: one per pulse, in volts, -10 to 10.
+            % An output channel plays the train when its customTrainID is trainID. Each pulse takes the channel's own
+            % phase durations; a biphasic pulse's second phase is its voltage with the sign reversed. Example:
+            %   P.sendCustomPulseTrain(1, [0 0.1 0.25 0.5], [5 2.5 -2.5 -5]);
+            %   P.customTrainID(2) = 1;
             sendCustomTrain(obj, trainID, pulseTimes, voltages);
         end
 
         function sendCustomWaveform(obj, trainID, samplingPeriod, voltages)
-            % Sends a custom waveform to the device. trainId = 1 or 2. samplingPeriod = sec. voltages = volts.
+            % Loads a sampled waveform onto the device, as a custom pulse train of adjoining pulses: one per sample,
+            % samplingPeriod seconds apart (a multiple of 100 us). Set phase1Duration to samplingPeriod on the output
+            % channel that plays it, so that each sample lasts until the next. trainID: 1-4 on Pulse Pal 3, 1-2 on
+            % Pulse Pal 2. voltages: in volts, -10 to 10.
             nVoltages = length(voltages);
             if ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
@@ -331,7 +430,9 @@ classdef PulsePalDevice < handle
         end
 
         function setDefaultParams(obj)
-            % Loads default parameters and sends them to the device
+            % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 1 ms, 10 ms
+            % apart, for 1 second, resting at 0 V and linked to trigger channel 1; both trigger channels in normal
+            % mode. The constructor calls it.
             autoSyncState = obj.autoSync;
             if obj.hardwareVersion > 2
                 % A device left in param sync mode would store the sync below instead of running it,
@@ -366,9 +467,10 @@ classdef PulsePalDevice < handle
         end
 
         function confirmed = sdSettings(obj, settingsFileName, op)
-            % Saves, loads or deletes settings. settingsFileName = full
-            % path to settings file, incl. extension. op = 'save',
-            % 'load', or 'delete'
+            % Saves the parameters to a settings file on the device's microSD card, loads them from one, or deletes
+            % one, e.g. P.sdSettings('MyProgram.pps', 'save'). settingsFileName: the file's name with its extension,
+            % such as .pps. op: 'save', 'load' or 'delete'. Loading a file also reads the parameters back into the
+            % properties (see syncFromDevice). A saved file can also be loaded from the joystick menu.
             if sum(settingsFileName == '.') == 0
                 error('Error: The file name must have a valid extension.')
             end
@@ -409,7 +511,8 @@ classdef PulsePalDevice < handle
         end
 
         function saveParameters(obj, filename)
-            % Saves current parameters to a .mat file.
+            % Saves the parameters (this object's properties) to a .mat file on this computer, e.g.
+            % P.saveParameters('MyProgram.mat'). loadParameters() programs the device with them again.
             if (~strcmp(filename(end-3:end), '.mat'))
                 error('The file to save must be a .mat file')
             end
@@ -418,7 +521,8 @@ classdef PulsePalDevice < handle
         end
 
         function loadParameters(obj, filename)
-            % Loads parameters from a settings file previously saved with the saveParameters method
+            % Loads parameters from a .mat file saved by saveParameters(), and programs the device with them. autoSync
+            % takes the value saved in the file.
             S = load(filename);
             params = S.params;
             obj.importParams(params);
@@ -428,6 +532,8 @@ classdef PulsePalDevice < handle
         end
 
         function formatMicroSD(obj)
+            % Formats the device's microSD card (Pulse Pal 3), which erases every settings file on it, and programs
+            % the default parameters. Asks for confirmation at the command prompt first.
             if obj.hardwareVersion < 3
                 error('formatMicroSD() requires hardware v3 or newer.')
             end
@@ -594,9 +700,9 @@ classdef PulsePalDevice < handle
         end
 
         function delete(obj)
-            %   Destructor for PulsePalDevice.
-            %   Attempts to close the GUI, requests device disconnection/cleanup, and
-            %   releases the serialport handle. Errors during cleanup are ignored.
+            % Runs on clear P or delete(P). Tells the device that MATLAB is disconnecting, which stops all output
+            % channels and puts the device's own name back on its screen, closes the GUI, and releases the serial
+            % port. Errors are ignored: the device may already be unplugged.
             try
                 obj.Port.write([obj.OpMenuByte 81], 'uint8');
             catch
@@ -643,8 +749,8 @@ classdef PulsePalDevice < handle
             else
                 paramCodeString = 'A parameter';
             end
-            % NaN fails no comparison, so it passed the range check below and reached the device as 0: -10 V,
-            % or a phase of 0 cycles
+            % NaN fails every comparison, so the range check below would let it through, and it would reach the device
+            % as 0: -10 V, or a phase of 0 cycles
             if (~isnumeric(param) && ~islogical(param)) || ~all(isfinite(double(param(:))))
                 error([paramCodeString ' must be a number (NaN and Inf are not allowed).']);
             end
@@ -664,7 +770,8 @@ classdef PulsePalDevice < handle
         function rounded = roundHalfEven(obj, value)
             % Round to the nearest integer, and a value exactly halfway between two to the even one, as the Python
             % and C++ classes do, so that all three send the same DAC codes and cycle counts. MATLAB's round() and
-            % uint32() take halves away from zero: 125 us (2.5 cycles) was 150 us here and 100 us in Python.
+            % uint32() take halves away from zero, which would play 125 us (2.5 cycles) as 150 us from MATLAB and
+            % as 100 us from Python.
             rounded = round(value);
             halfway = abs(value - fix(value)) == 0.5;
             rounded(halfway) = 2*round(value(halfway)/2);
@@ -832,7 +939,7 @@ classdef PulsePalDevice < handle
         function sendCustomTrain(obj, trainID, pulseTimes, voltages)
             %   Validate and transmit a custom train of pulses to Pulse Pal.
             if length(pulseTimes) ~= length(voltages)
-                error('There must be one voltage value (0-255) for every timestamp');
+                error('There must be one voltage value for every timestamp');
             end
             nPulses = length(pulseTimes);
             if ~all(isfinite(double(pulseTimes(:)))) || ~all(isfinite(double(voltages(:))))

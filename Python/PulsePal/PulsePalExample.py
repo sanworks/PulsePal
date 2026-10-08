@@ -51,9 +51,10 @@ P.set_output_param("phase1_duration", 1, 0.001)
 P.set_trigger_param("trigger_mode", 1, 2)  # Ch1 to pulse gated mode
 P.set_trigger_param("trigger_mode", 2, 0)  # Ch2 to normal mode
 
-# Programming *all* parameters to match the P object's fields.
-# Parameter arrays are 5 elements long. Use [1] for output channel 1,
-# i.e. is_biphasic[0] is not used.
+# Editing the parameter lists, then programming all parameters at once.
+# Assigning to these lists changes only P's local copy: the device is not
+# programmed until P.sync_to_device() below. Each list has 5 elements, so
+# that [1] is output channel 1; element [0] is not used.
 P.is_biphasic[1] = 0
 P.phase1_voltage[2] = 7  # Set output channel 2 to use 7V pulses
 
@@ -69,7 +70,8 @@ P.sync_to_device()
 pulse_times = [0, 0.2, 0.5, 1]  # An array of pulse times in seconds
 voltages = [8, 4, -3.5, -10]  # An array of pulse voltages in volts
 
-# Send custom train 2 (of 2 possible), defined by the arrays above
+# Send custom train 2, defined by the arrays above. Pulse Pal 2 holds custom
+# trains 1-2, and Pulse Pal 3 holds 1-4 (P.info.n_custom_pulse_trains).
 P.send_custom_pulse_train(2, pulse_times, voltages)
 
 # Program output channel 1 to use custom train 2
