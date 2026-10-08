@@ -56,7 +56,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            11    Exit -> MENU_TOP (MENU_ITEM_EXIT)
 // MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now: plays the channel, or stops it while it plays. The
 //                                                  second line says which. Trigger modes do not apply here.
-//                                            2-10  Edit the waveform, amplitude, resting voltage, mean voltage, play
+//                                            2-10  Edit the waveform, amplitude, mean voltage, resting voltage, play
 //                                                  duration, on ramp, off ramp, and the links to trigger channels 1
 //                                                  and 2 (enum OutputChannelAction)
 //                                            11    Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
@@ -277,8 +277,8 @@ void RefreshActionMenu() {
       bool isFixed = (waveform[channel] == WAVEFORM_FIXED_VOLTAGE);
       write2Screen("<  Amplitude   >", formatVolts(amplitudeMicrovolts[channel], isFixed ? " V" : " Vpp"));
     } break;
-    case MENU_ACTION_RESTING_VOLTAGE: {write2Screen("<RestingVoltage>", formatVolts(restingVoltageMicrovolts[channel], " V"));} break;
     case MENU_ACTION_MEAN_VOLTAGE: {write2Screen("< Mean Voltage >", formatVolts(meanVoltageMicrovolts[channel], " V"));} break;
+    case MENU_ACTION_RESTING_VOLTAGE: {write2Screen("<RestingVoltage>", formatVolts(restingVoltageMicrovolts[channel], " V"));} break;
     case MENU_ACTION_PLAY_DURATION: {write2Screen("<Play Duration >", formatDuration(playDurationMicros[channel], "Infinite"));} break;
     case MENU_ACTION_ON_RAMP: {write2Screen("<   On Ramp    >", formatDuration(onRampMicros[channel], "None"));} break;
     case MENU_ACTION_OFF_RAMP: {write2Screen("<   Off Ramp   >", formatDuration(offRampMicros[channel], "None"));} break;
@@ -329,8 +329,8 @@ void editOutputSetting(byte channel, byte action) {
         updateChannelOutput(channel);
       }
     } break;
-    case MENU_ACTION_RESTING_VOLTAGE: // In hundredths of a volt
-    case MENU_ACTION_MEAN_VOLTAGE: {
+    case MENU_ACTION_MEAN_VOLTAGE: // In hundredths of a volt
+    case MENU_ACTION_RESTING_VOLTAGE: {
       bool isRest = (action == MENU_ACTION_RESTING_VOLTAGE);
       int32_t voltage = isRest ? restingVoltageMicrovolts[channel] : meanVoltageMicrovolts[channel];
       int32_t start = (voltage >= 0) ? ((voltage + 5000) / 10000) : -((-voltage + 5000) / 10000);

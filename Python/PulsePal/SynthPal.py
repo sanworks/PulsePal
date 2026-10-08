@@ -384,10 +384,10 @@ class SynthPalDevice:
             "waveform", ["Sine"] * 4, self, "_apply_waveform")
         self._amplitude = ChannelSettings(
             "amplitude", [5.0] * 4, self, "_apply_amplitude")
-        self._resting_voltage = ChannelSettings(
-            "resting_voltage", [0.0] * 4, self, "_apply_resting_voltage")
         self._mean_voltage = ChannelSettings(
             "mean_voltage", [0.0] * 4, self, "_apply_mean_voltage")
+        self._resting_voltage = ChannelSettings(
+            "resting_voltage", [0.0] * 4, self, "_apply_resting_voltage")
         self._play_duration = ChannelSettings(
             "play_duration", [1.0] * 4, self, "_apply_play_duration")
         self._on_ramp_duration = ChannelSettings(
@@ -495,12 +495,12 @@ class SynthPalDevice:
         match the settings the device starts with.
         """
         self.frequency = 100
-        # In this order, each is valid whatever the device holds: a
-        # resting voltage goes with any waveform, a mean of 0 V with any
-        # amplitude, 5 V is then a valid amplitude for any waveform, and a
+        # In this order, each is valid whatever the device holds: a mean
+        # of 0 V goes with any amplitude, a resting voltage with any
+        # waveform, 5 V is then a valid amplitude for any waveform, and a
         # sine wave is then valid
-        self.resting_voltage = 0
         self.mean_voltage = 0
+        self.resting_voltage = 0
         self.amplitude = 5
         self.waveform = "Sine"
         self.play_duration = 1
@@ -623,21 +623,6 @@ class SynthPalDevice:
         self._amplitude._assign(values)
 
     @property
-    def resting_voltage(self):
-        """The resting voltage of each output channel, in volts.
-
-        Indexed by channel number (see "Channel settings" above). -10 to
-        10 V, with any waveform. The channel outputs it while idle, and
-        its ramps start and end there (see "Ramps" above). Set to the
-        nearest microvolt. A change applies to playback in progress.
-        """
-        return self._resting_voltage
-
-    @resting_voltage.setter
-    def resting_voltage(self, values):
-        self._resting_voltage._assign(values)
-
-    @property
     def mean_voltage(self):
         """The mean voltage of each output channel's waveform, in volts.
 
@@ -655,6 +640,21 @@ class SynthPalDevice:
     @mean_voltage.setter
     def mean_voltage(self, values):
         self._mean_voltage._assign(values)
+
+    @property
+    def resting_voltage(self):
+        """The resting voltage of each output channel, in volts.
+
+        Indexed by channel number (see "Channel settings" above). -10 to
+        10 V, with any waveform. The channel outputs it while idle, and
+        its ramps start and end there (see "Ramps" above). Set to the
+        nearest microvolt. A change applies to playback in progress.
+        """
+        return self._resting_voltage
+
+    @resting_voltage.setter
+    def resting_voltage(self, values):
+        self._resting_voltage._assign(values)
 
     @property
     def play_duration(self):
@@ -931,8 +931,8 @@ class SynthPalDevice:
             "samples per cycle)\n"
             f"waveform: {list(self._waveform)}\n"
             f"amplitude: {list(self._amplitude)}\n"
-            f"resting_voltage: {list(self._resting_voltage)}\n"
             f"mean_voltage: {list(self._mean_voltage)}\n"
+            f"resting_voltage: {list(self._resting_voltage)}\n"
             f"play_duration: {list(self._play_duration)}\n"
             f"on_ramp_duration: {list(self._on_ramp_duration)}\n"
             f"off_ramp_duration: {list(self._off_ramp_duration)}\n"
@@ -1044,17 +1044,6 @@ class SynthPalDevice:
         self._amplitude_uv[1:] = microvolts
         return volts
 
-    def _apply_resting_voltage(self, values):
-        # Any resting voltage within -10 V to 10 V goes with any waveform
-        volts = [self._to_volts(value, "resting_voltage", -10, 10)
-                 for value in values]
-        microvolts = [round(v * 1e6) for v in volts]
-        self._write_command(self._OP_SET_RESTING_VOLTAGE,
-                            struct.pack("<4i", *microvolts))
-        self._read_ack("setting resting_voltage")
-        self._resting_uv[1:] = microvolts
-        return volts
-
     def _apply_mean_voltage(self, values):
         volts = [self._to_volts(value, "mean_voltage", -10, 10)
                  for value in values]
@@ -1065,6 +1054,17 @@ class SynthPalDevice:
                             struct.pack("<4i", *microvolts))
         self._read_ack("setting mean_voltage")
         self._mean_uv[1:] = microvolts
+        return volts
+
+    def _apply_resting_voltage(self, values):
+        # Any resting voltage within -10 V to 10 V goes with any waveform
+        volts = [self._to_volts(value, "resting_voltage", -10, 10)
+                 for value in values]
+        microvolts = [round(v * 1e6) for v in volts]
+        self._write_command(self._OP_SET_RESTING_VOLTAGE,
+                            struct.pack("<4i", *microvolts))
+        self._read_ack("setting resting_voltage")
+        self._resting_uv[1:] = microvolts
         return volts
 
     def _check_output_levels(self, waveforms, amplitudes_uv, means_uv,

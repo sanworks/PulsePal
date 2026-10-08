@@ -44,10 +44,10 @@ The Python and MATLAB classes connect in this order:
    so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal.
 2. Op 78 ('N'): hardware properties and limits.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
-4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 86, 77, 65, 87,
+4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 86, 65, 87,
    68, 66, 69, 84 and 73. In this order each is valid whatever the device holds (see
-   [Levels](#levels)): a resting voltage (op 86) goes with any waveform, a mean voltage of 0 V
-   (op 77) with any amplitude, the default amplitude of 5 V (op 65) then goes with any waveform,
+   [Levels](#levels)): a mean voltage of 0 V (op 77) goes with any amplitude, a resting voltage
+   (op 86) with any waveform, the default amplitude of 5 V (op 65) then goes with any waveform,
    and a sine wave (op 87) then goes with both.
 
 When they close, they send op 81, which puts "Synth Pal v3.0" back on the screen.

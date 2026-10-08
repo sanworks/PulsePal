@@ -98,17 +98,17 @@ classdef SynthPalDevice < handle
                                                     % in progress.
         amplitude = [5 5 5 5] % 1x4, in volts: peak to peak, 0 to 20, or on a 'Fixed Voltage' channel the voltage it
                               % steps to, -10 to 10. See "Levels" above.
-        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle. See "Levels" above.
         meanVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. A periodic waveform's mean. See "Levels" above.
+        restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle. See "Levels" above.
         playDuration = [1 1 1 1] % 1x4, in seconds: how long the channel plays at full amplitude after its on ramp, up
                                  % to info.maxPlayDuration. 0 plays until stopped. Counted in samples.
         onRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades in after a trigger, up to
                                    % info.maxPlayDuration. 0 for no ramp. See "Ramps" above.
         offRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades out when it stops. 0 for no ramp.
-        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle' or 'Gated'.
-                                           % See "Triggers" above. Not case sensitive.
         linkTriggerChannel1 = true(1,4) % 1x4. true if trigger channel 1 triggers the output channel
         linkTriggerChannel2 = false(1,4) % 1x4. true if trigger channel 2 triggers the output channel
+        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle' or 'Gated'.
+                                           % See "Triggers" above. Not case sensitive.
     end
 
     properties (SetAccess = private)
@@ -223,11 +223,11 @@ classdef SynthPalDevice < handle
             % ramps. Both trigger channels in 'Normal' mode, and all output channels linked to trigger channel 1 and
             % not to trigger channel 2. They match the settings the device starts with.
             obj.frequency = 100;
-            % In this order, each is valid whatever the device holds: a resting voltage goes with any waveform, a
-            % mean of 0 V with any amplitude, 5 V is then a valid amplitude for any waveform, and a sine wave is
+            % In this order, each is valid whatever the device holds: a mean of 0 V goes with any amplitude, a
+            % resting voltage with any waveform, 5 V is then a valid amplitude for any waveform, and a sine wave is
             % then valid
-            obj.restingVoltage = 0;
             obj.meanVoltage = 0;
+            obj.restingVoltage = 0;
             obj.amplitude = 5;
             obj.waveform = 'Sine';
             obj.playDuration = 1;
@@ -344,16 +344,6 @@ classdef SynthPalDevice < handle
             obj.amplitude = volts;
         end
 
-        function set.restingVoltage(obj, volts)
-            volts = obj.checkVolts(volts, 'restingVoltage', -10, 10); % Any resting voltage goes with any waveform
-            microvolts = obj.roundHalfEven(volts*1e6);
-            if obj.initialized %#ok<MCSUP>
-                obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(microvolts), 'uint8'));
-                obj.confirmWrite('setting restingVoltage');
-            end
-            obj.restingVoltage = volts;
-        end
-
         function set.meanVoltage(obj, volts)
             volts = obj.checkVolts(volts, 'meanVoltage', -10, 10);
             microvolts = obj.roundHalfEven(volts*1e6);
@@ -363,6 +353,16 @@ classdef SynthPalDevice < handle
                 obj.confirmWrite('setting meanVoltage');
             end
             obj.meanVoltage = volts;
+        end
+
+        function set.restingVoltage(obj, volts)
+            volts = obj.checkVolts(volts, 'restingVoltage', -10, 10); % Any resting voltage goes with any waveform
+            microvolts = obj.roundHalfEven(volts*1e6);
+            if obj.initialized %#ok<MCSUP>
+                obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(microvolts), 'uint8'));
+                obj.confirmWrite('setting restingVoltage');
+            end
+            obj.restingVoltage = volts;
         end
 
         function set.playDuration(obj, seconds)

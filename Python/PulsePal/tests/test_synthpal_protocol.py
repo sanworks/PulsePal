@@ -184,8 +184,8 @@ def test_connection_sequence_programs_the_defaults():
         command("X", bytes([0x0F])),
         command("F", struct.pack("<I", 10000)),
         # In this order, each is valid whatever the device holds (see the next test)
-        command("V", struct.pack("<4i", 0, 0, 0, 0)),
         command("M", struct.pack("<4i", 0, 0, 0, 0)),
+        command("V", struct.pack("<4i", 0, 0, 0, 0)),
         command("A", struct.pack("<4i", *[5_000_000] * 4)),
         command("W", bytes(4)),
         command("D", struct.pack("<4I", *[1_000_000] * 4)),
@@ -204,8 +204,8 @@ def test_connection_sequence_programs_the_defaults():
     assert device.sampling_rate == 100000
     assert device.waveform == [None] + ["Sine"] * 4
     assert device.amplitude == [None, 5, 5, 5, 5]
-    assert device.resting_voltage == [None, 0, 0, 0, 0]
     assert device.mean_voltage == [None, 0, 0, 0, 0]
+    assert device.resting_voltage == [None, 0, 0, 0, 0]
     assert device.play_duration == [None, 1, 1, 1, 1]
     assert device.on_ramp_duration == [None, 0, 0, 0, 0]
     assert device.off_ramp_duration == [None, 0, 0, 0, 0]

@@ -173,7 +173,7 @@ triggers or the menu, check:
 - The joystick menu: edit each setting of an output channel, the frequency and the trigger mode;
   play and stop a channel from its menu and see the item change back when its play duration
   ends; trigger a trigger channel; screen saver, device info, reset and exit. The splash screen
-  shows the Synth Pal logo. Mean Voltage follows Resting Voltage, and On Ramp and Off Ramp
+  shows the Synth Pal logo. Mean Voltage comes before Resting Voltage, and On Ramp and Off Ramp
   follow Play Duration; a ramp of 0 shows "None". The mean voltage edits within what the
   amplitude allows, and the resting voltage over the whole -10 V to 10 V. The waveform list
   reads downwards, Sine at the top: down moves to Triangle, and on to Fixed Voltage (the other
