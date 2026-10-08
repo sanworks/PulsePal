@@ -15,17 +15,15 @@ They also run under pytest, if it is installed:
 """
 import copy
 import gc
-import importlib.util
 import struct
 import sys
 from pathlib import Path
 
 import numpy as np
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "WavePal.py"
-_spec = importlib.util.spec_from_file_location("WavePal_under_test", MODULE_PATH)
-WavePal = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(WavePal)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pulsepal import wave_pal as WavePal  # noqa: E402
+from pulsepal import PulsePalError  # noqa: E402
 
 OP_MENU_BYTE = 213
 CLOCK_HZ = 24000000
@@ -64,7 +62,7 @@ class FakeWavePal:
         payload = data[2:]
         expected_lengths = {72: 0, 81: 0, 89: 6, ord("N"): 0, ord("S"): 4, ord("R"): 1,
                             ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4,
-                            ord("D"): 16, ord("T"): 4, ord("I"): 8, ord("G"): 0}
+                            ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
         if op == ord("L"):
             channel, n_samples = struct.unpack("<BI", payload[:5])
             assert len(payload) == 5 + 2 * n_samples, "load waveform length"
@@ -83,6 +81,9 @@ class FakeWavePal:
             return b""
         if op == ord("G"):
             return self.status_reply
+        if op == ord("T"):
+            # Pulse Pal's trigger mode codes, and Master; 3 is Pulse Pal's param sync, which Wave Pal lacks
+            return bytes([self.ack and all(mode in (0, 1, 2, 4) for mode in payload)])
         if op == ord("R") and self.ack and payload[0] != self.range_index:
             self.range_index = payload[0]
             self.loaded.clear()  # The firmware unloads waveforms when the range changes
@@ -123,8 +124,8 @@ def connect(fake=None):
 
 
 def expect_error(function, *args, error=None):
-    """Run function and check that it raises WavePalError (or `error`)."""
-    error = error or WavePal.WavePalError
+    """Run function and check that it raises PulsePalError (or `error`)."""
+    error = error or PulsePalError
     try:
         function(*args)
     except error as exc:
@@ -153,7 +154,7 @@ def test_connection_sequence_programs_the_defaults():
         command("R", bytes([3])),
         command("O", bytes(4)),
         command("D", bytes(16)),
-        command("T", bytes(4)),
+        command("T", bytes(2)),
         command("I", bytes([1, 1, 1, 1, 0, 0, 0, 0])),
     ], fake.ops()
     assert device.info.firmware_version == 1
@@ -162,7 +163,7 @@ def test_connection_sequence_programs_the_defaults():
     assert device.sampling_rate == 10000
     assert device.output_range == "-10V:10V"
     assert device.loop_mode == [None, False, False, False, False]
-    assert device.trigger_mode == [None] + ["Normal"] * 4
+    assert device.trigger_mode == [None, "Normal", "Normal"]
     assert device.link_trigger_channel1 == [None, True, True, True, True]
     assert device.link_trigger_channel2 == [None, False, False, False, False]
 
@@ -236,11 +237,11 @@ def test_waveforms_are_read_only_copies():
     expect_error(device.waveforms[1].__setitem__, 0, 3, error=ValueError)
 
 
-def test_play_stop_and_fixed_voltage_messages():
+def test_trigger_stop_and_fixed_voltage_messages():
     device, fake = connect()
-    device.play(1)
-    device.play([2, 4])
-    device.play(np.array([3]))
+    device.trigger(1)
+    device.trigger([2, 4])
+    device.trigger(np.array([3]))
     device.stop()
     device.stop(3)
     device.stop([1, 2])
@@ -254,10 +255,12 @@ def test_play_stop_and_fixed_voltage_messages():
         command("X", bytes([0b0011])),
         command("!", struct.pack("<BH", 0b1001, 49151)),
     ]
-    for channels in (0, 5, [], [1, 7], True):
-        expect_error(device.play, channels)
+    device.trigger((1, 2))
+    assert fake.writes[-1] == command("P", bytes([0b0011]))
+    for channels in (0, 5, [], [1, 7], True, "1"):
+        expect_error(device.trigger, channels)
     expect_error(device.set_fixed_voltage, 1, 11)
-    assert len(fake.writes) == 7
+    assert len(fake.writes) == 8
 
 
 def test_sampling_rate_resends_loop_durations_in_samples():
@@ -340,17 +343,24 @@ def test_a_setting_the_device_rejects_is_left_unchanged():
     assert device.loop_mode == [None, False, False, False, False]
 
 
-def test_trigger_modes_and_links():
+def test_trigger_modes_belong_to_the_trigger_channels():
+    """As in Pulse Pal, with Pulse Pal's codes: one mode per trigger channel."""
     device, fake = connect()
-    device.trigger_mode[1] = "master"
-    device.trigger_mode[2:4] = ["TOGGLE", "Gated"]
+    device.trigger_mode[2] = "gated"
+    device.trigger_mode = ["Toggle", "MASTER"]
+    device.trigger_mode = "Normal"
     assert fake.writes == [
-        command("T", bytes([1, 0, 0, 0])),
-        command("T", bytes([1, 2, 3, 0])),
+        command("T", bytes([0, 2])),
+        command("T", bytes([1, 4])),
+        command("T", bytes([0, 0])),
     ]
-    assert device.trigger_mode == [None, "Master", "Toggle", "Gated", "Normal"]
+    assert device.trigger_mode == [None, "Normal", "Normal"]
+    expect_error(device.trigger_mode.__setitem__, 1, "Param Sync")  # Pulse Pal 3 firmware only
     expect_error(device.trigger_mode.__setitem__, 1, "Restart")
     expect_error(device.trigger_mode.__setitem__, 1, 1)
+    expect_error(device.trigger_mode.__setitem__, 3, "Normal", error=IndexError)
+    expect_error(setattr, device, "trigger_mode", ["Normal"] * 4)
+    assert len(fake.writes) == 3
 
     fake.writes.clear()
     device.link_trigger_channel2[3] = True    # Both trigger channels travel together

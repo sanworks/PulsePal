@@ -9,7 +9,7 @@
 % Every sample the device plays is checked: its firmware sums the DAC codes each channel plays, and each test
 % compares the sums with the waveforms it loaded. The expected DAC codes are computed here, independently of
 % WavePalDevice, so a mistake in its voltage encoding also fails. /Python/PulsePal/tests/wavepal_hardware_test.py
-% tests the firmware itself more thoroughly.
+% tests the firmware itself more thoroughly, including the trigger modes with TTL edges.
 
 %{
 ----------------------------------------------------------------------------
@@ -81,7 +81,7 @@ assert(W.info.hardwareVersion == 3, 'hardware version');
 assert(W.info.maxSamples == 1000000, 'maximum samples');
 assert(W.samplingRate == 10000 && strcmp(W.outputRange, '-10V:10V'), 'default sampling rate or range');
 assert(isequal(W.loopMode, false(1,4)) && isequal(W.loopDuration, zeros(1,4)), 'default loop settings');
-assert(isequal(W.triggerMode, {'Normal', 'Normal', 'Normal', 'Normal'}), 'default trigger mode');
+assert(isequal(W.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
 assert(isequal(W.linkTriggerChannel1, true(1,4)) && isequal(W.linkTriggerChannel2, false(1,4)), 'default links');
 assert(isempty(W.status().playing), 'a channel is playing after connecting');
 end
@@ -92,7 +92,7 @@ W.samplingRate = 100000;
 bufferSamples = W.info.bufferSamples;
 for nSamples = [1, bufferSamples, bufferSamples + 1, 3*bufferSamples + 7]
     codes = loadRandomWaveform(W, 1, nSamples);
-    W.play(1);
+    W.trigger(1);
     waitUntilStopped(W, 1, 5);
     checkPlayed(W, 1, codes, nSamples);
 end
@@ -104,7 +104,7 @@ codes = loadRandomWaveform(W, 2, 1000);
 W.loopMode(2) = true;
 W.loopDuration(2) = 0.12345;
 cleanup = onCleanup(@() resetLoops(W));
-W.play(2);
+W.trigger(2);
 waitUntilStopped(W, 2, 2);
 checkPlayed(W, 2, codes, 12345);
 end
@@ -117,7 +117,7 @@ W.loopMode(3) = true;
 W.loopDuration(3) = 0.5;
 cleanup = onCleanup(@() resetLoops(W));
 W.samplingRate = 50000;
-W.play(3);
+W.trigger(3);
 waitUntilStopped(W, 3, 2);
 checkPlayed(W, 3, codes, 25000);
 assert(abs(W.actualSamplingRate - 50000) < 1e-9, 'actualSamplingRate at 50 kHz');
@@ -126,31 +126,28 @@ assert(abs(W.actualSamplingRate - 24e6/544) < 1e-9, 'actualSamplingRate at 44.1 
 end
 
 function testTriggerModes(W)
+% Trigger modes belong to the trigger channels, as in PulsePalDevice. Whatever the mode, a soft trigger starts an idle
+% channel and is ignored by a playing one. The modes' effect on TTL edges needs a TTL source: see
+% /Python/PulsePal/tests/wavepal_hardware_test.py --driver.
 W.samplingRate = 10000;
 loadRandomWaveform(W, 1, 100000); % 10 s
 cleanup = onCleanup(@() setNormalMode(W));
-W.triggerMode{1} = 'normal'; % A second trigger is ignored. Names are not case sensitive.
-assert(strcmp(W.triggerMode{1}, 'Normal'), 'trigger mode name not normalized');
-W.play(1);
-pause(0.5);
-W.play(1);
-pause(0.2);
-samplesPlayed = W.playbackChecksums();
-assert(samplesPlayed(1) > 6000, 'normal mode restarted the waveform');
-W.triggerMode{1} = 'Master'; % A second trigger restarts it
-W.play(1);
-pause(0.2);
-samplesPlayed = W.playbackChecksums();
-assert(samplesPlayed(1) < 4000, 'master mode did not restart the waveform');
-W.triggerMode = {'Toggle', 'Normal', 'Normal', 'Normal'}; % A second trigger stops it
-W.play(1);
-pause(0.05);
-assert(~ismember(1, W.status().playing), 'toggle mode did not stop the waveform');
-W.play(1);
-pause(0.05);
-assert(ismember(1, W.status().playing), 'toggle mode did not start the waveform');
-W.stop(1);
-assert(isempty(W.status().playing), 'stop(1) did not stop channel 1');
+W.triggerMode{1} = 'toggle'; % Names are not case sensitive
+assert(isequal(W.triggerMode, {'Toggle', 'Normal'}), 'trigger mode name not normalized');
+W.triggerMode = {'Gated', 'Master'};
+assert(isequal(W.triggerMode, {'Gated', 'Master'}), 'trigger modes not set');
+for mode = W.info.triggerModes
+    W.triggerMode = mode{1};
+    W.trigger(1);
+    pause(0.5);
+    W.trigger(1);
+    pause(0.2);
+    samplesPlayed = W.playbackChecksums();
+    assert(samplesPlayed(1) > 6000, 'a soft trigger in %s mode restarted the waveform', mode{1});
+    assert(ismember(1, W.status().playing), 'a soft trigger in %s mode stopped the waveform', mode{1});
+    W.stop(1);
+    assert(isempty(W.status().playing), 'stop(1) did not stop channel 1');
+end
 end
 
 function testOutputRangeChangeReloadsWaveforms(W)
@@ -164,7 +161,7 @@ cleanup = onCleanup(@() setRange(W, '-10V:10V'));
 assert(isequal(W.status().samplesLoaded, lengths), 'the waveforms were not loaded again');
 for i = 1:4
     codes = expectedCodes(W.waveforms{i}, [-5 5]);
-    W.play(i);
+    W.trigger(i);
     waitUntilStopped(W, i, 3);
     checkPlayed(W, i, codes, numel(codes));
 end
@@ -180,7 +177,7 @@ for i = 1:4
     W.outputRange = W.info.outputRanges{i};
     limits = rangeLimits(W.outputRange);
     codes = loadRandomWaveform(W, 1, 20000, limits(1), limits(2));
-    W.play(1);
+    W.trigger(1);
     waitUntilStopped(W, 1, 3);
     checkPlayed(W, 1, codes, numel(codes));
     W.loadWaveform(1, 0);
@@ -200,8 +197,8 @@ expectError(@() W.loadWaveform(5, [1 2]));
 expectError(@() W.loadWaveform(1, []));
 expectError(@() W.loadWaveform(1, [0 10.01])); % Outside -10 V to 10 V
 expectError(@() W.loadWaveform(1, [0 NaN]));
-expectError(@() W.play([1 7]));
-expectError(@() W.play([]));
+expectError(@() W.trigger([1 7]));
+expectError(@() W.trigger([]));
 expectError(@() W.setFixedVoltage(1, 11));
 expectError(@() setProperty(W, 'samplingRate', 100001));
 expectError(@() setProperty(W, 'samplingRate', 44100.5));
@@ -210,6 +207,8 @@ expectError(@() setProperty(W, 'loopMode', [true false]));
 expectError(@() setProperty(W, 'loopMode', 2));
 expectError(@() setProperty(W, 'loopDuration', -1));
 expectError(@() setProperty(W, 'triggerMode', 'Restart'));
+expectError(@() setProperty(W, 'triggerMode', 'Param Sync')); % Pulse Pal firmware only
+expectError(@() setProperty(W, 'triggerMode', {'Normal', 'Normal', 'Normal', 'Normal'})); % Two trigger channels
 expectError(@() setProperty(W, 'linkTriggerChannel1', [1 0 2 0]));
 assert(W.samplingRate ~= 100001 && ~any(W.loopMode) && strcmp(W.outputRange, '-10V:10V'), ...
     'a refused setting was changed');
@@ -227,7 +226,7 @@ W.loadWaveform(1, volts);
 loadTime = toc(startTime);
 codes = expectedCodes(volts, [-10 10]);
 underrunsBefore = W.status().underruns;
-W.play(1);
+W.trigger(1);
 waitUntilStopped(W, 1, 15);
 checkPlayed(W, 1, codes, numel(codes));
 assert(isequal(W.status().underruns, underrunsBefore), 'underruns during playback');

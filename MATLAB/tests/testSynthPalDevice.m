@@ -9,7 +9,7 @@
 % The device counts the samples each channel plays and sums their DAC codes. The tests compare these with values
 % worked out here from the settings, independently of SynthPalDevice, so a mistake in how it encodes frequencies,
 % voltages or durations fails: play durations in samples, the mean voltage's DAC code (the mean of any whole
-% number of cycles), the codes of a square wave's high half (mean voltage plus half the amplitude), the code of a
+% number of cycles), the codes of a square wave's high half (mean voltage plus half the peak to peak voltage), the code of a
 % fixed voltage, and playbacks lengthened by their ramps.
 % /Python/PulsePal/tests/synthpal_hardware_test.py tests the firmware's synthesis itself, code by code.
 
@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 function testSynthPalDevice(portString)
 tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAreExactInSamples, ...
     @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
+    @testWaveformChangesFindAnAcceptedOrder, @testConfigureSetsLevelsTogether, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testSyncToDevice, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused};
 S = SynthPalDevice(portString);
@@ -53,7 +54,7 @@ for i = 1:numel(tests)
     end
     fprintf('%-42s %6.1f s  %s\n', testName, toc(startTime), result);
 end
-S.setDefaults();
+S.setDefaultParams();
 delete(S);
 % This test needs the port to itself, so it runs last
 startTime = tic;
@@ -79,8 +80,8 @@ assert(S.info.minFrequency == 1 && S.info.maxFrequency == 20000, 'frequency limi
 assert(S.info.maxPlayDuration == 3600, 'maximum play duration');
 assert(S.frequency == 100 && S.samplesPerCycle == 1000 && S.samplingRate == 100000, 'default frequency');
 assert(isequal(S.waveform, {'Sine', 'Sine', 'Sine', 'Sine'}), 'default waveform');
-assert(isequal(S.amplitude, [5 5 5 5]) && isequal(S.restingVoltage, [0 0 0 0]) && ...
-    isequal(S.meanVoltage, [0 0 0 0]), 'default levels');
+assert(isequal(S.peakToPeak, [5 5 5 5]) && isequal(S.fixedVoltage, [5 5 5 5]) && ...
+    isequal(S.restingVoltage, [0 0 0 0]) && isequal(S.meanVoltage, [0 0 0 0]), 'default levels');
 assert(isequal(S.playDuration, [1 1 1 1]), 'default play duration');
 assert(isequal(S.onRampDuration, [0 0 0 0]) && isequal(S.offRampDuration, [0 0 0 0]), 'default ramps');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
@@ -111,7 +112,7 @@ durations = [1 0.12345 0.25 0.00001];
 for i = 1:numel(frequencies)
     S.frequency = frequencies(i);
     S.playDuration(4) = durations(i);
-    S.play(4);
+    S.trigger(4);
     waitUntilStopped(S, 4, durations(i) + 2);
     checkPlayed(S, 4, expectedSamples(S, durations(i)));
 end
@@ -122,18 +123,18 @@ function testMeanVoltageIsTheMean(S)
 S.frequency = 1000;
 meanVoltages = [2.5 -2.25 6 -7.5];
 restingVoltages = [0 1 -3 -7.5];
-amplitudes = [4 3 6 5];
+peakToPeaks = [4 3 6 5];
 for i = 1:4
-    setLevels(S, i, amplitudes(i), meanVoltages(i), restingVoltages(i));
+    setLevels(S, i, peakToPeaks(i), meanVoltages(i), restingVoltages(i));
 end
 S.waveform = {'Sine', 'Triangle', 'Square', 'Sawtooth'};
 S.playDuration = 0.02; % 20 cycles
-S.play(1:4);
+S.trigger(1:4);
 waitUntilStopped(S, 1:4, 2);
 [samplesPlayed, sums] = S.playbackChecksums();
 for i = 1:4
     assert(samplesPlayed(i) == 2000, 'channel %d played %d samples', i, samplesPlayed(i));
-    limits = rangeLimits(meanVoltages(i), amplitudes(i), restingVoltages(i));
+    limits = rangeLimits(meanVoltages(i), peakToPeaks(i), restingVoltages(i));
     meanVoltageCode = (meanVoltages(i) - limits(1))/(limits(2) - limits(1))*65536;
     meanCode = sums(i)/2000;
     assert(abs(meanCode - meanVoltageCode) <= 0.5, 'channel %d: mean code %.3f, mean voltage code %.3f', ...
@@ -142,12 +143,12 @@ end
 end
 
 function testAmplitudeOfASquareWave(S)
-% The first half of a square wave's cycle is the mean voltage plus half the amplitude
+% The first half of a square wave's cycle is the mean voltage plus half the peak to peak voltage
 S.frequency = 500; % 200 samples per cycle
 setLevels(S, 2, 3.3, -1);
 S.waveform{2} = 'Square';
 S.playDuration(2) = 100/S.samplingRate;
-S.play(2);
+S.trigger(2);
 waitUntilStopped(S, 2, 1);
 limits = rangeLimits(-1, 3.3);
 highCode = round((-1 + 3.3/2 - limits(1))/(limits(2) - limits(1))*65536);
@@ -160,14 +161,13 @@ cases = {2, 2.5, '0V:5V'; 8, 5, '0V:10V'; 1, 0, '-5V:5V'; 2, -4, '-5V:5V'; 12, 0
 for i = 1:size(cases, 1)
     setLevels(S, 3, cases{i,1}, cases{i,2});
     ranges = S.status().outputRanges;
-    assert(strcmp(ranges{3}, cases{i,3}), 'amplitude %g V around %g V: range %s, expected %s', ...
+    assert(strcmp(ranges{3}, cases{i,3}), '%g V peak to peak around %g V: range %s, expected %s', ...
         cases{i,1}, cases{i,2}, ranges{3}, cases{i,3});
 end
 end
 
 function testFixedVoltage(S)
-% A fixed voltage plays its amplitude's code, in the range that holds it and the resting voltage, for its play
-% duration. Only a fixed voltage takes a negative amplitude.
+% A fixed voltage plays its own code, in the range that holds it and the resting voltage, for its play duration
 S.frequency = 1000; % 100 kHz
 cases = {-2.5, 1, '-5V:5V'; 4, 0, '0V:5V'; 9.99, -3, '-10V:10V'; 0, 7, '0V:10V'};
 for i = 1:size(cases, 1)
@@ -179,17 +179,51 @@ for i = 1:size(cases, 1)
     limits = sscanf(strrep(cases{i,3}, 'V', ''), '%f:%f')';
     fixedCode = min(round((fixedVoltage - limits(1))/(limits(2) - limits(1))*65536), 65535);
     S.playDuration(3) = 150/S.samplingRate;
-    S.play(3);
+    S.trigger(3);
     waitUntilStopped(S, 3, 1);
     checkPlayed(S, 3, 150, 150*fixedCode);
 end
 setChannel(S, 3, 'Fixed Voltage', -2.5, 0);
-amplitudes = S.amplitude;
-expectError(@() setProperty(S, 'waveform', 'Sine')); % A sine wave of -2.5 V
-expectError(@() setProperty(S, 'amplitude', [1 1 10.5 1])); % Beyond 10 V
-expectError(@() setProperty(S, 'amplitude', [-1 1 1 1])); % Channel 1 plays a sine wave
-assert(strcmp(S.waveform{3}, 'Fixed Voltage') && isequal(S.amplitude, amplitudes), 'a refused setting was changed');
+fixedVoltages = S.fixedVoltage;
+expectError(@() setProperty(S, 'fixedVoltage', [1 1 10.5 1])); % Beyond 10 V
+expectError(@() setProperty(S, 'peakToPeak', [-1 1 1 1])); % Peak to peak voltages are 0 to 20 V
+assert(strcmp(S.waveform{3}, 'Fixed Voltage') && isequal(S.fixedVoltage, fixedVoltages), 'a refused setting was changed');
 setChannel(S, 3, 'Sine', 5, 0);
+end
+
+function testWaveformChangesFindAnAcceptedOrder(S)
+% A sine wave of 20 V peak to peak cannot become a fixed voltage of -5 V by either op first: the device would refuse
+% a fixed voltage of 20 V, and a sine wave of -5 V peak to peak. The class goes through 0 V, and back.
+S.frequency = 1000; % 100 kHz
+S.configure(4, 'waveform', 'Sine', 'peakToPeak', 20, 'meanVoltage', 0, 'restingVoltage', 0, 'fixedVoltage', -5);
+S.waveform{4} = 'Fixed Voltage';
+assert(strcmp(S.status().outputRanges{4}, '-5V:5V'), 'channel 4 does not hold a fixed voltage of -5 V');
+S.playDuration(4) = 100/S.samplingRate;
+S.trigger(4);
+waitUntilStopped(S, 4, 1);
+checkPlayed(S, 4, 100, 0); % Code 0: -5 V in the -5 V to 5 V range
+S.waveform{4} = 'Sine';
+assert(strcmp(S.status().outputRanges{4}, '-10V:10V'), 'channel 4 does not hold a sine wave of 20 V peak to peak');
+setChannel(S, 4, 'Sine', 5, 0);
+S.playDuration(4) = 1;
+end
+
+function testConfigureSetsLevelsTogether(S)
+% From 2 V peak to peak around 9 V to 20 V around 0 V needs the mean voltage first, and back needs the peak to peak
+% voltage first: configure() works out the order. Settings that do not go together are refused, and nothing changes.
+S.configure(2, 'peakToPeak', 2, 'meanVoltage', 9, 'restingVoltage', 9);
+assert(strcmp(S.status().outputRanges{2}, '0V:10V'), '2 V around 9 V not in the 0 V to 10 V range');
+S.configure(2, 'peakToPeak', 20, 'meanVoltage', 0, 'restingVoltage', 0);
+assert(strcmp(S.status().outputRanges{2}, '-10V:10V'), '20 V around 0 V not in the -10 V to 10 V range');
+S.configure([2 3], 'peakToPeak', [2 4], 'meanVoltage', [9 -1], 'restingVoltage', [9 -1]);
+assert(isequal(S.peakToPeak(2:3), [2 4]) && isequal(S.meanVoltage(2:3), [9 -1]), 'configure() of two channels');
+expectError(@() S.configure(2, 'peakToPeak', 20)); % 9 V + 10 V
+expectError(@() S.configure(2, 'amplitude', 1)); % Not a setting
+expectError(@() S.configure([2 3], 'peakToPeak', [1 2 3]));
+expectError(@() S.configure(5, 'peakToPeak', 1));
+assert(S.peakToPeak(2) == 2 && S.meanVoltage(2) == 9, 'a refused configure() changed a setting');
+setLevels(S, 2, 5, 0);
+setLevels(S, 3, 5, 0);
 end
 
 function testRampsLengthenPlayback(S)
@@ -201,7 +235,7 @@ for i = 1:size(ramps, 1)
     S.onRampDuration(2) = ramps(i, 1);
     S.playDuration(2) = 0.005;
     S.offRampDuration(2) = ramps(i, 2);
-    S.play(2);
+    S.trigger(2);
     waitUntilStopped(S, 2, 2);
     checkPlayed(S, 2, expectedSamples(S, ramps(i, 1), true) + 500 + expectedSamples(S, ramps(i, 2), true));
 end
@@ -213,10 +247,10 @@ end
 function testInfiniteDurationAndStop(S)
 S.frequency = 1000;
 S.playDuration(1) = 0;
-S.play(1);
+S.trigger(1);
 pause(0.3);
 assert(ismember(1, S.status().playing), 'channel 1 stopped by itself');
-S.play(1); % Ignored while it plays
+S.trigger(1); % Ignored while it plays
 pause(0.05);
 [samplesPlayed, ~] = S.playbackChecksums();
 assert(samplesPlayed(1) > 30000, 'the second trigger restarted channel 1');
@@ -232,7 +266,7 @@ S.frequency = 100;
 setLevels(S, 4, 2, 0);
 S.playDuration(4) = 1;
 startTime = tic;
-S.play(4);
+S.trigger(4);
 pause(0.3);
 S.frequency = 1000;
 S.waveform{4} = 'Triangle';
@@ -252,7 +286,7 @@ S.autoSync = false;
 cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
 S.frequency = 2000;
 S.waveform{1} = 'Fixed Voltage';
-S.amplitude(1) = 2;
+S.fixedVoltage(1) = 2;
 S.restingVoltage(1) = 0.5;
 S.playDuration(1) = 0.005;
 assert(S.status().samplesPerCycle == 100, 'a setting reached the device before syncToDevice()');
@@ -260,7 +294,7 @@ assert(S.samplesPerCycle == 48, 'samplesPerCycle %d, expected 48', S.samplesPerC
 S.syncToDevice();
 status = S.status();
 assert(status.samplesPerCycle == 48 && strcmp(status.outputRanges{1}, '0V:5V'), 'the set was not applied');
-S.play(1);
+S.trigger(1);
 waitUntilStopped(S, 1, 1);
 checkPlayed(S, 1, 480, 480*round(2/5*65536)); % 5 ms at 96 kHz, at the fixed voltage's code
 S.autoSync = true;
@@ -277,11 +311,11 @@ S.playDuration(1) = 0.005;
 S.triggerMode{2} = 'Param Sync';
 S.autoSync = false;
 cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
-S.amplitude(1) = 3;
+S.fixedVoltage(1) = 3;
 S.frequency = 2000;
 S.syncToDevice();
 assert(S.status().samplesPerCycle == 100, 'the stored set was applied');
-S.play(1);
+S.trigger(1);
 waitUntilStopped(S, 1, 1);
 checkPlayed(S, 1, 500, 500*round(1/5*65536)); % Still the fixed voltage of 1 V, at 100 kHz
 S.autoSync = true;
@@ -302,8 +336,9 @@ expectError(@() setProperty(S, 'frequency', 20000.01));
 expectError(@() setProperty(S, 'frequency', NaN));
 expectError(@() setProperty(S, 'waveform', 'Ramp'));
 expectError(@() setProperty(S, 'waveform', {'Sine', 'Sine'}));
-expectError(@() setProperty(S, 'amplitude', [3 1 1 1])); % 9 V + 1.5 V on channel 1
-expectError(@() setProperty(S, 'amplitude', 20.1));
+expectError(@() setProperty(S, 'peakToPeak', [3 1 1 1])); % 9 V + 1.5 V on channel 1
+expectError(@() setProperty(S, 'peakToPeak', 20.1));
+expectError(@() setProperty(S, 'fixedVoltage', -10.1));
 expectError(@() setProperty(S, 'meanVoltage', [-9.5 0 0 0])); % -9.5 V - 1 V on channel 1
 expectError(@() setProperty(S, 'meanVoltage', 10.5));
 expectError(@() setProperty(S, 'restingVoltage', 10.5));
@@ -314,17 +349,15 @@ expectError(@() setProperty(S, 'offRampDuration', 3600.5));
 expectError(@() setProperty(S, 'triggerMode', 'Master'));
 expectError(@() setProperty(S, 'triggerMode', {'Normal', 'Normal', 'Normal', 'Normal'}));
 expectError(@() setProperty(S, 'linkTriggerChannel1', [1 0 2 0]));
-expectError(@() S.play([1 7]));
-expectError(@() S.play([]));
+expectError(@() S.trigger([1 7]));
+expectError(@() S.trigger([]));
 expectError(@() S.setScreenSaver(2));
 expectError(@() setProperty(S, 'autoSync', 2));
 expectError(@() setProperty(S, 'triggerMode', 'Sync'));
 S.autoSync = false;
-S.amplitude(2) = -1; % Accepted here: the waveform could still become a fixed voltage...
-expectError(@() S.syncToDevice()); % ...but not with a sine wave
-S.amplitude(2) = 5;
+expectError(@() setProperty(S, 'peakToPeak', [3 1 1 1])); % Checked with autoSync off too
 S.autoSync = true;
-assert(S.amplitude(1) == 2 && S.meanVoltage(1) == 9 && S.restingVoltage(1) == 9, 'a refused level was changed');
+assert(S.peakToPeak(1) == 2 && S.meanVoltage(1) == 9 && S.restingVoltage(1) == 9, 'a refused level was changed');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'a refused trigger mode was changed');
 setLevels(S, 1, 5, 0);
 end
@@ -346,29 +379,26 @@ end
 
 % --- Helpers ---
 
-function setLevels(S, channel, amplitude, meanVoltage, restingVoltage)
-% Sets a channel's amplitude, mean and resting voltage (the mean voltage, unless given) in an order the device accepts
-% from any earlier levels
+function setLevels(S, channel, peakToPeak, meanVoltage, restingVoltage)
+% Sets a channel's peak to peak, mean and resting voltage (the mean voltage, unless given)
 if nargin < 5
     restingVoltage = meanVoltage;
 end
-S.amplitude(channel) = 0;
-S.restingVoltage(channel) = restingVoltage;
-S.meanVoltage(channel) = meanVoltage;
-S.amplitude(channel) = amplitude;
+S.configure(channel, 'peakToPeak', peakToPeak, 'meanVoltage', meanVoltage, 'restingVoltage', restingVoltage);
 end
 
-function setChannel(S, channel, waveform, amplitude, restingVoltage, meanVoltage)
-% Sets a channel's waveform and levels in an order the device accepts from any earlier settings: an amplitude of 0
-% goes with any waveform, resting and mean voltage. The mean voltage is the resting voltage, unless given.
-if nargin < 6
-    meanVoltage = restingVoltage;
+function setChannel(S, channel, waveform, level, restingVoltage, meanVoltage)
+% Sets a channel's waveform and levels. level is the peak to peak voltage of a periodic waveform, whose mean voltage is
+% the resting voltage unless given, or the voltage of a fixed voltage.
+if strcmp(waveform, 'Fixed Voltage')
+    S.configure(channel, 'waveform', waveform, 'fixedVoltage', level, 'restingVoltage', restingVoltage);
+else
+    if nargin < 6
+        meanVoltage = restingVoltage;
+    end
+    S.configure(channel, 'waveform', waveform, 'peakToPeak', level, 'meanVoltage', meanVoltage, ...
+                'restingVoltage', restingVoltage);
 end
-S.amplitude(channel) = 0;
-S.waveform{channel} = waveform;
-S.restingVoltage(channel) = restingVoltage;
-S.meanVoltage(channel) = meanVoltage;
-S.amplitude(channel) = amplitude;
 end
 
 function limits = rangeLimits(meanVoltage, amplitude, restingVoltage)

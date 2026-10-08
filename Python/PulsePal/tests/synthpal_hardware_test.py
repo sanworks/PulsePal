@@ -1,6 +1,6 @@
 """Test a connected Synth Pal: synthesis, play durations, and timing budget.
 
-Run it after changing the Synth Pal firmware or SynthPal.py:
+Run it after changing the Synth Pal firmware or pulsepal/synth_pal.py:
 
     python tests/synthpal_hardware_test.py COM3
     python tests/synthpal_hardware_test.py /dev/ttyACM0 --quick
@@ -31,10 +31,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import SynthPal  # noqa: E402
-from SynthPal import SynthPalDevice, SynthPalError  # noqa: E402
-from PulsePal import PulsePalDevice, PulsePalError  # noqa: E402
-from WavePal import WavePalDevice, WavePalError  # noqa: E402
+from pulsepal import synth_pal as SynthPal  # noqa: E402
+from pulsepal import PulsePalDevice, PulsePalError, SynthPalDevice, WavePalDevice  # noqa: E402
 
 SINE_TABLE_SIZE = 4096
 # As fillSineTable() in /Firmware/SynthPal/Playback.ino: computed in double, stored in single
@@ -222,14 +220,16 @@ def check_sum(S, channel, codes):
 
 
 def configure(S, channel, waveform, amplitude, resting, mean=None):
-    """Set a channel's waveform and levels, in an order the device accepts from any
-    earlier settings: an amplitude of 0 goes with any waveform, resting and mean voltage.
-    The mean voltage is the resting voltage unless given."""
-    S.amplitude[channel] = 0
-    S.waveform[channel] = waveform
-    S.resting_voltage[channel] = resting
-    S.mean_voltage[channel] = resting if mean is None else mean
-    S.amplitude[channel] = amplitude
+    """Set a channel's waveform and levels. amplitude is the device's: the peak to peak voltage of
+    a periodic waveform, or the voltage of a fixed voltage. The mean voltage of a periodic waveform
+    is the resting voltage unless given; a fixed voltage ignores it."""
+    if waveform == SynthPal.FIXED_VOLTAGE:
+        levels = {"fixed_voltage": amplitude}
+        if mean is not None:  # With a peak to peak voltage that suits it, for when the waveform changes
+            levels.update(mean_voltage=mean, peak_to_peak=0)
+    else:
+        levels = {"peak_to_peak": amplitude, "mean_voltage": resting if mean is None else mean}
+    S.configure(channel, waveform=waveform, resting_voltage=resting, **levels)
 
 
 def centihz(S):
@@ -289,7 +289,7 @@ def test_every_waveform_plays_the_modelled_samples(S):
             configure(S, 1, waveform, 7.3, -1.2)
             duration = (3.37 * n) / S.sampling_rate
             S.play_duration[1] = duration
-            S.play(1)
+            S.trigger(1)
             wait_until_stopped(S, [1], timeout=duration + 2)
             cycle = expected_cycle(waveform, microvolts(7.3), microvolts(-1.2), n)
             check_played(S, 1, expected_samples(duration, centihz(S)), cycle)
@@ -310,7 +310,7 @@ def test_output_ranges_follow_the_levels(S):
         ranges = S.status().output_ranges
         assert ranges[2] == range_name, (amplitude, resting, ranges)
         S.play_duration[2] = 0.01
-        S.play(2)
+        S.trigger(2)
         wait_until_stopped(S, [2], timeout=1)
         cycle = expected_cycle("Sine", microvolts(amplitude), microvolts(resting),
                                S.samples_per_cycle)
@@ -332,7 +332,7 @@ def test_fixed_voltage_steps_to_its_amplitude(S):
         assert ranges[3] == range_name, (fixed, resting, ranges)
         duration = 0.0123
         S.play_duration[3] = duration
-        S.play(3)
+        S.trigger(3)
         wait_until_stopped(S, [3], timeout=1)
         cycle = expected_cycle("Fixed Voltage", microvolts(fixed), microvolts(resting),
                                S.samples_per_cycle)
@@ -362,10 +362,9 @@ def test_levels_must_suit_the_waveform(S):
     assert send(S._OP_SET_MEAN_VOLTAGE, amplitudes(-10.000001, 0, 0, 0)) == 0  # Beyond 10 V
     assert send(S._OP_SET_MEAN_VOLTAGE, amplitudes(10, 0, 0, 0)) == 1  # A fixed voltage's mean
     assert send(S._OP_SET_AMPLITUDE, amplitudes(-10, 20, 5, 5)) == 1
-    # The class's record of what was sent past it
-    S._resting_uv[1:] = [10_000_000, -10_000_000, 0, 0]
-    S._mean_uv[1:] = [10_000_000, 0, 0, 0]
-    S._amplitude_uv[1:] = [-10_000_000, 20_000_000, 5_000_000, 5_000_000]
+    # The class's record of what the device holds, after what was sent past it
+    S._device_mean_uv = [10_000_000, 0, 0, 0]
+    S._device_amplitude_uv = [-10_000_000, 20_000_000, 5_000_000, 5_000_000]
     assert S.status().output_ranges[1:3] == ["-10V:10V", "-10V:10V"]
     configure(S, 1, "Sine", 5, 0)
     configure(S, 2, "Sine", 5, 0)
@@ -382,7 +381,7 @@ def test_means_are_the_mean_voltage(S):
             configure(S, 3, waveform, 6, resting, mean=0)
             assert S.status().output_ranges[3] == "-5V:5V"
             S.play_duration[3] = 10 * n / S.sampling_rate
-            S.play(3)
+            S.trigger(3)
             wait_until_stopped(S, [3], timeout=2)
             played, sums = S._playback_checksums()
             assert played[3] == 10 * n
@@ -402,7 +401,7 @@ def test_mean_voltage_moves_the_waveform(S):
         ranges = S.status().output_ranges
         assert ranges[2] == range_name, (waveform, amplitude, resting, mean, ranges)
         S.play_duration[2] = 0.0123
-        S.play(2)
+        S.trigger(2)
         wait_until_stopped(S, [2], timeout=1)
         cycle = expected_cycle(waveform, microvolts(amplitude), microvolts(resting), S.samples_per_cycle,
                                microvolts(mean))
@@ -430,7 +429,7 @@ def test_ramps_play_the_modelled_envelope(S):
         S.play_duration[4] = play
         S.on_ramp_duration[4] = on
         S.off_ramp_duration[4] = off
-        S.play(4)
+        S.trigger(4)
         wait_until_stopped(S, [4], timeout=on + play + off + 2)
         rate = centihz(S)
         envelopes = playback_envelopes(expected_samples(on, rate), expected_samples(play, rate),
@@ -451,7 +450,7 @@ def test_a_stop_starts_the_off_ramp(S):
         S.play_duration[1] = 0
         S.on_ramp_duration[1] = 0.01
         S.off_ramp_duration[1] = 0.02
-        S.play(1)
+        S.trigger(1)
         time.sleep(0.1)
         S.stop(1)
         assert 1 in S.status().playing, "the channel stopped before its off ramp"
@@ -479,10 +478,10 @@ def test_a_trigger_during_the_off_ramp_fades_back_in(S):
     S.on_ramp_duration[3] = on
     S.play_duration[3] = play
     S.off_ramp_duration[3] = off
-    S.play(3)
+    S.trigger(3)
     time.sleep(0.4)  # 0.2 s into the off ramp
     assert 3 in S.status().playing
-    S.play(3)
+    S.trigger(3)
     wait_until_stopped(S, [3], timeout=3)
     played, sums = S._playback_checksums()
     rate = centihz(S)
@@ -510,7 +509,7 @@ def test_play_durations_are_exact_in_samples(S):
         S.frequency = hz
         configure(S, 4, "Triangle", 4, 0)
         S.play_duration[4] = duration
-        S.play(4)
+        S.trigger(4)
         wait_until_stopped(S, [4], timeout=duration + 2)
         check_played(S, 4, expected_samples(duration, centihz(S)))
 
@@ -518,7 +517,7 @@ def test_play_durations_are_exact_in_samples(S):
 def test_infinite_duration_plays_until_stopped(S):
     S.frequency = 1000
     S.play_duration[1] = 0
-    S.play(1)
+    S.trigger(1)
     time.sleep(0.3)
     assert 1 in S.status().playing
     S.stop(1)
@@ -530,9 +529,9 @@ def test_infinite_duration_plays_until_stopped(S):
 def test_soft_trigger_is_ignored_while_playing(S):
     S.frequency = 1000
     S.play_duration[1] = 1
-    S.play(1)
+    S.trigger(1)
     time.sleep(0.5)
-    S.play(1)  # Ignored: the channel plays on, without restarting
+    S.trigger(1)  # Ignored: the channel plays on, without restarting
     time.sleep(0.1)
     played, _ = S._playback_checksums()
     assert played[1] > 55000, f"the second soft trigger restarted the channel ({played[1]} samples)"
@@ -545,9 +544,9 @@ def test_a_channel_joining_a_running_clock_plays_exactly(S):
     configure(S, 1, "Sine", 4, 0)
     configure(S, 2, "Sawtooth", 4, 0)
     S.play_duration[1:3] = [2, 0.3]
-    S.play(1)
+    S.trigger(1)
     time.sleep(0.4)
-    S.play(2)
+    S.trigger(2)
     wait_until_stopped(S, [1, 2], timeout=4)
     n = S.samples_per_cycle
     check_played(S, 1, expected_samples(2, centihz(S)), expected_cycle("Sine", 4_000_000, 0, n))
@@ -561,7 +560,7 @@ def test_frequency_change_keeps_the_time_left_to_play(S):
     S.frequency = 100
     S.play_duration[3] = 1
     start = time.monotonic()
-    S.play(3)
+    S.trigger(3)
     time.sleep(0.3)
     S.frequency = 1000
     wait_until_stopped(S, [3], timeout=2)
@@ -576,7 +575,7 @@ def test_settings_change_during_playback(S):
     S.frequency = 500
     configure(S, 1, "Sine", 2, 0)
     S.play_duration[1] = 1
-    S.play(1)
+    S.trigger(1)
     for waveform, amplitude, resting in (("Triangle", 2, 2.5), ("Square", 8, 5),
                                          ("Fixed Voltage", -7, 1), ("Sawtooth", 16, 0),
                                          ("Sine", 1, -3)):
@@ -594,7 +593,7 @@ def test_sync_to_device_applies_at_once_outside_param_sync(S):
     try:
         S.frequency = 2000
         S.waveform[1] = "Triangle"
-        S.amplitude[1] = 3
+        S.peak_to_peak[1] = 3
         S.mean_voltage[1] = 1.5
         S.resting_voltage[1] = 0.5
         S.play_duration[1] = 0.01
@@ -603,7 +602,7 @@ def test_sync_to_device_applies_at_once_outside_param_sync(S):
         S.auto_sync = True
     status = S.status()
     assert status.samples_per_cycle == 48 and status.output_ranges[1] == "0V:5V", status
-    S.play(1)
+    S.trigger(1)
     wait_until_stopped(S, [1], timeout=1)
     check_played(S, 1, expected_samples(0.01, 200_000),
                  expected_cycle("Triangle", 3_000_000, 500_000, 48, 1_500_000))
@@ -616,18 +615,15 @@ def store_next_trial(S, trigger_modes=("Normal", "Param Sync")):
     3000 Hz (32 samples per cycle), channel 1 a fixed voltage of 2 V, channels 2-4 a square wave of
     6 V peak to peak around 1 V, all played for 10 ms."""
     S.trigger_mode = ["Normal", "Param Sync"]
-    S.auto_sync = False
-    try:
+    with S.batch():
         S.frequency = 3000
         S.waveform = ["Fixed Voltage", "Square", "Square", "Square"]
-        S.amplitude = [2, 6, 6, 6]
+        S.fixed_voltage[1] = 2
+        S.peak_to_peak[2:5] = [6, 6, 6]
         S.mean_voltage = [0, 1, 1, 1]
         S.resting_voltage = 0
         S.play_duration = 0.01
         S.trigger_mode = list(trigger_modes)
-        S.sync_to_device()
-    finally:
-        S.auto_sync = True
 
 
 def old_settings(S):
@@ -649,7 +645,7 @@ def test_param_sync_holds_the_set_until_an_edge(S):
     store_next_trial(S)
     status = S.status()
     assert status.samples_per_cycle == 100 and status.output_ranges[1:] == ["-5V:5V"] * 4, status
-    S.play(1)
+    S.trigger(1)
     wait_until_stopped(S, [1], timeout=1)
     check_played(S, 1, 1000, expected_cycle("Sine", 4_000_000, 0, 100))
     S.trigger_mode[2] = "Normal"  # Leaving param sync mode discards the set...
@@ -669,7 +665,7 @@ def test_a_param_sync_edge_loads_the_set(S, D):
     status = S.status()
     assert status.playing == [], f"the param sync edge started {status.playing}"
     assert status.samples_per_cycle == 32 and status.output_ranges[1:] == ["0V:5V"] + ["-5V:5V"] * 3, status
-    S.play([1, 2])
+    S.trigger([1, 2])
     wait_until_stopped(S, [1, 2], timeout=1)
     n = expected_samples(0.01, 300_000)
     check_played(S, 1, n, expected_cycle("Fixed Voltage", 2_000_000, 0, 32))
@@ -685,7 +681,7 @@ def test_a_channel_playing_at_the_edge_finishes_on_its_settings(S, D):
     old_settings(S)
     S.play_duration[3] = 0
     store_next_trial(S)
-    S.play(3)
+    S.trigger(3)
     time.sleep(0.05)
     driver_pulse(D, [2])
     status = S.status()
@@ -694,7 +690,7 @@ def test_a_channel_playing_at_the_edge_finishes_on_its_settings(S, D):
     S.stop(3)
     wait_until_stopped(S, [3], timeout=1)
     assert S.status().output_ranges[3] == "-5V:5V"  # The square wave around 1 V, in its range
-    S.play(3)
+    S.trigger(3)
     wait_until_stopped(S, [3], timeout=1)
     check_played(S, 3, expected_samples(0.01, 300_000), expected_cycle("Square", 6_000_000, 0, 32, 1_000_000))
     assert played_before[3] > 1000
@@ -730,7 +726,7 @@ def test_four_channels_at_100khz(S, report, seconds=10):
     S.play_duration = seconds * 3 / 5
     S.off_ramp_duration = seconds / 5
     S.status()  # Reset the longest interrupt and the late updates
-    S.play([1, 2, 3, 4])
+    S.trigger([1, 2, 3, 4])
     longest = wait_until_stopped(S, [1, 2, 3, 4], timeout=seconds + 3)
     late = S.status().late_updates
     envelopes = playback_envelopes(seconds * 20000, seconds * 60000, seconds * 20000)
@@ -749,12 +745,11 @@ def test_four_channels_at_100khz(S, report, seconds=10):
 def test_other_classes_are_refused(S):
     port = S.port.port
     S.close()
-    for device_class, error_class in ((PulsePalDevice, PulsePalError),
-                                      (WavePalDevice, WavePalError)):
+    for device_class in (PulsePalDevice, WavePalDevice):
         try:
             device_class(port)
             raise AssertionError(f"{device_class.__name__} connected to a Synth Pal")
-        except error_class as error:
+        except PulsePalError as error:
             assert "runs Synth Pal firmware" in str(error), error
 
 
@@ -811,7 +806,7 @@ def main():
             except Skipped as reason:
                 skipped += 1
                 result = f"skipped ({reason})"
-            except (AssertionError, SynthPalError) as error:
+            except (AssertionError, PulsePalError) as error:
                 failures += 1
                 result = f"FAILED: {error}"
                 if not S._closed:
@@ -821,7 +816,7 @@ def main():
             while notes:
                 print("    " + notes.pop(0))
         if not S._closed:
-            S.set_defaults()
+            S.set_default_params()
     if D is not None:
         D.close()
     print(f"\n{len(tests) - failures - skipped}/{len(tests) - skipped} tests passed"

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pulsepal"
-version = "3.0.0"
-description = "Python interface for PulsePal device control"
+dynamic = ["version"]
+description = "Python interface for Pulse Pal, and for the Wave Pal and Synth Pal firmwares"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -18,10 +18,13 @@ dependencies = [
 docs = ["pdoc>=14"]
 
 [tool.setuptools]
-py-modules = ["PulsePal", "PulsePalGUI", "WavePal", "SynthPal"]
+packages = ["pulsepal"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pulsepal.__version__"}
 
 [tool.uv]
-# PulsePalGUI imports tkinter, which CPython builds ship but Linux distributions
+# pulsepal.gui imports tkinter, which CPython builds ship but Linux distributions
 # package separately (python3-tk on Debian/Ubuntu, python3-tkinter on Fedora).
 # A venv built from the system interpreter inherits that gap, so P.gui() fails
 # with ModuleNotFoundError long after `uv sync` reported success.

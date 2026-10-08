@@ -129,10 +129,10 @@ void processUSBCommands() {
       loadWaveform();
     } break;
 
-    case OP_PLAY: { // Op 80 ('P'). Soft trigger: one bit per output channel.
+    case OP_PLAY: { // Op 80 ('P'). Soft trigger: one bit per output channel. Starts idle channels, as in Pulse Pal.
       byte channelBits = PPUSB.readByte();
       noInterrupts();
-      triggerChannels(channelBits & ALL_CHANNELS);
+      softTrigger(channelBits & ALL_CHANNELS);
       interrupts();
     } break;
 
@@ -182,15 +182,15 @@ void processUSBCommands() {
       PPUSB.writeByte(1);
     } break;
 
-    case OP_SET_TRIGGER_MODE: { // Op 84 ('T'). One byte per output channel. See enum TriggerModeValue.
-      byte newModes[N_CHANNELS];
-      PPUSB.readByteArray(newModes, N_CHANNELS);
-      if (!allAtMost(newModes, N_CHANNELS, MAX_TRIGGER_MODE)) {
+    case OP_SET_TRIGGER_MODE: { // Op 84 ('T'). One byte per trigger channel, as in Pulse Pal. See enum TriggerModeValue.
+      byte newModes[N_TRIGGER_CHANNELS];
+      PPUSB.readByteArray(newModes, N_TRIGGER_CHANNELS);
+      if (!isValidTriggerMode(newModes[0]) || !isValidTriggerMode(newModes[1])) {
         PPUSB.writeByte(0);
         break;
       }
       noInterrupts();
-      for (byte i = 0; i < N_CHANNELS; i++) {
+      for (byte i = 0; i < N_TRIGGER_CHANNELS; i++) {
         triggerMode[i] = newModes[i];
       }
       interrupts();
@@ -330,10 +330,11 @@ void LoadDefaultSettings() {
   for (byte i = 0; i < N_CHANNELS; i++) {
     loopMode[i] = 0;
     loopDuration[i] = 0;
-    triggerMode[i] = TRIGGER_MODE_NORMAL;
     TriggerAddress[0][i] = 1; // All output channels are triggered by trigger channel 1
     TriggerAddress[1][i] = 0;
   }
+  triggerMode[0] = TRIGGER_MODE_NORMAL;
+  triggerMode[1] = TRIGGER_MODE_NORMAL;
   interrupts();
 }
 

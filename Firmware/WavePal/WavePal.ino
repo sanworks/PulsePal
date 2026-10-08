@@ -95,26 +95,32 @@ enum OpCode {
   OP_SET_SAMPLING_RATE = 'S',         // 83. Sampling rate of all output channels, in Hz
   OP_SET_OUTPUT_RANGE = 'R',          // 82. Output range of all output channels. See enum OutputRange
   OP_LOAD_WAVEFORM = 'L',             // 76. Load one output channel's waveform
-  OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel)
+  OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel): starts idle ones
   OP_STOP = 'X',                      // 88. Stop output channels (1 bit per channel)
   OP_SET_FIXED_VOLTAGE = '!',         // 33. Hold output channels at a fixed DAC code (1 bit per channel)
   OP_SET_LOOP_MODE = 'O',             // 79. Loop mode of each output channel
   OP_SET_LOOP_DURATION = 'D',         // 68. Loop duration of each output channel, in samples
-  OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each output channel. See enum TriggerModeValue
+  OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each trigger channel. See enum TriggerModeValue
   OP_SET_TRIGGER_LINKS = 'I',         // 73. Links from the trigger channels to the output channels
   OP_GET_STATUS = 'G',                // 71. Returns the playback state
   OP_GET_PLAYBACK_CHECKSUMS = 'Z'     // 90. For testing: samples played since each channel started, and their sum
 };
 #define HANDSHAKE_REPLY 'W' // 87. Pulse Pal firmware replies 'K' (75) to op 72, so clients can tell the two apart
 
-// Values of triggerMode[]. What a trigger does to an output channel: see triggerChannels() in Playback.ino.
+// Values of triggerMode[], one per trigger channel: what an edge on it does to the output channels linked to it. See
+// processTriggerEdge() in Playback.ino. The first three are Pulse Pal's trigger modes, with Pulse Pal's codes. Code 3
+// is Pulse Pal's param sync mode, which Wave Pal does not have.
 enum TriggerModeValue {
-  TRIGGER_MODE_NORMAL = 0,            // A trigger starts the waveform. Triggers during playback are ignored.
-  TRIGGER_MODE_MASTER = 1,            // A trigger starts the waveform, or restarts it from the first sample
-  TRIGGER_MODE_TOGGLE = 2,            // A trigger starts the waveform, or stops it if it is playing
-  TRIGGER_MODE_GATED = 3              // A rising edge starts the waveform, and a falling edge stops it
+  TRIGGER_MODE_NORMAL = 0,            // A rising edge starts idle channels. Channels that are playing ignore it.
+  TRIGGER_MODE_TOGGLE = 1,            // A rising edge starts idle channels, and stops those that are playing
+  TRIGGER_MODE_GATED = 2,             // A rising edge starts idle channels, and a falling edge stops them
+  TRIGGER_MODE_MASTER = 4             // A rising edge starts idle channels, and restarts those that are playing
 };
-#define MAX_TRIGGER_MODE TRIGGER_MODE_GATED
+#define N_TRIGGER_CHANNELS 2
+
+static inline bool isValidTriggerMode(byte mode) {
+  return (mode <= TRIGGER_MODE_GATED) || (mode == TRIGGER_MODE_MASTER);
+}
 
 // Values of rangeIndex. These are WavePlayer's ranges without its 12V ones, which need the Analog Output Module's
 // external 3V reference (Pulse Pal 3 has none), so the indices differ from WavePlayer's. The unipolar ranges must stay
@@ -214,7 +220,7 @@ byte rangeIndex = RANGE_PLUS_MINUS_10V; // See enum OutputRange
 uint16_t DACBits_ZeroVolts = 32768; // DAC code for 0V in the current range: 32768 in the bipolar ranges, 0 in the unipolar ones
 volatile byte loopMode[N_CHANNELS] = {0}; // If 1, the channel loops its waveform
 volatile uint32_t loopDuration[N_CHANNELS] = {0}; // In loop mode, samples to play before stopping. 0 = loop until stopped.
-volatile byte triggerMode[N_CHANNELS] = {0}; // See enum TriggerModeValue
+volatile byte triggerMode[N_TRIGGER_CHANNELS] = {0}; // Of trigger channels 1 and 2. See enum TriggerModeValue
 volatile byte TriggerAddress[2][N_CHANNELS] = {0}; // Output channels triggered by trigger channel 1 (row 1) and 2 (row 2)
 
 // ---------------------------------------------------------------------------------------------------------------

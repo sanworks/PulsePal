@@ -9,26 +9,29 @@
 %   P.interPulseInterval(1) = 0.049;     % 49 ms apart (end of one to start of the next), so 20 pulses per second,
 %   P.pulseTrainDuration(1) = 2;         % for 2 seconds
 %   P.trigger(1);                        % Plays the pulse train on output channel 1
-%   P.triggerMode(2) = 1;                % Trigger channel 2 in toggle mode (see "Trigger modes" below)
+%   P.triggerMode{2} = 'Toggle';         % Trigger channel 2 in toggle mode (see "Trigger modes" below)
 %   clear P                              % Releases the port. Pulse Pal stops all output channels.
 %
 % Parameters are properties, with one element per channel: the output channel parameters below are 1x4, so
-% P.phase1Voltage(2) belongs to output channel 2, and triggerMode is 1x2, one element per trigger channel. With
-% autoSync on (the default), assigning a parameter programs the device at once. With autoSync off, assignments change
-% only this object's copy of the parameters, and syncToDevice() sends all of them in one command:
+% P.phase1Voltage(2) belongs to output channel 2, and triggerMode is a 1x2 cell array, one element per trigger
+% channel. A single value sets every channel, e.g. P.phase1Voltage = 5. With autoSync on (the default), assigning a
+% parameter programs the device at once. With autoSync off, assignments change only this object's copy of the
+% parameters, and syncToDevice() sends all of them in one command:
 %   P.autoSync = false;
 %   P.phase1Voltage = [5 5 2.5 2.5];
 %   P.phase1Duration = [0.001 0.001 0.002 0.002];
 %   P.syncToDevice();
 %   P.autoSync = true;
 %
-% Units. Voltages are in volts, -10 to 10. Times are in seconds, rounded to the nearest cycle of the device's timer
-% (50 us). Phase durations, the inter-pulse interval and the pulse train duration are at least 100 us
-% (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's trigger channel detects reliably. A value out
-% of range raises an error, and nothing is sent.
+% Units and values. Voltages are in volts, -10 to 10. Times are in seconds, rounded to the nearest cycle of the
+% device's timer (50 us). Phase durations, the inter-pulse interval and the pulse train duration are at least 100 us
+% (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's trigger channel detects reliably. On/off
+% parameters are logical (true or false; 1 and 0 work too), and modes are names, such as 'Gated' (not case sensitive;
+% the numbers older Pulse Pal software used work too). A value out of range raises an error, and nothing is sent.
 %
 % Output channel parameters (1x4):
-%   isBiphasic           0: monophasic pulses, phase 1 only. 1: biphasic pulses: phase 1, interPhaseInterval, phase 2
+%   isBiphasic           false: monophasic pulses, phase 1 only. true: biphasic pulses: phase 1, interPhaseInterval,
+%                        phase 2
 %   phase1Voltage        Voltage of the first phase of each pulse
 %   phase2Voltage        Voltage of the second phase (biphasic pulses only)
 %   restingVoltage       Voltage between pulses, and while the channel is idle
@@ -40,46 +43,49 @@
 %   interBurstInterval   Time at the resting voltage between bursts, when burstDuration is not 0
 %   pulseTrainDuration   Duration of the pulse train
 %   pulseTrainDelay      Time from the trigger to the start of the pulse train
-%   linkTriggerChannel1  1 if a TTL on trigger channel 1 triggers the output channel, 0 if not
-%   linkTriggerChannel2  1 if a TTL on trigger channel 2 triggers the output channel, 0 if not
+%   linkTriggerChannel1  true if a TTL on trigger channel 1 triggers the output channel
+%   linkTriggerChannel2  true if a TTL on trigger channel 2 triggers the output channel
 %   customTrainID        0 plays the pulse train defined above. 1 or more plays that custom train instead, loaded
 %                        with sendCustomPulseTrain() or sendCustomWaveform(): 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2
-%   customTrainTarget    0: a custom train's times are pulse onsets. 1: they are burst onsets
-%   customTrainLoop      1 repeats a custom train until pulseTrainDuration has elapsed. 0 plays it once
-%   playbackMode         0 plays the pulse train once per trigger. 1 (continuous loop mode) plays it until the channel
-%                        is stopped, ignoring pulseTrainDuration
+%   customTrainTarget    1x4 cell array. 'Pulses': a custom train's times are pulse onsets. 'Bursts': they are
+%                        burst onsets
+%   customTrainLoop      true repeats a custom train until pulseTrainDuration has elapsed. false plays it once
+%   continuousLoop       false plays the pulse train once per trigger. true plays it until the channel is stopped,
+%                        ignoring pulseTrainDuration (firmware v22 or newer)
 % A pulse starts only if it fits. In a burst, its first phase, or a biphasic pulse's whole pulse, must end before the
 % burst does. A biphasic pulse must also end by the end of the train; the end of the train cuts a monophasic pulse
 % short. The parameter guide, https://sites.google.com/site/pulsepalwiki/parameter-guide, has diagrams.
 %
-% Trigger modes (triggerMode, 1x2, one per trigger channel):
-%   0  Normal: a rising edge starts the pulse trains of the linked output channels. Edges during a train are ignored.
-%   1  Toggle: as 0, but a rising edge during a train stops it.
-%   2  Pulse gated: the trains play only while the TTL is high.
-%   3  Param sync (Pulse Pal 3 only): a rising edge starts and stops nothing. It loads the parameters most recently
-%      sent by syncToDevice(): this is how the next trial's parameters are sent during the current trial and applied
-%      the instant it starts. An idle output channel takes them in the timer cycle the edge is detected. One that is
-%      playing a pulse train finishes it on the parameters it started with, and takes the new ones the moment it
-%      ends, so the next trigger plays a whole train with the new parameters. A channel in continuous loop mode has
-%      no train end, so it keeps its parameters until something stops it.
-%      Only syncToDevice() waits for the edge: with autoSync on, assigning a parameter programs the device at once,
-%      also in param sync mode. So leaving param sync mode means assigning triggerMode with autoSync on; a trigger
-%      mode sent by syncToDevice() takes effect at the next edge. A param sync channel's links to output channels are
-%      ignored: to start trains on the same edge, wire the TTL to the other trigger channel too (the parameters load
-%      first). Connecting, and setDefaultParams(), take both trigger channels out of param sync mode.
-%   P.triggerMode(2) = 3;                % Sent at once
+% Trigger modes (triggerMode, a 1x2 cell array, one per trigger channel; info.triggerModes lists them):
+%   'Normal'      A rising edge starts the pulse trains of the linked output channels. Edges during a train are
+%                 ignored.
+%   'Toggle'      As 'Normal', but a rising edge during a train stops it.
+%   'Gated'       The trains play only while the TTL is high.
+%   'Param Sync'  (Pulse Pal 3 only) A rising edge starts and stops nothing. It loads the parameters most recently sent
+%                 by syncToDevice(): this is how the next trial's parameters are sent during the current trial and
+%                 applied the instant it starts. An idle output channel takes them in the timer cycle the edge is
+%                 detected. One that is playing a pulse train finishes it on the parameters it started with, and takes
+%                 the new ones the moment it ends, so the next trigger plays a whole train with the new parameters. A
+%                 channel in continuous loop mode has no train end, so it keeps its parameters until something stops
+%                 it. Only syncToDevice() waits for the edge: with autoSync on, assigning a parameter programs the
+%                 device at once, also in param sync mode. So leaving param sync mode means assigning triggerMode with
+%                 autoSync on; a trigger mode sent by syncToDevice() takes effect at the next edge. A param sync
+%                 channel's links to output channels are ignored: to start trains on the same edge, wire the TTL to the
+%                 other trigger channel too (the parameters load first). Connecting, and setDefaultParams(), take both
+%                 trigger channels out of param sync mode.
+%   P.triggerMode{2} = 'Param Sync';     % Sent at once
 %   P.autoSync = false;
-%   P.phase1Voltage = [2 2 2 2];
+%   P.phase1Voltage = 2;
 %   P.syncToDevice();                    % Stored: trigger channel 2's next rising edge applies it
 %   P.autoSync = true;
 %
 % Methods (help PulsePalDevice.trigger, and so on, describes each one):
 %   trigger(channels)                    Starts the pulse trains of output channels, e.g. P.trigger([1 3])
 %   stop(channels)                       Stops pulse trains: P.stop() stops all of them, P.stop([1 3]) some
-%   setVoltage(channel, voltage)         Holds an output channel at a fixed voltage until it is triggered
+%   setFixedVoltage(channels, voltage)   Holds output channels at a fixed voltage until they are triggered
 %   sendCustomPulseTrain(trainID, pulseTimes, voltages)    Loads a custom pulse train
 %   sendCustomWaveform(trainID, samplingPeriod, voltages)  Loads a sampled waveform, as a custom pulse train
-%   syncToDevice()                       With autoSync off, sends every parameter to the device in one command
+%   syncToDevice()                       Sends every parameter to the device in one command
 %   syncFromDevice()                     Reads every parameter from the device into the properties
 %   setDefaultParams()                   Programs the default parameters
 %   saveParameters(fileName)             Saves the parameters to a .mat file; loadParameters(fileName) loads them
@@ -88,8 +94,8 @@
 %   setScreenSaver(state, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
 % info holds the connected device's hardware and firmware versions, and its limits.
 %
-% The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, /Python/PulsePal/PulsePal.py, has the
-% same parameters with snake_case names, but there an assignment changes only the local copy until sync_to_device().
+% The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
+% (/Python/PulsePal/pulsepal/pulse_pal.py), works the same way, with snake_case names.
 
 %{
 ----------------------------------------------------------------------------
@@ -119,7 +125,7 @@ classdef PulsePalDevice < handle
         Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device: hardware and firmware versions, and its limits
         autoSync = true; % true: assigning a parameter programs the device at once. false: syncToDevice() sends them all
-        isBiphasic % 1x4. 0 for monophasic pulses, 1 for biphasic. See "Output channel parameters" above
+        isBiphasic % 1x4 logical. false for monophasic pulses, true for biphasic. See "Output channel parameters" above
         phase1Voltage % 1x4, volts
         phase2Voltage % 1x4, volts. Biphasic pulses only
         restingVoltage % 1x4, volts. Between pulses, and while the channel is idle
@@ -131,13 +137,13 @@ classdef PulsePalDevice < handle
         interBurstInterval % 1x4, seconds
         pulseTrainDuration % 1x4, seconds
         pulseTrainDelay % 1x4, seconds from the trigger to the start of the pulse train
-        linkTriggerChannel1 % 1x4. 1 if trigger channel 1 triggers the output channel, 0 if not
-        linkTriggerChannel2 % 1x4. 1 if trigger channel 2 triggers the output channel, 0 if not
+        linkTriggerChannel1 % 1x4 logical. true if trigger channel 1 triggers the output channel
+        linkTriggerChannel2 % 1x4 logical. true if trigger channel 2 triggers the output channel
         customTrainID % 1x4. 0 for the pulse train defined by the parameters, or the number of the custom train to play
-        customTrainTarget % 1x4. 0: custom train times are pulse onsets. 1: they are burst onsets
-        customTrainLoop % 1x4. 1 repeats a custom train until pulseTrainDuration has elapsed, 0 plays it once
-        playbackMode % 1x4. 0 plays the pulse train once per trigger, 1 plays it until stopped (continuous loop mode)
-        triggerMode % 1x2, one per trigger channel: 0 normal, 1 toggle, 2 pulse gated, 3 param sync. See "Trigger modes"
+        customTrainTarget % 1x4 cell array. 'Pulses': custom train times are pulse onsets. 'Bursts': burst onsets
+        customTrainLoop % 1x4 logical. true repeats a custom train until pulseTrainDuration has elapsed
+        continuousLoop % 1x4 logical. false plays the pulse train once per trigger, true plays it until stopped
+        triggerMode % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or 'Param Sync'
     end
 
     properties (Access = private)
@@ -153,11 +159,21 @@ classdef PulsePalDevice < handle
     properties (Constant, Access = private)
         CurrentFirmwareVersion = 22; % Most recent firmware version
         OpMenuByte = 213; % Byte code to access op menu
-        ParamNames = {... % Names of Pulse Pal's parameters. See: https://sites.google.com/site/pulsepalwiki/parameter-guide
+        % Output parameter names in order of their parameter code, and the kind of value each takes. The codes are
+        % fixed: see "Parameter codes" in /Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
+        ParamNames = {...
             'isBiphasic' 'phase1Voltage' 'phase2Voltage' 'phase1Duration' 'interPhaseInterval' 'phase2Duration'...
             'interPulseInterval' 'burstDuration' 'interBurstInterval' 'pulseTrainDuration' 'pulseTrainDelay'...
-            'linkTriggerChannel1' 'linkTriggerChannel2' 'customTrainID' 'customTrainTarget' 'customTrainLoop'... 
-            'restingVoltage' 'playbackMode'};
+            'linkTriggerChannel1' 'linkTriggerChannel2' 'customTrainID' 'customTrainTarget' 'customTrainLoop'...
+            'restingVoltage' 'continuousLoop'};
+        ParamKinds = {...
+            'Logical' 'Volts' 'Volts' 'PulseTime' 'Time' 'PulseTime'...
+            'PulseTime' 'Time' 'Time' 'PulseTime' 'Time'...
+            'Logical' 'Logical' 'TrainID' 'Target' 'Logical'...
+            'Volts' 'Logical'};
+        TriggerModeCode = 128 % The parameter code of triggerMode, the one trigger channel parameter
+        TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync'} % In order of their code on the device (0-3)
+        CustomTrainTargetNames = {'Pulses', 'Bursts'} % In order of their code on the device
     end
 
     methods
@@ -211,8 +227,8 @@ classdef PulsePalDevice < handle
                 obj.firmwareVersion = obj.Port.read(1, 'uint32');
                 if obj.firmwareVersion < 20
                     obj.Port = [];
-                    error(['Error: Pulse Pal 1 detected. You must use the legacy interface.'... 
-                           newline 'Add /PulsePal/MATLAB to the MATLAB path, and at the command prompt,'... 
+                    error(['Error: Pulse Pal 1 detected. You must use the legacy interface.'...
+                           newline 'Add /PulsePal/MATLAB to the MATLAB path, and at the command prompt,'...
                            newline 'type PulsePal(''Port'') where ''Port'' is your serial port string.']);
                 else
                     if obj.firmwareVersion < 21
@@ -224,7 +240,7 @@ classdef PulsePalDevice < handle
                     if obj.firmwareVersion > obj.CurrentFirmwareVersion
                         obj.Port = [];
                         error(['Error: Pulse Pal with future firmware detected.'...
-                               newline 'Please update your MATLAB software or downgrade the firmware to v'... 
+                               newline 'Please update your MATLAB software or downgrade the firmware to v'...
                                num2str(obj.CurrentFirmwareVersion) '.']);
                     end
                 end
@@ -244,13 +260,19 @@ classdef PulsePalDevice < handle
                     obj.maxCustomPulses = 5000;
                 end
 
-                % Create local copy of hardware description
+                % Create local copy of hardware description, with the fields of the Python class's DeviceInfo
                 obj.info = struct;
-                obj.info.hardwareVersion = obj.hardwareVersion;
+                obj.info.outputParameterNames = obj.ParamNames;
+                obj.info.triggerParameterNames = {'triggerMode'};
+                obj.info.triggerModes = obj.availableTriggerModes();
+                obj.info.customTrainTargets = obj.CustomTrainTargetNames;
                 obj.info.firmwareVersion = obj.firmwareVersion;
-                obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
+                obj.info.hardwareVersion = obj.hardwareVersion;
+                obj.info.maxCustomPulses = obj.maxCustomPulses;
                 obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
-                obj.info.maxPulsesPerCustomTrain = obj.maxCustomPulses;
+                obj.info.cycleFrequency = obj.cycleFrequency;
+                obj.info.cyclePeriod_us = obj.cyclePeriod;
+                obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
             elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
                 wavePalVersion = obj.Port.read(1, 'uint32');
                 obj.Port = [];
@@ -277,41 +299,24 @@ classdef PulsePalDevice < handle
             obj.setDefaultParams;
         end
 
-        function trigger(obj, channels, varargin)
-            % Starts the pulse trains of output channels, e.g. P.trigger(1) or P.trigger([1 3 4]). The channels start
-            % in the same timer cycle. A channel that is already playing a pulse train ignores the trigger.
-            % P.trigger(1, 3, 4) works too. A character string is read as a binary number, with channel 1 as its last
-            % digit: P.trigger('1101') triggers channels 1, 3 and 4, as in the legacy interface.
-            if ischar(channels)
-                TriggerAddress = bin2dec(channels);
-            else
-                if nargin > 1
-                    channels = [channels cell2mat(varargin)];
-                end
-                if ~all(ismember(channels, [1 2 3 4]))
-                    error('All channels must be valid Pulse Pal output channel indexes: 1,2,3 or 4')
-                end
-                ChannelsBinary = zeros(1,4);
-                ChannelsBinary(channels) = 1;
-                TriggerAddress = sum(ChannelsBinary .* [1 2 4 8]);
-            end
-            obj.Port.write([obj.OpMenuByte 77 TriggerAddress], 'uint8');
+        function trigger(obj, channels)
+            % Starts the pulse trains of output channels: one channel number, e.g. P.trigger(1), or several as an
+            % array, e.g. P.trigger([1 3 4]). The channels start in the same timer cycle. A channel that is already
+            % playing a pulse train ignores the trigger.
+            obj.Port.write([obj.OpMenuByte 77 obj.channelBits(channels)], 'uint8');
         end
 
-        function stop(obj, varargin)
+        function stop(obj, channels)
             % Stops pulse trains: P.stop() stops all output channels, and P.stop([1 3 4]) stops channels 1, 3 and 4
             % (firmware v22 or newer). The stopped channels return to their resting voltage. A soft trigger that has
             % not started its channel yet is cancelled too.
-            bitCode = 15; % All channels
-            if nargin > 1
+            if nargin < 2
+                bitCode = 15; % All channels
+            else
+                bitCode = obj.channelBits(channels);
                 if obj.firmwareVersion < 22
                     error('stop() cannot address individual channels prior to firmware v22')
                 end
-                channels = varargin{1};
-                if ~all(ismember(channels, [1 2 3 4]))
-                    error('All channels must be valid Pulse Pal output channel indexes: 1,2,3 or 4')
-                end
-                bitCode = uint8(sum(bitshift(uint16(1), channels-1)));
             end
             if obj.firmwareVersion < 22
                 obj.Port.write([obj.OpMenuByte 80], 'uint8');
@@ -321,32 +326,35 @@ classdef PulsePalDevice < handle
         end
 
         function confirmed = syncToDevice(obj)
-            % Sends every parameter to the device in one command. Use it with autoSync off: with autoSync on, every
-            % assignment has already reached the device, and syncToDevice() raises an error.
-            % On Pulse Pal 3, if either trigger channel is in param sync mode (triggerMode 3), the device stores
-            % the parameters instead of programming them, and loads them on the next rising edge of that channel.
-            % It still checks every value at once: an error is raised if one is out of range. See "Trigger modes" in
-            % help PulsePalDevice.
-            if obj.autoSync
-                error('autoSync is set to ''true''. syncToDevice() may be used when autoSync is off.')
-            end
+            % Sends every parameter to the device in one command. Use it after assignments made with autoSync off; with
+            % autoSync on, they have already reached the device.
+            % On Pulse Pal 3, if either trigger channel is in param sync mode (triggerMode 'Param Sync'), the device
+            % stores the parameters instead of programming them, and loads them on the next rising edge of that
+            % channel. It still checks every value at once: an error is raised if one is out of range. See "Trigger
+            % modes" in help PulsePalDevice.
             confirmed = obj.syncAllParams;
         end
 
         function confirmed = syncFromDevice(obj)
             % Reads every parameter from the device into the properties, e.g. after they were changed with the
-            % joystick or by loading a settings file. Requires firmware v22 or newer. playbackMode is left as it is:
-            % the device does not report it.
+            % joystick or by loading a settings file. Requires firmware v22 or newer. continuousLoop is left as it
+            % is: the device does not report it.
             confirmed = obj.importCurrentParamsFromPulsePal;
         end
 
-        function confirmed = setVoltage(obj, channel, voltage)
-            % Holds an output channel at a fixed voltage until it is set again or a pulse train is triggered on it,
-            % e.g. P.setVoltage(4, 2.5). channel: 1-4. voltage: in volts, -10 to 10.
-            obj.checkParamRange(voltage, 'Volts', [-10 10], 17);
+        function setFixedVoltage(obj, channels, voltage)
+            % Holds output channels at a fixed voltage until they are set again or a pulse train is triggered on them:
+            % one channel number, e.g. P.setFixedVoltage(4, 2.5), or several as an array, e.g.
+            % P.setFixedVoltage([1 3], -1). voltage: in volts, -10 to 10, for every channel given.
+            channelList = obj.channelNumbers(channels);
+            if ~isnumeric(voltage) || ~isscalar(voltage) || ~isreal(voltage) || ~(voltage >= -10 && voltage <= 10)
+                error('setFixedVoltage() takes one voltage, from -10 to 10 V, which is set on every channel given.')
+            end
             voltageBits = obj.volts2Bits(voltage);
-            obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
-            confirmed = obj.confirmWrite;
+            for channel = channelList
+                obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
+                obj.confirmWrite;
+            end
         end
 
         function setCalibration(obj, channel, voltageOffset)
@@ -432,38 +440,21 @@ classdef PulsePalDevice < handle
         function setDefaultParams(obj)
             % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 1 ms, 10 ms
             % apart, for 1 second, resting at 0 V and linked to trigger channel 1; both trigger channels in normal
-            % mode. The constructor calls it.
+            % mode. They are sent at once, also while autoSync is off. The constructor calls it.
             autoSyncState = obj.autoSync;
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
             if obj.hardwareVersion > 2
                 % A device left in param sync mode would store the sync below instead of running it,
                 % leaving the device on its old program until a TTL arrived. Assigning triggerMode is
                 % not deferred that way, so take both trigger channels out of param sync mode first.
-                % See the triggerMode property.
+                % See "Trigger modes" in help PulsePalDevice.
                 obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
-                obj.triggerMode = uint8(zeros(1,2));
+                obj.triggerMode = {'Normal', 'Normal'};
             end
             obj.autoSync = false;
-            obj.isBiphasic = zeros(1,4);
-            obj.phase1Voltage = ones(1,4)*5;
-            obj.phase2Voltage = ones(1,4)*-5;
-            obj.restingVoltage = zeros(1,4);
-            obj.phase1Duration = ones(1,4)*0.001;
-            obj.interPhaseInterval = ones(1,4)*0.001;
-            obj.phase2Duration = ones(1,4)*0.001;
-            obj.interPulseInterval = ones(1,4)*0.01;
-            obj.burstDuration = zeros(1,4);
-            obj.interBurstInterval = zeros(1,4);
-            obj.pulseTrainDuration = ones(1,4);
-            obj.pulseTrainDelay = zeros(1,4);
-            obj.linkTriggerChannel1 = ones(1,4);
-            obj.linkTriggerChannel2 = zeros(1,4);
-            obj.customTrainID = uint8(zeros(1,4));
-            obj.customTrainTarget = uint8(zeros(1,4));
-            obj.customTrainLoop = zeros(1,4);
-            obj.playbackMode = zeros(1,4); % 0 = triggered 1 = continuous
-            obj.triggerMode = uint8(zeros(1,2));
+            obj.importParams(obj.defaultParams);
             obj.syncToDevice;
-            obj.autoSync = autoSyncState;
+            clear cleanup
         end
 
         function confirmed = sdSettings(obj, settingsFileName, op)
@@ -525,8 +516,8 @@ classdef PulsePalDevice < handle
             % takes the value saved in the file.
             S = load(filename);
             params = S.params;
-            obj.importParams(params);
             obj.autoSync = false;
+            obj.importParams(params);
             obj.syncToDevice;
             obj.autoSync = params.autoSync;
         end
@@ -579,124 +570,87 @@ classdef PulsePalDevice < handle
             end
         end
 
+        function set.isBiphasic(obj, val)
+            obj.isBiphasic = obj.setOutputParam(1, val);
+        end
+
         function set.phase1Voltage(obj, val)
-            units = 'Volts'; paramCode = 2;
-            obj.setOutputParam(paramCode, val, units);
-            obj.phase1Voltage = val;
+            obj.phase1Voltage = obj.setOutputParam(2, val);
         end
 
         function set.phase2Voltage(obj, val)
-            units = 'Volts'; paramCode = 3;
-            obj.setOutputParam(paramCode, val, units);
-            obj.phase2Voltage = val;
-        end
-
-        function set.restingVoltage(obj, val)
-            units = 'Volts'; paramCode = 17;
-            obj.setOutputParam(paramCode, val, units);
-            obj.restingVoltage = val;
+            obj.phase2Voltage = obj.setOutputParam(3, val);
         end
 
         function set.phase1Duration(obj, val)
-            units = 'Time'; paramCode = 4;
-            obj.setOutputParam(paramCode, val, units);
-            obj.phase1Duration = val;
+            obj.phase1Duration = obj.setOutputParam(4, val);
         end
 
         function set.interPhaseInterval(obj, val)
-            units = 'Time'; paramCode = 5;
-            obj.setOutputParam(paramCode, val, units);
-            obj.interPhaseInterval = val;
+            obj.interPhaseInterval = obj.setOutputParam(5, val);
         end
 
         function set.phase2Duration(obj, val)
-            units = 'Time'; paramCode = 6;
-            obj.setOutputParam(paramCode, val, units);
-            obj.phase2Duration = val;
+            obj.phase2Duration = obj.setOutputParam(6, val);
         end
 
         function set.interPulseInterval(obj, val)
-            units = 'Time'; paramCode = 7;
-            obj.setOutputParam(paramCode, val, units);
-            obj.interPulseInterval = val;
+            obj.interPulseInterval = obj.setOutputParam(7, val);
         end
 
         function set.burstDuration(obj, val)
-            units = 'Time'; paramCode = 8;
-            obj.setOutputParam(paramCode, val, units);
-            obj.burstDuration = val;
+            obj.burstDuration = obj.setOutputParam(8, val);
         end
 
         function set.interBurstInterval(obj, val)
-            units = 'Time'; paramCode = 9;
-            obj.setOutputParam(paramCode, val, units);
-            obj.interBurstInterval = val;
+            obj.interBurstInterval = obj.setOutputParam(9, val);
         end
 
         function set.pulseTrainDuration(obj, val)
-            units = 'Time'; paramCode = 10;
-            obj.setOutputParam(paramCode, val, units);
-            obj.pulseTrainDuration = val;
+            obj.pulseTrainDuration = obj.setOutputParam(10, val);
         end
 
         function set.pulseTrainDelay(obj, val)
-            units = 'Time'; paramCode = 11;
-            obj.setOutputParam(paramCode, val, units);
-            obj.pulseTrainDelay = val;
+            obj.pulseTrainDelay = obj.setOutputParam(11, val);
         end
 
         function set.linkTriggerChannel1(obj, val)
-            units = 'Byte'; paramCode = 12;
-            obj.setOutputParam(paramCode, val, units);
-            obj.linkTriggerChannel1 = val;
+            obj.linkTriggerChannel1 = obj.setOutputParam(12, val);
         end
 
         function set.linkTriggerChannel2(obj, val)
-            units = 'Byte'; paramCode = 13;
-            obj.setOutputParam(paramCode, val, units);
-            obj.linkTriggerChannel2 = val;
+            obj.linkTriggerChannel2 = obj.setOutputParam(13, val);
         end
 
         function set.customTrainID(obj, val)
-            units = 'Byte'; paramCode = 14;
-            obj.setOutputParam(paramCode, val, units);
-            obj.customTrainID = val;
+            obj.customTrainID = obj.setOutputParam(14, val);
         end
 
         function set.customTrainTarget(obj, val)
-            units = 'Byte'; paramCode = 15;
-            obj.setOutputParam(paramCode, val, units);
-            obj.customTrainTarget = val;
-        end
-        function set.customTrainLoop(obj, val)
-            units = 'Byte'; paramCode = 16;
-            obj.setOutputParam(paramCode, val, units);
-            obj.customTrainLoop = val;
+            obj.customTrainTarget = obj.setOutputParam(15, val);
         end
 
-        function set.isBiphasic(obj, val)
-            units = 'Byte'; paramCode = 1;
-            obj.setOutputParam(paramCode, val, units);
-            obj.isBiphasic = val;
+        function set.customTrainLoop(obj, val)
+            obj.customTrainLoop = obj.setOutputParam(16, val);
+        end
+
+        function set.restingVoltage(obj, val)
+            obj.restingVoltage = obj.setOutputParam(17, val);
+        end
+
+        function set.continuousLoop(obj, val)
+            obj.continuousLoop = obj.setOutputParam(18, val);
         end
 
         function set.triggerMode(obj, val)
-            units = 'Byte'; paramCode = 128;
-            obj.setOutputParam(paramCode, val, units);
-            obj.triggerMode = val;
-        end
-
-        function set.playbackMode(obj, val)
-            units = 'Byte'; paramCode = 18;
-            obj.setOutputParam(paramCode, val, units);
-            obj.playbackMode = val;
+            obj.triggerMode = obj.setOutputParam(128, val); % 128: TriggerModeCode
         end
 
         function set.autoSync(obj, val)
-            if ~islogical(val)
-                error('autoSync must be logical, e.g. P.autoSync = true;')
+            if ~(islogical(val) || isnumeric(val)) || ~isscalar(val) || ~(val == 0 || val == 1)
+                error('autoSync must be true or false, e.g. P.autoSync = true;')
             end
-            obj.autoSync = val;
+            obj.autoSync = logical(val);
         end
 
         function delete(obj)
@@ -733,33 +687,172 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function checkParamRange(obj, param, type, range, varargin)
-            %   Validate numeric parameter values against an inclusive range.
-            %   Throws an error that names the offending Pulse Pal parameter when any
-            %   element falls outside range.
-            RangeLow = range(1);
-            RangeHigh = range(2);
-            if nargin > 4
-                paramCode = varargin{1};
-                if paramCode < 128
-                    paramCodeString = obj.ParamNames{paramCode};
-                else
-                    paramCodeString = 'triggerMode';
-                end
-            else
-                paramCodeString = 'A parameter';
+        function modes = availableTriggerModes(obj)
+            % The trigger modes of the connected device: param sync mode is on Pulse Pal 3, with firmware v22 or newer
+            modes = obj.TriggerModeNames;
+            if obj.hardwareVersion < 3 || obj.firmwareVersion < 22
+                modes = modes(1:3);
             end
-            % NaN fails every comparison, so the range check below would let it through, and it would reach the device
+        end
+
+        function restoreAutoSync(obj, state)
+            % For setDefaultParams(): puts autoSync back, also if programming the defaults failed
+            obj.autoSync = state;
+        end
+
+        function [value, deviceValues] = checkOutputParam(obj, paramCode, val)
+            % Checks a parameter's new value on every channel (1x4, or 1x2 for triggerMode), and returns it as the
+            % property holds it, and as the device reads it: DAC codes for voltages, timer cycles for times, and
+            % codes for the rest. Raises an error for a value the device cannot play. A single value is used for
+            % every channel.
+            if paramCode == obj.TriggerModeCode
+                modes = obj.availableTriggerModes();
+                [~, codes] = ismember(modes, obj.TriggerModeNames);
+                deviceValues = obj.namesToCodes(val, modes, codes - 1, 2, 'triggerMode', 'trigger channel');
+                value = obj.TriggerModeNames(deviceValues + 1);
+                return
+            end
+            name = obj.ParamNames{paramCode};
+            switch obj.ParamKinds{paramCode}
+                case 'Target'
+                    deviceValues = obj.namesToCodes(val, obj.CustomTrainTargetNames, [0 1], 4, name, 'output channel');
+                    value = obj.CustomTrainTargetNames(deviceValues + 1);
+                    return
+                case 'Logical'
+                    val = obj.expandToChannels(val, 4, name);
+                    if ~(islogical(val) || isnumeric(val)) || any(val ~= 0 & val ~= 1) % Also refuses NaN
+                        error([name ' values must be true or false (1 or 0).'])
+                    end
+                    value = logical(val);
+                    deviceValues = double(value);
+                    if paramCode == 18 && any(value) && obj.firmwareVersion < 22
+                        error('continuousLoop requires firmware v22 or newer.')
+                    end
+                    return
+            end
+            val = obj.expandToChannels(val, 4, name);
+            % NaN fails every comparison, so the range checks below would let it through, and it would reach the device
             % as 0: -10 V, or a phase of 0 cycles
-            if (~isnumeric(param) && ~islogical(param)) || ~all(isfinite(double(param(:))))
-                error([paramCodeString ' must be a number (NaN and Inf are not allowed).']);
+            if ~(isnumeric(val) || islogical(val)) || ~isreal(val) || ~all(isfinite(double(val)))
+                error([name ' must be a number (NaN and Inf are not allowed).']);
             end
-            if strcmp(type, 'Byte') && any(double(param(:)) ~= round(double(param(:))))
-                error([paramCodeString ' must be a whole number.']);
+            value = double(val);
+            switch obj.ParamKinds{paramCode}
+                case 'Volts'
+                    if any(value < -10 | value > 10)
+                        error([name ' was out of range: -10 to 10 V']);
+                    end
+                    deviceValues = obj.volts2Bits(value);
+                case 'TrainID'
+                    if any(value ~= round(value)) || any(value < 0 | value > obj.nCustomPulseTrains)
+                        error([name ' must be a whole number from 0 to ' num2str(obj.nCustomPulseTrains) '.']);
+                    end
+                    deviceValues = value;
+                otherwise % 'Time' and 'PulseTime'
+                    % Checked in whole timer cycles, as the device receives it: [100 100 100 100]*1e-6 is
+                    % 9.999999999999999e-05 in floating point, under the 0.0001 minimum, but is exactly 2 cycles.
+                    deviceValues = obj.roundHalfEven(value*obj.cycleFrequency);
+                    lowest = 0;
+                    if strcmp(obj.ParamKinds{paramCode}, 'PulseTime')
+                        lowest = 2*obj.cyclePeriod/1e6;
+                    end
+                    if any(deviceValues/obj.cycleFrequency < lowest) || any(value > 3600)
+                        error([name ' was out of range: ' num2str(lowest) ' to 3600 s']);
+                    end
             end
-            if (sum(param < RangeLow) > 0) || (sum(param > RangeHigh) > 0)
-                error([paramCodeString ' was out of range: ' num2str(RangeLow) ' to ' num2str(RangeHigh)]);
+        end
+
+        function value = setOutputParam(obj, paramCode, val)
+            % Checks a parameter's new value (see checkOutputParam()), and with autoSync on, programs it on the device.
+            % Returns the value as the property holds it.
+            [value, deviceValues] = obj.checkOutputParam(paramCode, val);
+            if ~obj.autoSync
+                return
             end
+            kind = 'Byte';
+            if paramCode < obj.TriggerModeCode
+                kind = obj.ParamKinds{paramCode};
+            end
+            switch kind
+                case 'Volts'
+                    bytes = @(v) typecast(uint16(v), 'uint8');
+                case {'Time', 'PulseTime'}
+                    bytes = @(v) typecast(uint32(v), 'uint8');
+                otherwise
+                    bytes = @(v) uint8(v);
+            end
+            if obj.firmwareVersion > 21
+                obj.Port.write([obj.OpMenuByte 91 paramCode bytes(deviceValues)], 'uint8'); % All channels at once
+                obj.confirmWrite;
+            elseif paramCode ~= 18 % Firmware v21 has no parameter 18, and checkOutputParam() lets only false through
+                for i = 1:numel(deviceValues)
+                    obj.Port.write([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))], 'uint8');
+                    obj.confirmWrite; % Firmware v21 confirms each op 74
+                end
+            end
+        end
+
+        function codes = namesToCodes(~, names, validNames, validCodes, nChannels, settingName, channelType)
+            % Converts a name, or one name per channel, to codes: validCodes(i) is validNames{i}'s code. The codes
+            % themselves are accepted too, as numbers, as Pulse Pal's clients used them before names.
+            if isnumeric(names) && ~isempty(names)
+                if isscalar(names)
+                    names = repmat(names, 1, nChannels);
+                end
+                if numel(names) ~= nChannels || ~all(ismember(names(:), validCodes))
+                    error([settingName ' takes one name per ' channelType ' (or its code). Valid names are: '...
+                           strjoin(validNames, ', ') '.'])
+                end
+                codes = double(reshape(names, 1, nChannels));
+                return
+            end
+            if ischar(names) || (isstring(names) && isscalar(names))
+                names = repmat(cellstr(names), 1, nChannels);
+            elseif isstring(names)
+                names = cellstr(names);
+            end
+            if ~iscell(names) || numel(names) ~= nChannels
+                error([settingName ' needs one name for all channels, or a 1x' num2str(nChannels) ' cell array with '...
+                       'one name per ' channelType '.'])
+            end
+            codes = zeros(1, nChannels);
+            for i = 1:nChannels
+                match = [];
+                if ischar(names{i}) || (isstring(names{i}) && isscalar(names{i}))
+                    match = find(strcmpi(names{i}, validNames));
+                elseif isnumeric(names{i}) && isscalar(names{i})
+                    match = find(validCodes == names{i});
+                end
+                if isempty(match)
+                    error(['Unknown ' settingName ' for ' channelType ' ' num2str(i) '. Valid names are: '...
+                           strjoin(validNames, ', ') '.'])
+                end
+                codes(i) = validCodes(match);
+            end
+        end
+
+        function values = expandToChannels(~, values, nChannels, name)
+            % Returns one value per channel, as a row, from a single value or one per channel
+            if isscalar(values)
+                values = repmat(values, 1, nChannels);
+            elseif numel(values) == nChannels
+                values = reshape(values, 1, nChannels);
+            else
+                error([name ' needs one value for all channels, or one value per output channel (1x' num2str(nChannels) ').'])
+            end
+        end
+
+        function channelList = channelNumbers(~, channels)
+            % Checks output channel numbers: one, or several as an array
+            if ~isnumeric(channels) || ~isreal(channels) || isempty(channels) || ~all(ismember(channels(:), 1:4))
+                error('Output channels are numbered 1-4: give one, or several as an array, e.g. 1 or [2 4].')
+            end
+            channelList = unique(double(channels(:)))';
+        end
+
+        function bits = channelBits(obj, channels)
+            % Converts output channel numbers to one bit per channel (bit 0 = channel 1)
+            bits = uint8(sum(bitshift(1, obj.channelNumbers(channels) - 1)));
         end
 
         function bits = volts2Bits(obj, voltage)
@@ -787,6 +880,7 @@ classdef PulsePalDevice < handle
             % Convert serialized hardware timer counts to seconds.
             seconds = double(typecast(uint8(Bytes), 'uint32'))/obj.cycleFrequency;
         end
+
         function confirmed = confirmWrite(obj)
             % Verify that the device acknowledged a write command.
             confirmed = obj.Port.read(1, 'uint8');
@@ -797,131 +891,29 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function setOutputParam(obj, paramCode, val, units)
-            %   Validate, encode, and optionally transmit one parameter.
-            %   paramCode identifies the Pulse Pal parameter. units selects byte, time,
-            %   or voltage encoding. When obj.autoSync is true, the encoded command is
-            %   written immediately and device acknowledgement is checked.
-            if paramCode == 128
-                if length(val) ~= 2
-                    error('Error: there must be exactly one parameter value for each trigger channel.')
-                end
-            else
-                if length(val) ~= 4
-                    error('Error: there must be exactly one parameter value for each output channel.')
-                end
-            end
-            switch units
-                case 'Volts'
-                    obj.checkParamRange(val, 'Volts', [-10 10], paramCode);
-                    value2send = obj.volts2Bits(val);
-                case 'Time'
-                    switch paramCode
-                        case 4
-                            range = [0.0001 3600];
-                        case 6
-                            range = [0.0001 3600];
-                        case 7
-                            range = [0.0001 3600];
-                        case 10
-                            range = [0.0001 3600];
-                        otherwise
-                            range = [0 3600];
-                    end
-                    % Checked in whole timer cycles, as the device receives it: [100 100 100 100]*1e-6 is
-                    % 9.999999999999999e-05 in floating point, under the 0.0001 minimum, but is exactly 2 cycles.
-                    obj.checkParamRange(val, 'Time', [-Inf Inf], paramCode); % A number, not NaN or Inf
-                    value2send = obj.roundHalfEven(double(val)*obj.cycleFrequency);
-                    obj.checkParamRange(value2send/obj.cycleFrequency, 'Time', range, paramCode);
-                case 'Byte'
-                    switch paramCode
-                        case 1
-                            range = [0 1];
-                        case 12
-                            range = [0 1];
-                        case 13
-                            range = [0 1];
-                        case 14
-                            range = [0 obj.nCustomPulseTrains];
-                        case 15
-                            range = [0 1];
-                        case 16
-                            range = [0 1];
-                        case 18
-                            range = [0 1];
-                        case 128
-                            if obj.hardwareVersion > 2
-                                range = [0 3]; % Param sync mode (3) is Pulse Pal 3 only
-                            else
-                                range = [0 2];
-                            end
-                    end
-                    obj.checkParamRange(val, 'Byte', range, paramCode);
-                    value2send = val;
-            end
-            if obj.autoSync
-                Msg = [];
-                if sum(paramCode == [2 3 17]) > 0
-                    if obj.firmwareVersion > 21
-                        obj.Port.write([obj.OpMenuByte 91 paramCode typecast(uint16(value2send), 'uint8')], 'uint8');
-                    else
-                        for i = 1:4
-                            Msg = [Msg obj.OpMenuByte 74 paramCode i typecast(uint16(value2send(i)), 'uint8')];
-                        end
-                        obj.Port.write(Msg, 'uint8');
-                    end
-                elseif sum(paramCode == [4 5 6 7 8 9 10 11]) > 0
-                    if obj.firmwareVersion > 21
-                        obj.Port.write([obj.OpMenuByte 91 paramCode typecast(uint32(value2send), 'uint8')], 'uint8');
-                    else
-                        for i = 1:4
-                            Msg = [Msg obj.OpMenuByte 74 paramCode i typecast(uint32(value2send(i)), 'uint8')];
-                        end
-                        obj.Port.write(Msg, 'uint8');
-                    end
-                else
-                    if obj.firmwareVersion > 21
-                        obj.Port.write([obj.OpMenuByte 91 paramCode value2send], 'uint8');
-                    else
-                        if paramCode < 18 || paramCode == 128 % Firmware v21 did not process code 18
-                            for i = 1:4
-                                Msg = [Msg obj.OpMenuByte 74 paramCode i value2send(i)];
-                            end
-                        end
-                        obj.Port.write(Msg, 'uint8');
-                    end
-                end
-                obj.confirmWrite;
-            end
-        end
-
         function confirmed = syncAllParams(obj)
-            %   syncAllParams Encode and transmit the complete parameter set.
-            %   Used when autoSync is false to batch all output and trigger parameters
-            %   into a single command. This is more efficient than item-wise data transfers.
-            if obj.autoSync
-                error('The autoSync field is set to ''true''. syncAllParams() may be used when autoSync is false.')
-            end
+            %   Encode and transmit the complete parameter set in one command: op 92, or op 73 on firmware v21. This is
+            %   more efficient than item-wise data transfers. See "Op codes" in /Firmware/PROTOCOL.md.
             for i = 1:4
-                if obj.customTrainTarget(i) == 1
-                    BDuration = obj.burstDuration(i);
-                    if BDuration == 0
-                        error(['Error in output channel ' num2str(i)... 
-                            ': When custom train times target burst onsets, a non-zero burst duration must be defined.'])
-                    end
+                if strcmp(obj.customTrainTarget{i}, 'Bursts') && obj.burstDuration(i) == 0
+                    error(['Error in output channel ' num2str(i)...
+                        ': When custom train times target burst onsets, a non-zero burst duration must be defined.'])
                 end
             end
+            [~, targets] = ismember(obj.customTrainTarget, obj.CustomTrainTargetNames);
+            [~, modes] = ismember(obj.triggerMode, obj.TriggerModeNames);
             TimeData = obj.roundHalfEven([obj.phase1Duration; obj.interPhaseInterval; obj.phase2Duration;...
                 obj.interPulseInterval; obj.burstDuration; obj.interBurstInterval;...
                 obj.pulseTrainDuration; obj.pulseTrainDelay]*obj.cycleFrequency);
             TimeData = TimeData';
             VoltageData = [obj.volts2Bits(obj.phase1Voltage); obj.volts2Bits(obj.phase2Voltage); obj.volts2Bits(obj.restingVoltage)];
             VoltageData = VoltageData';
-            playbackModeData = [];
+            continuousLoopData = [];
             if obj.firmwareVersion > 21
-                playbackModeData = obj.playbackMode;
+                continuousLoopData = double(obj.continuousLoop);
             end
-            SingleByteOutputParams = [obj.isBiphasic; obj.customTrainID; obj.customTrainTarget; obj.customTrainLoop; playbackModeData];
+            SingleByteOutputParams = [double(obj.isBiphasic); obj.customTrainID; targets - 1;...
+                double(obj.customTrainLoop); continuousLoopData];
             opCode = 92;
             if obj.firmwareVersion < 22 % Use op 73 for firmware v21
                 opCode = 73;
@@ -930,7 +922,8 @@ classdef PulsePalDevice < handle
             else
                 SingleByteOutputParams = SingleByteOutputParams';
             end
-            SingleByteParams = [SingleByteOutputParams(1:end) obj.linkTriggerChannel1 obj.linkTriggerChannel2 obj.triggerMode];
+            SingleByteParams = [SingleByteOutputParams(1:end) double(obj.linkTriggerChannel1)...
+                double(obj.linkTriggerChannel2) modes - 1];
             obj.Port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
                 typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
             confirmed = obj.confirmWrite;
@@ -946,8 +939,8 @@ classdef PulsePalDevice < handle
                 error('Error: custom pulse times and voltages must be numbers (NaN and Inf are not allowed).');
             end
             if nPulses > obj.maxCustomPulses
-                error(['Error: Attempted to send ' num2str(nPulses) ' pulses. Pulse Pal '... 
-                    num2str(obj.info.hardwareVersion) ' can only store '... 
+                error(['Error: Attempted to send ' num2str(nPulses) ' pulses. Pulse Pal '...
+                    num2str(obj.info.hardwareVersion) ' can only store '...
                     num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
             if sum(sum(rem(round(pulseTimes*1000000), obj.cyclePeriod*2))) > 0
@@ -992,11 +985,11 @@ classdef PulsePalDevice < handle
                 typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
+
         function confirmed = importCurrentParamsFromPulsePal(obj)
-            %   importCurrentParamsFromPulsePal Import all parameters currently stored on the device.
-            %   Firmware v22 or newer is required. The method reads the packed parameter
-            %   message, decodes times and voltages, and updates object properties while
-            %   temporarily disabling autoSync.
+            %   Import all parameters currently stored on the device (op 93). Firmware v22 or newer is required.
+            %   The method reads the packed parameter message, decodes times and voltages, and updates object
+            %   properties while temporarily disabling autoSync. continuousLoop is not part of op 93.
             if obj.firmwareVersion < 22
                 error(['importCurrentParamsFromPulsePal() requires firmware v22 or newer.'...
                       newline 'Detected firmware is v' num2str(obj.firmwareVersion)])
@@ -1030,53 +1023,29 @@ classdef PulsePalDevice < handle
             obj.triggerMode = Msg(Pos:Pos+1);
             obj.autoSync = autoSyncState;
         end
+
         function params = exportParams(obj)
             % Export the current parameters of the PulsePalDevice object to a struct
             params = struct;
             params.autoSync = obj.autoSync;
-            params.isBiphasic = obj.isBiphasic;
-            params.phase1Voltage = obj.phase1Voltage;
-            params.phase2Voltage = obj.phase2Voltage;
-            params.restingVoltage = obj.restingVoltage;
-            params.phase1Duration = obj.phase1Duration;
-            params.interPhaseInterval = obj.interPhaseInterval;
-            params.phase2Duration = obj.phase2Duration;
-            params.interPulseInterval = obj.interPulseInterval;
-            params.burstDuration = obj.burstDuration;
-            params.interBurstInterval = obj.interBurstInterval;
-            params.pulseTrainDuration = obj.pulseTrainDuration;
-            params.pulseTrainDelay = obj.pulseTrainDelay;
-            params.linkTriggerChannel1 = obj.linkTriggerChannel1;
-            params.linkTriggerChannel2 = obj.linkTriggerChannel2;
-            params.customTrainID = obj.customTrainID;
-            params.customTrainTarget = obj.customTrainTarget;
-            params.customTrainLoop = obj.customTrainLoop;
-            params.playbackMode = obj.playbackMode;
+            for i = 1:numel(obj.ParamNames)
+                params.(obj.ParamNames{i}) = obj.(obj.ParamNames{i});
+            end
             params.triggerMode = obj.triggerMode;
         end
 
         function importParams(obj, params)
-            % Import a struct of parameters to be the current parameters of the PulsePalDevice object
-            obj.isBiphasic = params.isBiphasic;
-            obj.phase1Voltage = params.phase1Voltage;
-            obj.phase2Voltage = params.phase2Voltage;
-            obj.restingVoltage = params.restingVoltage;
-            obj.phase1Duration = params.phase1Duration;
-            obj.interPhaseInterval = params.interPhaseInterval;
-            obj.phase2Duration = params.phase2Duration;
-            obj.interPulseInterval = params.interPulseInterval;
-            obj.burstDuration = params.burstDuration;
-            obj.interBurstInterval = params.interBurstInterval;
-            obj.pulseTrainDuration = params.pulseTrainDuration;
-            obj.pulseTrainDelay = params.pulseTrainDelay;
-            obj.linkTriggerChannel1 = params.linkTriggerChannel1;
-            obj.linkTriggerChannel2 = params.linkTriggerChannel2;
-            obj.customTrainID = params.customTrainID;
-            obj.customTrainTarget = params.customTrainTarget;
-            obj.customTrainLoop = params.customTrainLoop;
-            obj.playbackMode = params.playbackMode;
+            % Import a struct of parameters to be the current parameters of the PulsePalDevice object. Its values may
+            % be the GUI's numbers (see defaultParams()), which the properties take as well as names and logicals.
+            if isfield(params, 'playbackMode') && ~isfield(params, 'continuousLoop')
+                params.continuousLoop = params.playbackMode; % The parameter's name before continuousLoop
+            end
+            for i = 1:numel(obj.ParamNames)
+                obj.(obj.ParamNames{i}) = params.(obj.ParamNames{i});
+            end
             obj.triggerMode = params.triggerMode;
         end
+
         function fh = makeCallback(obj, fun, varargin)
             % makeCallback Create a UI callback that safely dispatches to a local function.
             %   Stores a weak reference to the device object when supported so GUI callbacks
@@ -1087,9 +1056,11 @@ classdef PulsePalDevice < handle
                 cObj, fun, extraArgs{:});
         end
     end
+
     methods (Static, Access = private)
         function params = defaultParams
-            % defaultParams returns a struct containing default Pulse Pal parameters.
+            % The default parameters, as the GUI keeps them: numbers, with each mode as its code (0 = 'Normal',
+            % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them.
             params = struct;
             params.isBiphasic = zeros(1,4);
             params.restingVoltage = zeros(1,4);
@@ -1105,11 +1076,11 @@ classdef PulsePalDevice < handle
             params.pulseTrainDelay = zeros(1,4);
             params.linkTriggerChannel1 = ones(1,4);
             params.linkTriggerChannel2 = zeros(1,4);
-            params.customTrainID = uint8(zeros(1,4));
-            params.customTrainTarget = uint8(zeros(1,4));
+            params.customTrainID = zeros(1,4);
+            params.customTrainTarget = zeros(1,4);
             params.customTrainLoop = zeros(1,4);
-            params.playbackMode = zeros(1,4);
-            params.triggerMode = uint8(zeros(1,2));
+            params.continuousLoop = zeros(1,4);
+            params.triggerMode = zeros(1,2);
         end
 
         function cObj = getCallbackObject(obj)

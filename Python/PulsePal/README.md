@@ -4,13 +4,30 @@ Python interface for the [Pulse Pal](https://sites.google.com/site/pulsepalwiki/
 open source pulse train generator. API documentation is published at
 https://sanworks.github.io/PulsePal/Python/.
 
-`WavePal.py` controls a Pulse Pal 3 running Wave Pal firmware
-(`/Firmware/WavePal`), which plays sampled waveforms instead of pulse
-trains. `WavePalExample.py` shows how to use it.
+The `pulsepal` package holds three classes, one for each firmware a Pulse Pal
+can run:
 
-`SynthPal.py` controls a Pulse Pal 3 running Synth Pal firmware
-(`/Firmware/SynthPal`), which plays sine, triangle, square and sawtooth
-waves, and fixed voltages. `SynthPalExample.py` shows how to use it.
+| Class | Device | Example |
+|---|---|---|
+| `PulsePalDevice` | Pulse Pal 2 or 3 running Pulse Pal firmware: pulse trains | `PulsePalExample.py` |
+| `WavePalDevice` | Pulse Pal 3 running Wave Pal firmware (`/Firmware/WavePal`): sampled waveforms | `WavePalExample.py` |
+| `SynthPalDevice` | Pulse Pal 3 running Synth Pal firmware (`/Firmware/SynthPal`): sine, triangle, square and sawtooth waves, and fixed voltages | `SynthPalExample.py` |
+
+```python
+from pulsepal import PulsePalDevice
+
+with PulsePalDevice("COM3") as P:      # Replace COM3 with Pulse Pal's port
+    P.phase1_voltage[1] = 5            # Volts, output channel 1
+    P.phase1_duration[1] = 0.001       # Seconds
+    P.trigger(1)
+```
+
+The three work the same way: settings are lists indexed by channel number
+(index 0 is unused), and assigning to one programs the device at once;
+`trigger()` and `stop()` take a channel number, or several as a list, tuple or
+NumPy array; `set_default_params()` programs the defaults; `print(device)`
+shows every setting; and errors raise `pulsepal.PulsePalError`.
+`PulsePalDevice.serialportlist()` lists the USB serial ports.
 
 ## Installation
 
@@ -25,7 +42,7 @@ That creates `.venv` with the interface and its dependencies installed, and is
 the whole installation on Windows and Linux. The first run downloads a
 CPython build for the project (about 20 MB); later runs reuse it.
 
-The download is deliberate. `PulsePalGUI` imports tkinter, which Linux
+The download is deliberate. `pulsepal.gui` imports tkinter, which Linux
 distributions package separately from Python, so a virtual environment built
 from a distribution's interpreter can install cleanly and then fail at
 `P.gui()`. uv's CPython builds bundle Tcl/Tk, so `uv sync` alone is enough on a

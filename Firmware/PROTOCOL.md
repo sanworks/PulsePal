@@ -7,7 +7,7 @@ Four clients use this protocol, and all of them must agree with the firmware:
 
 | Client | Location |
 |---|---|
-| Python class | `/Python/PulsePal/PulsePal.py` |
+| Python class | `pulsepal.PulsePalDevice`, in `/Python/PulsePal/pulsepal/pulse_pal.py` |
 | MATLAB class | `/MATLAB/@PulsePalDevice/PulsePalDevice.m` |
 | MATLAB legacy functions | `/MATLAB/Legacy/` |
 | C++ class | `/c++/PulsePal.cpp` |
@@ -158,8 +158,10 @@ one.
 | 18 | Continuous loop mode | 1 byte | 0 or 1 |
 | 128 | Trigger mode (trigger channels 1-2) | 1 byte | 0 normal, 1 toggle, 2 pulse gated, 3 param sync (Pulse Pal 3 only) |
 
-In the Python class, a name's position in the parameter name list gives its code, so the list
-must stay in this order.
+The Python and MATLAB classes name these parameters (`phase1_voltage`, `phase1Voltage`, ...), and
+give the byte parameters as names (trigger modes "Normal", "Toggle", "Gated", "Param Sync";
+custom train targets "Pulses", "Bursts") or as true and false. They send the codes in this table.
+Code 18 is `continuous_loop` / `continuousLoop` in the classes.
 
 A phase of 0 cycles would never end, and an inter-pulse interval of 0 would stop a monophasic
 train after its first pulse, so ops 73, 74, 91 and 92 and settings files refuse them: the reply
@@ -193,9 +195,10 @@ set, so only the most recent one is ever loaded. An op 92 whose data does not al
 not stored.
 
 **Only op 92 is delayed.** Ops 73, 74 and 91 program the device immediately, in param sync
-mode as in any other. In the clients, only `sync_to_device()` (Python), `syncToDevice()`
-(MATLAB) and `syncAllParams()` (C++) store a set; `set_output_param()`,
-`set_trigger_param()` and their MATLAB and C++ equivalents take effect at once.
+mode as in any other. In the clients, only `sync_to_device()` (Python, also at the end of a
+`batch()` block), `syncToDevice()` (MATLAB) and `syncAllParams()` (C++) store a set; assigning a
+parameter with `auto_sync` / `autoSync` on, `set_output_param()`, `set_trigger_param()` and their
+C++ equivalents take effect at once.
 
 **At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set.
 With nothing stored, it does nothing.

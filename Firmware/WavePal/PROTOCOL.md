@@ -6,7 +6,7 @@ the reference for its USB serial protocol, as of Wave Pal firmware v1.
 
 | Client | Location |
 |---|---|
-| Python class | `/Python/PulsePal/WavePal.py` |
+| Python class | `pulsepal.WavePalDevice`, in `/Python/PulsePal/pulsepal/wave_pal.py` |
 | MATLAB class | `/MATLAB/@WavePalDevice/WavePalDevice.m` |
 
 On the device, `processUSBCommands()` in `/Firmware/WavePal/USBOps.ino` executes commands, and
@@ -67,12 +67,12 @@ the waveform could not be written to the microSD card; that channel is then left
 | 83 | `S` | Set sampling rate | Rate in Hz (uint32), 1 to the maximum | 1 / 0 |
 | 82 | `R` | Set output range | Range index (uint8), see [Output ranges](#output-ranges) | 1 / 0 |
 | 76 | `L` | Load waveform | Channel (uint8, 1-4), sample count (uint32, 1 to the maximum), then that many samples (uint16 each) | 1 / 0, once the waveform is on the microSD card |
-| 80 | `P` | Play (soft trigger) | Channel bits (uint8) | none |
+| 80 | `P` | Soft trigger: starts idle channels | Channel bits (uint8) | none |
 | 88 | `X` | Stop | Channel bits (uint8) | none |
 | 33 | `!` | Set fixed voltage | Channel bits (uint8), DAC code (uint16) | 1 / 0 |
 | 79 | `O` | Set loop mode | 4 bytes, one per output channel: 0 off, 1 on | 1 / 0 |
 | 68 | `D` | Set loop duration | 4 uint32, one per output channel: samples, 0 = loop until stopped | 1 / 0 |
-| 84 | `T` | Set trigger mode | 4 bytes, one per output channel, see [Triggers](#triggers) | 1 / 0 |
+| 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
 | 71 | `G` | Get status | none | Playing channel bits (uint8), samples loaded on channels 1-4 (4 uint32, 0 = empty), underruns on channels 1-4 (4 uint32, counted since startup), longest playback interrupt since the previous op 71, in nanoseconds (uint32) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
@@ -119,18 +119,24 @@ in the -10 V to 10 V range, the range it was measured in.
 
 ## Triggers
 
-A trigger is a rising TTL edge on a trigger channel linked to the output channel (op 73), or a
-soft trigger (op 80). What it does depends on the output channel's trigger mode (op 84):
+Each trigger channel has a trigger mode (op 84), as in Pulse Pal firmware, and modes 0-2 are Pulse
+Pal's trigger modes, with the same codes. An edge on a trigger channel acts on the output channels
+linked to it (op 73):
 
-| Mode | Name | A trigger while the channel is idle | A trigger while it plays |
+| Mode | Name | Rising edge | Falling edge |
 |---|---|---|---|
-| 0 | Normal | Starts the waveform | Ignored |
-| 1 | Master | Starts the waveform | Restarts it from the first sample |
-| 2 | Toggle | Starts the waveform | Stops it |
-| 3 | Gated | Starts the waveform | Ignored. A falling edge on the trigger channel stops it, unless the other trigger channel is also linked to it and still high |
+| 0 | Normal | Starts idle channels. Channels that are playing ignore it | Nothing |
+| 1 | Toggle | Starts idle channels, and stops channels that are playing | Nothing |
+| 2 | Gated | Starts idle channels. Channels that are playing ignore it | Stops the channels, unless the other trigger channel is also gated, linked to them, and still high |
+| 4 | Master | Starts idle channels, and restarts channels that are playing from their first sample | Nothing |
 
-A channel with no waveform ignores triggers. Soft triggers start a gated channel as in normal
-mode; op 88 stops it.
+Mode 3 is Pulse Pal's param sync mode, which Wave Pal does not have: op 84 replies 0 to it. With
+loop mode on and a loop duration of 0, a channel in gated mode plays for exactly as long as the TTL
+is high.
+
+A soft trigger (op 80) starts idle channels, and channels that are playing ignore it, as in Pulse
+Pal firmware, whatever the trigger modes. A channel with no waveform ignores triggers. Op 88 stops
+channels.
 
 A channel stops when:
 
@@ -183,8 +189,8 @@ unloaded. Replies are buffered and sent when the command finishes.
 ## Default settings
 
 At startup and after a comm failure: 10 kHz sampling rate, -10 V to 10 V range, loop mode off,
-loop durations 0, trigger mode normal, output channels 1-4 linked to trigger channel 1 and not
-to trigger channel 2. The Python and MATLAB classes program the same defaults when they connect.
+loop durations 0, both trigger channels in normal mode, output channels 1-4 linked to trigger
+channel 1 and not to trigger channel 2. The Python and MATLAB classes program the same defaults when they connect.
 
 ## Differences from WavePlayer
 
@@ -193,7 +199,7 @@ to trigger channel 2. The Python and MATLAB classes program the same defaults wh
 | Up to 64 or 128 waveforms, played on any channel | One waveform per output channel |
 | Handshake 227, reply 228, no framing byte | Framing byte 213; op 72, reply 87 |
 | Triggered over the Bpod UART, or by op `P` / `>` | Triggered by TTL on the trigger channels, op 80, or the joystick |
-| Trigger mode for the whole device | Trigger mode per output channel, plus gated mode |
+| Trigger mode for the whole device | Trigger mode per trigger channel, as in Pulse Pal, plus gated mode |
 | Trigger profiles, Bpod events | Not implemented |
 | `D`: loop duration required in loop mode | `D`: 0 loops until stopped |
 | `S` sends the sample period (float32) | Op 83 sends the rate in Hz (uint32) |

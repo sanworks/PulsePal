@@ -15,17 +15,15 @@ They also run under pytest, if it is installed:
 """
 import copy
 import gc
-import importlib.util
 import struct
 import sys
 from pathlib import Path
 
 import numpy as np
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "SynthPal.py"
-_spec = importlib.util.spec_from_file_location("SynthPal_under_test", MODULE_PATH)
-SynthPal = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(SynthPal)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pulsepal import synth_pal as SynthPal  # noqa: E402
+from pulsepal import PulsePalError  # noqa: E402
 
 OP_MENU_BYTE = 213
 
@@ -185,11 +183,11 @@ def connect(fake=None):
     return device, fake
 
 
-def expect_error(function, *args, error=None):
-    """Run function and check that it raises SynthPalError (or `error`)."""
-    error = error or SynthPal.SynthPalError
+def expect_error(function, *args, error=None, **kwargs):
+    """Run function and check that it raises PulsePalError (or `error`)."""
+    error = error or PulsePalError
     try:
-        function(*args)
+        function(*args, **kwargs)
     except error as exc:
         return exc
     raise AssertionError(f"{function} did not raise {error.__name__}")
@@ -215,9 +213,9 @@ def test_connection_sequence_programs_the_defaults():
         command("F", struct.pack("<I", 10000)),
         # In this order, each is valid whatever the device holds (see the next test)
         command("M", struct.pack("<4i", 0, 0, 0, 0)),
-        command("V", struct.pack("<4i", 0, 0, 0, 0)),
         command("A", struct.pack("<4i", *[5_000_000] * 4)),
         command("W", bytes(4)),
+        command("V", struct.pack("<4i", 0, 0, 0, 0)),
         command("D", struct.pack("<4I", *[1_000_000] * 4)),
         command("B", struct.pack("<4I", 0, 0, 0, 0)),
         command("E", struct.pack("<4I", 0, 0, 0, 0)),
@@ -233,7 +231,8 @@ def test_connection_sequence_programs_the_defaults():
     assert device.samples_per_cycle == 1000
     assert device.sampling_rate == 100000
     assert device.waveform == [None] + ["Sine"] * 4
-    assert device.amplitude == [None, 5, 5, 5, 5]
+    assert device.peak_to_peak == [None, 5, 5, 5, 5]
+    assert device.fixed_voltage == [None, 5, 5, 5, 5]
     assert device.mean_voltage == [None, 0, 0, 0, 0]
     assert device.resting_voltage == [None, 0, 0, 0, 0]
     assert device.play_duration == [None, 1, 1, 1, 1]
@@ -340,34 +339,36 @@ def test_voltages_are_sent_in_microvolts():
     device, fake = connect()
     device.resting_voltage[1:5] = [1.5, -2.25, 0.0000004, -0.0000005]
     device.mean_voltage[1:5] = [-1.5, 2.25, 0.0000004, -0.0000005]
-    device.amplitude = [1, 0.0123456, 15, 20]
+    device.peak_to_peak = [1, 0.0123456, 15, 20]
     assert fake.writes == [
         command("V", struct.pack("<4i", 1_500_000, -2_250_000, 0, 0)),
         command("M", struct.pack("<4i", -1_500_000, 2_250_000, 0, 0)),
         command("A", struct.pack("<4i", 1_000_000, 12_346, 15_000_000, 20_000_000)),
     ]
-    assert device.amplitude == [None, 1, 0.0123456, 15, 20]
+    assert device.peak_to_peak == [None, 1, 0.0123456, 15, 20]
     assert device.mean_voltage == [None, -1.5, 2.25, 0.0000004, -0.0000005]
 
 
 def test_the_waveform_must_stay_within_10_volts():
     device, fake = connect()
     error = expect_error(device.mean_voltage.__setitem__, 1, 9)  # 9 + 5 / 2 = 11.5 V
-    assert "channel 1" in str(error) and "amplitude first" in str(error), error
-    device.amplitude[1] = 2
+    assert "channel 1" in str(error) and "peak_to_peak first" in str(error), error
+    assert "configure()" in str(error), error
+    device.peak_to_peak[1] = 2
     device.mean_voltage[1] = 9  # Reaches exactly 10 V
     fake.writes.clear()
-    error = expect_error(device.amplitude.__setitem__, 1, 4)  # 9 + 2 = 11 V
+    error = expect_error(device.peak_to_peak.__setitem__, 1, 4)  # 9 + 2 = 11 V
     assert "channel 1" in str(error) and "mean_voltage first" in str(error), error
     expect_error(device.mean_voltage.__setitem__, 1, -9.5)  # -9.5 - 1 = -10.5 V
     device.mean_voltage[1] = -9
     for bad in (-0.1, 20.5, float("nan"), "5", True):
-        expect_error(device.amplitude.__setitem__, 2, bad)
+        expect_error(device.peak_to_peak.__setitem__, 2, bad)
     for bad in (10.5, -11, float("inf")):
         expect_error(device.mean_voltage.__setitem__, 2, bad)
         expect_error(device.resting_voltage.__setitem__, 2, bad)
+        expect_error(device.fixed_voltage.__setitem__, 2, bad)
     assert fake.ops() == ["M"]
-    assert device.amplitude == [None, 2, 5, 5, 5]
+    assert device.peak_to_peak == [None, 2, 5, 5, 5]
     assert device.mean_voltage == [None, -9, 0, 0, 0]
 
 
@@ -375,7 +376,7 @@ def test_the_resting_voltage_goes_with_any_waveform():
     """The resting voltage is the output between playbacks: it does not limit the
     waveform, which swings around the mean voltage."""
     device, fake = connect()
-    device.amplitude[1] = 20
+    device.peak_to_peak[1] = 20
     device.resting_voltage[1:3] = [10, -10]
     assert fake.resting == [10_000_000, -10_000_000, 0, 0] and fake.amplitude[0] == 20_000_000
 
@@ -384,11 +385,11 @@ def test_large_amplitude_after_moving_the_mean_voltage():
     """Going from (9 V mean, 2 V amplitude) to (0 V mean, 20 V amplitude) needs
     the mean voltage first, and the reverse needs the amplitude first."""
     device, fake = connect()
-    device.amplitude[3] = 2
+    device.peak_to_peak[3] = 2
     device.mean_voltage[3] = 9
     device.mean_voltage[3] = 0
-    device.amplitude[3] = 20
-    device.amplitude[3] = 2
+    device.peak_to_peak[3] = 20
+    device.peak_to_peak[3] = 2
     device.mean_voltage[3] = 9
     assert fake.amplitude[2] == 2_000_000 and fake.mean[2] == 9_000_000
 
@@ -410,47 +411,97 @@ def test_ramp_durations_are_sent_in_microseconds():
     assert len(fake.writes) == 2
 
 
-def test_a_fixed_voltage_amplitude_is_a_signed_voltage():
+def test_a_fixed_voltage_channel_steps_to_its_fixed_voltage():
+    """On the device, a channel has one amplitude: its fixed voltage, or its waveform's peak to peak
+    voltage. The class keeps both, and sends the one that its waveform uses."""
     device, fake = connect()
-    device.waveform[2] = "Fixed Voltage"
-    device.amplitude[2] = -7.5
-    device.resting_voltage[2] = 9.5  # Any resting voltage goes with a fixed voltage
-    device.amplitude[2] = 10
-    assert fake.writes[1:] == [
+    device.waveform[2] = "Fixed Voltage"   # Its fixed voltage is 5 V, as its peak to peak voltage was
+    device.fixed_voltage[2] = -7.5
+    device.resting_voltage[2] = 9.5        # Any resting voltage goes with a fixed voltage
+    device.fixed_voltage[2] = 10
+    device.fixed_voltage[1] = -1           # Kept for when channel 1 plays a fixed voltage: nothing to send
+    device.peak_to_peak[2] = 20            # Kept for when channel 2 plays a periodic waveform
+    assert fake.writes == [
+        command("W", bytes([0, 4, 0, 0])),
         command("A", struct.pack("<4i", 5_000_000, -7_500_000, 5_000_000, 5_000_000)),
         command("V", struct.pack("<4i", 0, 9_500_000, 0, 0)),
         command("A", struct.pack("<4i", 5_000_000, 10_000_000, 5_000_000, 5_000_000)),
     ]
-    fake.writes.clear()
     for bad in (10.5, -10.000001, float("nan"), "5", True):
-        error = expect_error(device.amplitude.__setitem__, 2, bad)
-    assert "from -10 to 10 on a Fixed Voltage channel" in str(error), error
-    error = expect_error(device.amplitude.__setitem__, 1, -1)  # Channel 1 plays a sine wave
-    assert "Only a Fixed Voltage can be negative" in str(error), error
-    assert fake.writes == []
-    assert device.amplitude == [None, 5, 10, 5, 5]
+        expect_error(device.fixed_voltage.__setitem__, 2, bad)
+    assert device.fixed_voltage == [None, -1, 10, 5, 5]
+    assert device.peak_to_peak == [None, 5, 20, 5, 5]
+    device.waveform[2] = "Sine"
+    assert fake.amplitude == [5_000_000, 20_000_000, 5_000_000, 5_000_000] and fake.waveform == [0] * 4
 
 
-def test_a_new_waveform_must_suit_the_amplitude():
+def test_waveform_changes_are_sent_in_an_order_the_device_accepts():
+    """A sine wave of 20 V peak to peak cannot become a fixed voltage of -5 V by either op first: the
+    device would refuse a fixed voltage of 20 V, and a sine wave of -5 V peak to peak. The class goes
+    through 0 V, which suits every waveform, and only when it has to."""
     device, fake = connect()
-    device.waveform[1] = "Fixed Voltage"
-    device.amplitude[1] = -5
-    device.amplitude[3] = 20
-    device.waveform[4] = "Fixed Voltage"
-    device.amplitude[4] = 9
-    device.mean_voltage[4] = 9  # A fixed voltage ignores its mean voltage
+    device.peak_to_peak[3] = 20
+    device.fixed_voltage[3] = -5
     fake.writes.clear()
-    error = expect_error(device.waveform.__setitem__, 1, "Sine")
-    assert "negative" in str(error) and "Change amplitude first" in str(error), error
-    error = expect_error(device.waveform.__setitem__, 3, "Fixed Voltage")
-    assert "beyond -10 V to 10 V" in str(error), error
-    error = expect_error(device.waveform.__setitem__, 4, "Sine")  # 9 V + 9 V / 2 = 13.5 V
-    assert "13.5 V" in str(error) and "amplitude or mean_voltage first" in str(error), error
+    device.waveform[3] = "Fixed Voltage"
+    assert fake.writes == [
+        command("A", struct.pack("<4i", 5_000_000, 5_000_000, 0, 5_000_000)),
+        command("W", bytes([0, 0, 4, 0])),
+        command("A", struct.pack("<4i", 5_000_000, 5_000_000, -5_000_000, 5_000_000)),
+    ]
+    fake.writes.clear()
+    device.waveform[3] = "Sine"
+    assert fake.ops() == ["A", "W", "A"]
+    assert fake.amplitude[2] == 20_000_000 and fake.waveform[2] == 0
+
+    # 5 V suits a fixed voltage too, so the waveform changes first, and nothing goes through 0 V
+    device.fixed_voltage[1] = 3
+    fake.writes.clear()
+    device.waveform[1] = "Fixed Voltage"
+    assert fake.writes == [
+        command("W", bytes([4, 0, 0, 0])),
+        command("A", struct.pack("<4i", 3_000_000, 5_000_000, 20_000_000, 5_000_000)),
+    ]
+
+
+def test_configure_sets_several_settings_in_any_order():
+    """From 2 V peak to peak around 9 V to 20 V around 0 V needs the mean voltage first, and back
+    needs the peak to peak voltage first. configure() works out the order."""
+    device, fake = connect()
+    device.configure(3, peak_to_peak=2, mean_voltage=9)
+    assert fake.ops() == ["A", "M"]
+    fake.writes.clear()
+    device.configure(3, peak_to_peak=20, mean_voltage=0, play_duration=0.5)
+    assert fake.writes == [
+        command("M", struct.pack("<4i", 0, 0, 0, 0)),
+        command("A", struct.pack("<4i", 5_000_000, 5_000_000, 20_000_000, 5_000_000)),
+        command("D", struct.pack("<4I", 1_000_000, 1_000_000, 500_000, 1_000_000)),
+    ]
+    device.configure([1, 2], waveform=["Triangle", "Fixed Voltage"], fixed_voltage=-2.5, resting_voltage=1)
+    assert device.waveform == [None, "Triangle", "Fixed Voltage", "Sine", "Sine"]
+    assert device.fixed_voltage == [None, -2.5, -2.5, 5, 5]
+    assert device.resting_voltage == [None, 1, 1, 0, 0]
+    assert fake.waveform == [1, 4, 0, 0] and fake.amplitude[:2] == [5_000_000, -2_500_000]
+
+    fake.writes.clear()
+    error = expect_error(device.configure, 1, peak_to_peak=20, mean_voltage=1)  # Reaches 11 V
+    assert "would reach 11 V" in str(error), error
+    expect_error(device.configure, 1, waveform="Ramp")
+    expect_error(device.configure, [1, 2], peak_to_peak=[1, 2, 3])
+    expect_error(device.configure, 5, peak_to_peak=1)
+    expect_error(device.configure, 1, amplitude=1, error=TypeError)
     assert fake.writes == []
-    device.amplitude[1] = 5  # Valid for both: a fixed voltage of 5 V, then a sine wave of 5 V peak to peak
-    device.waveform[1] = "Sine"
-    assert fake.waveform == [0, 0, 0, 4]
-    assert device.waveform == [None, "Sine", "Sine", "Sine", "Fixed Voltage"]
+
+
+def test_a_stale_record_of_the_device_levels_is_recovered():
+    """If the device holds other levels than the class last sent (e.g. a param sync edge loaded a
+    stored set), a step it refuses makes the class start again from 0 V, which works from any state."""
+    device, fake = connect()
+    fake.waveform[0] = 4                    # As if channel 1 now played a fixed voltage of -5 V
+    fake.amplitude[0] = -5_000_000
+    device.peak_to_peak[1] = 20             # A fixed voltage of 20 V: refused, then recovered
+    assert fake.ops() == ["A", "A", "W", "M", "A"]
+    assert fake.waveform == [0] * 4 and fake.amplitude == [20_000_000, 5_000_000, 5_000_000, 5_000_000]
 
 
 def test_play_durations_are_sent_in_microseconds():
@@ -492,7 +543,8 @@ def test_auto_sync_off_keeps_settings_here_until_sync_to_device():
     device.auto_sync = False
     device.frequency = 300
     device.waveform[1:3] = ["Fixed Voltage", "Square"]
-    device.amplitude[1:3] = [-2.5, 3]  # A fixed voltage of -2.5 V, before the waveform would allow it
+    device.fixed_voltage[1] = -2.5
+    device.peak_to_peak[2] = 3
     device.mean_voltage[2] = 1.25
     device.resting_voltage[3] = -0.5
     device.play_duration[4] = 0.25
@@ -508,14 +560,14 @@ def test_auto_sync_off_keeps_settings_here_until_sync_to_device():
         0, 1_250_000, 0, 0, 0, 0, -500_000, 0, 1_000_000, 1_000_000, 1_000_000, 250_000,
         10_000, 0, 0, 0, 0, 20_000, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 3))]
     assert fake.amplitude[0] == -2_500_000 and fake.trigger_mode == [1, 3]  # Applied: no channel was in param sync
-    assert device.amplitude == [None, -2.5, 3, 5, 5]
+    assert device.fixed_voltage == [None, -2.5, 5, 5, 5] and device.peak_to_peak == [None, 5, 3, 5, 5]
 
 
 def test_sync_to_device_in_param_sync_mode_is_stored_by_the_device():
     device, fake = connect()
     device.trigger_mode[1] = "Param Sync"  # Sent at once
     device.auto_sync = False
-    device.amplitude[2] = 7
+    device.peak_to_peak[2] = 7
     device.sync_to_device()
     assert fake.stored["amplitude"] == [5_000_000, 7_000_000, 5_000_000, 5_000_000]
     assert fake.amplitude == [5_000_000] * 4  # Not applied: it waits for an edge
@@ -524,28 +576,50 @@ def test_sync_to_device_in_param_sync_mode_is_stored_by_the_device():
     assert fake.stored is None
 
 
-def test_sync_to_device_checks_the_whole_set():
+def test_assignments_are_checked_with_auto_sync_off_too():
     device, fake = connect()
     device.auto_sync = False
-    device.amplitude[1] = -1  # Accepted here: the waveform could still become a fixed voltage
-    error = expect_error(device.sync_to_device)
-    assert "channel 1" in str(error) and "negative" in str(error), error
-    device.amplitude[1] = 4
-    device.mean_voltage[1] = 9  # 9 V + 2 V
-    error = expect_error(device.sync_to_device)
-    assert "would reach 11 V" in str(error) and "Change amplitude or mean_voltage." in str(error), error
+    device.peak_to_peak[1] = 4
+    error = expect_error(device.mean_voltage.__setitem__, 1, 9)  # 9 V + 2 V
+    assert "would reach 11 V" in str(error), error
+    device.configure(1, peak_to_peak=2, mean_voltage=9)  # Together, they go
     for bad in (-10.5, 20.5, "1"):
-        expect_error(device.amplitude.__setitem__, 2, bad)
+        expect_error(device.peak_to_peak.__setitem__, 2, bad)
     for bad in ("yes", 2, None):
         expect_error(setattr, device, "auto_sync", bad)
     assert fake.writes == []
+    device.sync_to_device()
+    assert fake.ops() == ["U"] and fake.mean[0] == 9_000_000
 
 
-def test_set_defaults_programs_the_device_with_auto_sync_off():
+def test_batch_sends_everything_at_its_end():
+    device, fake = connect()
+    with device.batch():
+        device.frequency = 880
+        device.waveform = "Triangle"
+        device.peak_to_peak = [2, 4, 6, 8]
+        assert fake.writes == []
+    assert fake.ops() == ["U"]
+    assert fake.centihz == 88000 and fake.waveform == [1] * 4 and fake.amplitude[3] == 8_000_000
+    assert device.auto_sync is True
+
+    fake.writes.clear()
+    try:
+        with device.batch():
+            device.frequency = 440
+            device.peak_to_peak[1] = 1
+            raise RuntimeError("stop here")
+    except RuntimeError:
+        pass
+    assert fake.writes == []
+    assert device.frequency == 880 and device.peak_to_peak[1] == 2 and device.samples_per_cycle == 112
+
+
+def test_set_default_params_programs_the_device_with_auto_sync_off():
     device, fake = connect()
     device.auto_sync = False
-    device.set_defaults()
-    assert fake.ops() == ["F", "M", "V", "A", "W", "D", "B", "E", "T", "I"]
+    device.set_default_params()
+    assert fake.ops() == ["F", "M", "A", "W", "V", "D", "B", "E", "T", "I"]
     assert device.auto_sync is False
 
 
@@ -561,18 +635,18 @@ def test_trigger_links_travel_together():
 
 def test_channel_settings_are_indexed_by_channel_number():
     device, fake = connect()
-    device.amplitude = [1, 2, 3, 4]                 # 4 values: channels 1-4
-    device.amplitude = [None, 4, 3, 2, 1]           # 5 values: index 0 unused
-    device.amplitude = 2                            # one value for all channels
-    assert device.amplitude == [None, 2, 2, 2, 2]
+    device.peak_to_peak = [1, 2, 3, 4]              # 4 values: channels 1-4
+    device.peak_to_peak = [None, 4, 3, 2, 1]        # 5 values: index 0 unused
+    device.peak_to_peak = 2                         # one value for all channels
+    assert device.peak_to_peak == [None, 2, 2, 2, 2]
     fake.writes.clear()
-    expect_error(device.amplitude.__setitem__, 0, 1)
-    expect_error(device.amplitude.__setitem__, slice(1, 3), [1])
-    expect_error(setattr, device, "amplitude", [1, 2])
+    expect_error(device.peak_to_peak.__setitem__, 0, 1)
+    expect_error(device.peak_to_peak.__setitem__, slice(1, 3), [1])
+    expect_error(setattr, device, "peak_to_peak", [1, 2])
     for method, args in (("append", (1,)), ("pop", ()), ("sort", ()), ("clear", ())):
-        expect_error(getattr(device.amplitude, method), *args, error=TypeError)
+        expect_error(getattr(device.peak_to_peak, method), *args, error=TypeError)
     assert fake.writes == []
-    assert type(copy.copy(device.amplitude)) is list
+    assert type(copy.copy(device.peak_to_peak)) is list
 
 
 def test_a_setting_the_device_rejects_is_left_unchanged():
@@ -580,20 +654,20 @@ def test_a_setting_the_device_rejects_is_left_unchanged():
     fake.ack = 0
     expect_error(device.waveform.__setitem__, 1, "Square")
     expect_error(device.play_duration.__setitem__, 1, 3)
-    expect_error(device.amplitude.__setitem__, 1, 3)
+    expect_error(device.peak_to_peak.__setitem__, 1, 3)
     assert device.waveform == [None] + ["Sine"] * 4
     assert device.play_duration == [None, 1, 1, 1, 1]
-    assert device.amplitude == [None, 5, 5, 5, 5]
-    # The class's record of the amplitude is unchanged too, so the next check uses 5 V
+    assert device.peak_to_peak == [None, 5, 5, 5, 5]
+    # The peak to peak voltage is unchanged too, so the next check uses 5 V
     fake.ack = 1
     expect_error(device.mean_voltage.__setitem__, 1, 8)  # 8 + 2.5 > 10
 
 
-def test_play_and_stop_messages():
+def test_trigger_and_stop_messages():
     device, fake = connect()
-    device.play(1)
-    device.play([2, 4])
-    device.play(np.array([3]))
+    device.trigger(1)
+    device.trigger([2, 4])
+    device.trigger(np.array([3]))
     device.stop()
     device.stop(3)
     device.stop([1, 2])
@@ -605,9 +679,11 @@ def test_play_and_stop_messages():
         command("X", bytes([0b0100])),
         command("X", bytes([0b0011])),
     ]
+    device.trigger((1, 2))
+    assert fake.writes[-1] == command("P", bytes([0b0011]))
     for channels in (0, 5, [], [1, 7], True):
-        expect_error(device.play, channels)
-    assert len(fake.writes) == 6
+        expect_error(device.trigger, channels)
+    assert len(fake.writes) == 7
 
 
 def test_status_is_unpacked():

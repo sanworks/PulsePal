@@ -747,10 +747,12 @@ function uploadProgram(obj)
 % Trigger modes are handled on their own, because syncAllParams() is the one thing param sync mode defers.
 % A channel leaving param sync mode is programmed before the sync, so that the sync reaches the device. One
 % entering it is programmed after, so that this program is the one that loads and the next one waits for a TTL.
+% The GUI keeps trigger modes as their codes (see defaultParams()), and the triggerMode property as names
 paramSyncMode = 3;
 autoSyncState = obj.autoSync;
 newModes = obj.ui.params.triggerMode;
-deviceModes = obj.triggerMode;
+[~, deviceModes] = ismember(obj.triggerMode, obj.TriggerModeNames);
+deviceModes = deviceModes - 1;
 leavingParamSync = (deviceModes == paramSyncMode) & (newModes ~= paramSyncMode);
 enteringParamSync = (deviceModes ~= paramSyncMode) & (newModes == paramSyncMode);
 if any(leavingParamSync)
@@ -875,7 +877,7 @@ if ischar(file) && ischar(path)
         program.params.customTrainTarget = cell2mat(matrix(16,2:5));
         program.params.customTrainLoop = cell2mat(matrix(17,2:5));
         program.params.triggerMode = cell2mat(matrix(2,8:9));
-        program.params.playbackMode = zeros(1,4);
+        program.params.continuousLoop = zeros(1,4);
         isValidProgram = true;
     end
     if ~isValidProgram

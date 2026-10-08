@@ -16,7 +16,7 @@ files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse 
 | `/Firmware/SynthPal/` | Synth Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (sine, triangle, square, sawtooth, fixed voltage), with Pulse Pal's trigger modes, param sync included. Its own `AGENTS.md` and `PROTOCOL.md` |
 | `/Firmware/tools/` | `build_check.py`: compiles both hardware versions (or Wave Pal and Synth Pal, with `--sketch wavepal` and `--sketch synthpal`), and compares compiled functions between git revisions |
 | `/Firmware/Old/` | Archived firmware, no longer developed |
-| `/Python/PulsePal/` | Python class, GUI and offline tests. `WavePal.py` and `SynthPal.py` are the Python classes for Wave Pal and Synth Pal |
+| `/Python/PulsePal/` | The `pulsepal` Python package (`pulsepal/`: `pulse_pal.py`, `wave_pal.py`, `synth_pal.py`, the GUI in `gui.py`, shared code in `_common.py`), examples and offline tests |
 | `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/Legacy/` holds the older function-based interface |
 | `/MATLAB/@WavePalDevice/` | MATLAB class for Wave Pal. `/MATLAB/tests/testWavePalDevice.m` tests it on a device |
 | `/MATLAB/@SynthPalDevice/` | MATLAB class for Synth Pal. `/MATLAB/tests/testSynthPalDevice.m` tests it on a device |
@@ -34,9 +34,9 @@ because installed copies of the clients rely on them. Add new op codes instead o
 existing ones.
 
 Wave Pal has a protocol of its own, in `/Firmware/WavePal/PROTOCOL.md`, with the same framing
-byte. Its clients are `/Python/PulsePal/WavePal.py` and `/MATLAB/@WavePalDevice/`. So does Synth
-Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients `/Python/PulsePal/SynthPal.py` and
-`/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
+byte. Its clients are `/Python/PulsePal/pulsepal/wave_pal.py` and `/MATLAB/@WavePalDevice/`. So
+does Synth Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients
+`/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
 bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is not its own.
 
 Past bugs came from this coupling, so check both sides:
@@ -52,8 +52,19 @@ Past bugs came from this coupling, so check both sides:
 
 ## Working on the clients
 
-The Python classes (`/Python/PulsePal/`) and the MATLAB classes (`/MATLAB/@*Device/`) share
-these conventions. Keep them in new code.
+The Python classes (`/Python/PulsePal/pulsepal/`) and the MATLAB classes (`/MATLAB/@*Device/`)
+share these conventions. Keep them in new code.
+
+- **One way to use all six.** Settings are properties indexed by channel number (Python lists
+  with index 0 unused, MATLAB 1x4 arrays), and assigning one programs the device at once. With
+  `auto_sync` / `autoSync` off (Pulse Pal and Synth Pal), assignments stay local until
+  `sync_to_device()` / `syncToDevice()`, which works whatever auto_sync is; Python's `batch()`
+  block does both. `trigger(channels)` and `stop(channels)` take one channel number or several
+  as the language's array (a list, tuple or NumPy array; `[1 3]`), nothing else.
+  `set_default_params()` / `setDefaultParams()` programs the defaults, whatever auto_sync is.
+  Modes are names (case-insensitive) and on/off settings are booleans; Pulse Pal's classes also
+  take the integer codes of older clients. `info` has the same fields in both languages. A user
+  who learns one class, or moves a script between languages, should find the others the same.
 
 - **Check values before sending.** A value the device cannot play raises an error, and
   nothing is sent. The device refuses most such values too, but it then resets them, so the
@@ -79,11 +90,18 @@ these conventions. Keep them in new code.
   a device is unplugged with its port open (4.8.1 did not, when a Teensy was rebooted into its
   bootloader with the port open). Where .NET Framework is not available (macOS, Linux, or
   MATLAB set to .NET Core with `dotnetenv`), the classes use `serialport`.
-- **Copies to keep in step.** `WavePal.py` and `SynthPal.py` each have a `ChannelSettings`
-  class; all three Python modules have `serialportlist()`, `_port_is_free()` and a table of
-  the other firmwares' handshake replies; the three MATLAB constructors share their port setup
-  and handshake. A fix to one usually belongs in all of them.
-- **The Python GUI** (`PulsePalGUI.py`) sizes some parts in pixels, measured against Windows'
+- **Shared code.** The Python classes share `PulsePalError`, `ChannelSettings` (the
+  channel-indexed lists), `serialportlist()`, the handshake table of the three firmwares and
+  `batch()`, in `pulsepal/_common.py`. The three MATLAB classes have no shared code: their
+  constructors' port setup and handshake are copies, as are `namesToCodes()`,
+  `channelBits()` and `roundHalfEven()`. A fix to one usually belongs in all of them.
+- **Synth Pal's levels.** The device holds one amplitude per channel, a fixed voltage or a
+  periodic waveform's peak to peak voltage, and checks each of ops 65, 87 and 77 against the
+  other two. The classes keep `peak_to_peak` and `fixed_voltage` apart, and `_send_levels()` /
+  `sendLevels()` find an order of ops the device accepts. They keep a record of what the device
+  holds to plan from, and start again from 0 V if the device refuses a step (see "Levels" in
+  `/Firmware/SynthPal/PROTOCOL.md`).
+- **The Python GUI** (`pulsepal/gui.py`) sizes some parts in pixels, measured against Windows'
   9 point Segoe UI, and scales them with the desktop's font (`_scaled()`). Check a layout
   change with a larger desktop font, as on Ubuntu, and in dark mode, which uses the clam theme.
 

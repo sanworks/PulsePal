@@ -1,6 +1,6 @@
 % WavePalDevice controls a Pulse Pal 3 running Wave Pal firmware (/Firmware/WavePal), which makes it a four
 % channel waveform player. Each output channel plays one waveform of up to 1 million samples, stored on the
-% device's microSD card, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with play(),
+% device's microSD card, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(),
 % or from the thumb joystick. Waveforms play at up to 100 kHz.
 %
 % Example:
@@ -9,30 +9,32 @@
 %   W.outputRange = '-5V:5V';            % All channels
 %   t = (0:49999)/50000;                 % 1 second
 %   W.loadWaveform(1, 4*sin(2*pi*10*t)); % A 10 Hz sine wave, +/-4 V, on output channel 1
-%   W.play(1);
+%   W.trigger(1);                        % One channel, or several as an array, e.g. W.trigger([1 3])
 %   W.loopMode(1) = true;                % Loop channel 1's waveform...
 %   W.loopDuration(1) = 3;               % ...for 3 seconds after each trigger
-%   W.triggerMode{2} = 'Toggle';
+%   W.triggerMode{2} = 'Toggle';         % Trigger channel 2
 %   clear W                              % Releases the port. The device keeps playing, and TTL triggers still work.
 %
 % Settings are properties, and assigning one programs the device at once. Settings of the output channels are
-% 1x4 arrays with one element per channel, so W.loopMode(2) is output channel 2's loop mode. A single value
-% sets all four channels, e.g. W.triggerMode = 'Gated'. Voltages are in volts, within outputRange. Times are
-% in seconds.
+% 1x4 arrays with one element per channel, so W.loopMode(2) is output channel 2's loop mode; triggerMode is a 1x2
+% cell array, with one element per trigger channel, as in PulsePalDevice. A single value sets all channels, e.g.
+% W.triggerMode = 'Gated'. Voltages are in volts, within outputRange. Times are in seconds.
 %
-% Triggers. A trigger is a rising edge on a trigger channel linked to the output channel (linkTriggerChannel1,
-% linkTriggerChannel2), or a call to play(). What it does depends on the channel's triggerMode:
-%   'Normal'  Starts the waveform. Triggers during playback are ignored.
-%   'Master'  Starts the waveform, or restarts it from the first sample if it is playing.
-%   'Toggle'  Starts the waveform, or stops it if it is playing.
-%   'Gated'   Starts the waveform, and a falling edge on the trigger channel stops it, unless the other trigger
-%             channel is also linked and still high. With loop mode on and a loop duration of 0, the waveform
-%             plays for exactly as long as the TTL is high.
-% When no channel is playing, a trigger starts the waveform within microseconds. A channel triggered while
-% another plays starts on the next sample of the shared sample clock.
+% Triggers. triggerMode sets how each trigger channel acts on the output channels linked to it
+% (linkTriggerChannel1, linkTriggerChannel2). The first three are Pulse Pal's trigger modes:
+%   'Normal'  A rising edge starts the linked channels' waveforms. Channels that are playing ignore it.
+%   'Toggle'  A rising edge starts the linked channels, or stops those that are playing.
+%   'Gated'   A rising edge starts the linked channels, and a falling edge stops them, unless the other trigger
+%             channel is also gated, linked to them, and still high. With loop mode on and a loop duration of 0, a
+%             waveform plays for exactly as long as the TTL is high.
+%   'Master'  A rising edge starts the linked channels, and restarts those that are playing from their first
+%             sample.
+% trigger() starts idle channels, and channels that are playing ignore it, as in Pulse Pal. When no channel is
+% playing, a trigger starts the waveform within microseconds. A channel triggered while another plays starts on the
+% next sample of the shared sample clock.
 %
 % Wave Pal's USB protocol is documented in /Firmware/WavePal/PROTOCOL.md. The Python class,
-% /Python/PulsePal/WavePal.py, has the same features.
+% pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py), has the same features.
 
 %{
 ----------------------------------------------------------------------------
@@ -69,8 +71,8 @@ classdef WavePalDevice < handle
                               % if loopDuration is 0. false plays it once. A change applies to playback in progress.
         loopDuration = zeros(1,4) % 1x4, in seconds. In loop mode, how long the channel plays after each trigger. It stops
                                   % part way through the waveform if need be. 0 loops until the channel is stopped.
-        triggerMode = {'Normal', 'Normal', 'Normal', 'Normal'} % 1x4 cell array: 'Normal', 'Master', 'Toggle' or 'Gated'.
-                                                               % See "Triggers" above. Not case sensitive.
+        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or
+                                           % 'Master'. See "Triggers" above. Not case sensitive.
         linkTriggerChannel1 = true(1,4) % 1x4. true if a rising edge on trigger channel 1 triggers the output channel
         linkTriggerChannel2 = false(1,4) % 1x4. true if a rising edge on trigger channel 2 triggers the output channel
     end
@@ -102,7 +104,7 @@ classdef WavePalDevice < handle
         OpSetSamplingRate = 'S'
         OpSetOutputRange = 'R'
         OpLoadWaveform = 'L'
-        OpPlay = 'P'
+        OpTrigger = 'P'
         OpStop = 'X'
         OpSetFixedVoltage = '!'
         OpSetLoopMode = 'O'
@@ -116,15 +118,16 @@ classdef WavePalDevice < handle
         SynthPalHandshakeReply = 83 % 'S': the device runs Synth Pal firmware
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         OutputRangeLimits = [0 5; 0 10; -5 5; -10 10] % Volts, one row per range
-        TriggerModeNames = {'Normal', 'Master', 'Toggle', 'Gated'} % In order of their code on the device
+        TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Master'}
+        TriggerModeCodes = [0 1 2 4] % Their codes on the device: Pulse Pal's, and 4. 3 is Pulse Pal's param sync mode
         DACBitMax = 65535
     end
 
     methods
         function obj = WavePalDevice(portString)
-            % Opens the serial port, checks that the device runs Wave Pal firmware, reads its properties into
-            % info, shows "MATLAB Connected" on the device's screen, stops any playback and programs the default
-            % settings (see setDefaults).
+            % W = WavePalDevice(portName) opens the serial port, checks that the device runs Wave Pal firmware, reads
+            % its properties into info, shows "MATLAB Connected" on the device's screen, stops any playback and
+            % programs the default settings (see setDefaultParams).
 
             % Check for minimum MATLAB version. verLessThan works in releases older than the minimum, where
             % isMATLABReleaseOlderThan (introduced in R2020b) does not exist.
@@ -165,7 +168,7 @@ classdef WavePalDevice < handle
                 obj.writeCommand(obj.OpSetClientName, 'MATLAB'); % Shown on the device's screen as "MATLAB Connected"
                 obj.initialized = true;
                 obj.stop();
-                obj.setDefaults();
+                obj.setDefaultParams();
             catch err
                 % Op 81 puts the device's own name back on its screen. It means something else to other devices,
                 % so it is sent only once the device has identified itself as a Wave Pal.
@@ -181,10 +184,10 @@ classdef WavePalDevice < handle
             end
         end
 
-        function setDefaults(obj)
+        function setDefaultParams(obj)
             % Programs the default settings on the device: a 10 kHz sampling rate, the -10 V to 10 V output range,
-            % loop mode off with loop durations of 0, 'Normal' trigger mode, and all output channels linked to
-            % trigger channel 1 and not to trigger channel 2. They match the settings the device starts with.
+            % loop mode off with loop durations of 0, both trigger channels in 'Normal' mode, and all output channels
+            % linked to trigger channel 1 and not to trigger channel 2. They match the settings the device starts with.
             % Loaded waveforms are kept, and loaded again if the output range changes. Raises an error if a loaded
             % waveform does not fit the default range.
             obj.samplingRate = 10000;
@@ -222,11 +225,11 @@ classdef WavePalDevice < handle
             obj.waveforms{channel} = samples;
         end
 
-        function play(obj, channels)
-            % Triggers output channels in software, e.g. W.play(1) or W.play([2 4]).
-            % Each channel responds according to its triggerMode, as if a linked trigger channel had gone high.
-            % Channels start on the same sample. Channels without a waveform are ignored.
-            obj.writeCommand(obj.OpPlay, obj.channelBits(channels));
+        function trigger(obj, channels)
+            % Triggers output channels in software: one channel number, e.g. W.trigger(1), or several as an array,
+            % e.g. W.trigger([2 4]). Idle channels start their waveforms from the first sample, on the same sample.
+            % Channels that are playing ignore it, as Pulse Pal's do, and channels without a waveform are ignored.
+            obj.writeCommand(obj.OpTrigger, obj.channelBits(channels));
         end
 
         function stop(obj, channels)
@@ -350,31 +353,31 @@ classdef WavePalDevice < handle
 
         function set.triggerMode(obj, modes)
             if ischar(modes) || (isstring(modes) && isscalar(modes))
-                modes = repmat(cellstr(modes), 1, 4);
+                modes = repmat(cellstr(modes), 1, 2);
             elseif isstring(modes)
                 modes = cellstr(modes);
             end
-            if ~iscell(modes) || numel(modes) ~= 4
-                error(['triggerMode needs one mode for all channels, or a 1x4 cell array with one mode per output '...
-                       'channel, e.g. {''Normal'', ''Normal'', ''Toggle'', ''Normal''}.'])
+            if ~iscell(modes) || numel(modes) ~= 2
+                error(['triggerMode needs one mode for both trigger channels, or a 1x2 cell array with one mode per '...
+                       'trigger channel, e.g. {''Normal'', ''Toggle''}.'])
             end
-            modeCodes = zeros(1,4);
-            for i = 1:4
+            matches = zeros(1,2);
+            for i = 1:2
                 match = [];
                 if ischar(modes{i}) || (isstring(modes{i}) && isscalar(modes{i}))
                     match = find(strcmpi(modes{i}, obj.TriggerModeNames));
                 end
                 if isempty(match)
-                    error(['Unknown trigger mode for channel ' num2str(i) '. Valid modes are: '...
+                    error(['Unknown trigger mode for trigger channel ' num2str(i) '. Valid modes are: '...
                            strjoin(obj.TriggerModeNames, ', ') '.'])
                 end
-                modeCodes(i) = match - 1;
+                matches(i) = match;
             end
             if obj.initialized %#ok<MCSUP>
-                obj.writeCommand(obj.OpSetTriggerMode, uint8(modeCodes));
+                obj.writeCommand(obj.OpSetTriggerMode, uint8(obj.TriggerModeCodes(matches)));
                 obj.confirmWrite('setting triggerMode');
             end
-            obj.triggerMode = obj.TriggerModeNames(modeCodes+1);
+            obj.triggerMode = obj.TriggerModeNames(matches);
         end
 
         function set.linkTriggerChannel1(obj, links)
@@ -538,9 +541,9 @@ classdef WavePalDevice < handle
         end
 
         function bits = channelBits(~, channels)
-            % Converts a list of output channel numbers to one bit per channel (bit 0 = channel 1)
-            if ~isnumeric(channels) || isempty(channels) || ~all(ismember(channels(:), 1:4))
-                error('Output channels are numbered 1-4, e.g. 1 or [2 4].')
+            % Converts output channel numbers, one or several as an array, to one bit per channel (bit 0 = channel 1)
+            if ~isnumeric(channels) || ~isreal(channels) || isempty(channels) || ~all(ismember(channels(:), 1:4))
+                error('Output channels are numbered 1-4: give one, or several as an array, e.g. 1 or [2 4].')
             end
             bits = uint8(sum(bitshift(1, unique(channels(:))' - 1)));
         end

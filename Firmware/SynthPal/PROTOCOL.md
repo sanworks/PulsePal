@@ -8,7 +8,7 @@ Pal firmware v1.
 
 | Client | Location |
 |---|---|
-| Python class | `/Python/PulsePal/SynthPal.py` |
+| Python class | `pulsepal.SynthPalDevice`, in `/Python/PulsePal/pulsepal/synth_pal.py` |
 | MATLAB class | `/MATLAB/@SynthPalDevice/SynthPalDevice.m` |
 
 On the device, `processUSBCommands()` in `/Firmware/SynthPal/USBOps.ino` executes commands, and
@@ -44,11 +44,11 @@ The Python and MATLAB classes connect in this order:
    so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal.
 2. Op 78 ('N'): hardware properties and limits.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
-4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 86, 65, 87,
+4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 65, 87, 86,
    68, 66, 69, 84 and 73. In this order each is valid whatever the device holds (see
-   [Levels](#levels)): a mean voltage of 0 V (op 77) goes with any amplitude, a resting voltage
-   (op 86) with any waveform, the default amplitude of 5 V (op 65) then goes with any waveform,
-   and a sine wave (op 87) then goes with both. These ops apply at once also on a device left in
+   [Levels](#levels)): a mean voltage of 0 V (op 77) goes with any amplitude, the default
+   amplitude of 5 V (op 65) then goes with any waveform, a sine wave (op 87) then goes with both,
+   and a resting voltage (op 86) goes with any waveform. These ops apply at once also on a device left in
    [param sync mode](#param-sync-trigger-mode-3), and op 84 takes both trigger channels out of
    it, which discards a stored set.
 
@@ -77,7 +77,7 @@ so that it is not taken for the next command.
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
 | 85 | `U` | Set all settings: applied at once, or stored for a param sync edge (see [Param sync](#param-sync-trigger-mode-3)) | 114 bytes: frequency in centiHz (uint32), then for channels 1-4: waveforms (4 bytes), amplitudes, mean voltages and resting voltages (4 int32 each), play durations, on ramp durations and off ramp durations (4 uint32 each); then trigger links (8 bytes, as op 73) and trigger modes (2 bytes, as op 84). Each value as in the op that sets it alone | 1 / 0 |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
-| 80 | `P` | Play (soft trigger) | Channel bits (uint8) | none |
+| 80 | `P` | Soft trigger: starts idle channels | Channel bits (uint8) | none |
 | 88 | `X` | Stop | Channel bits (uint8) | none |
 | 71 | `G` | Get status | none | Playing channel bits (uint8: a channel in its off ramp counts as playing, until it reaches its resting voltage), samples per cycle (uint32), the output range of channels 1-4 (4 uint8, see [Output ranges](#output-ranges)), longest sample clock interrupt since the previous op 71, in nanoseconds (uint32), late output updates since the previous op 71 (uint32, see [Timing](#timing)) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
@@ -176,6 +176,14 @@ to change a waveform, send an amplitude that suits both the old waveform and the
 waveform. For example, from a fixed voltage of -5 V to a sine wave of 4 V peak to peak: op 65
 with 4 V, then op 87.
 
+The Python and MATLAB classes keep a periodic waveform's peak to peak voltage and a fixed voltage
+as two settings (`peak_to_peak` and `fixed_voltage`, `peakToPeak` and `fixedVoltage`), and send
+whichever the channel's waveform uses as its amplitude. They work out an order of ops 65, 87 and
+77 that the device accepts at each step: each channel first takes an amplitude that suits its
+current and its new waveform and mean voltage (its current amplitude, else its new one, else 0 V,
+which suits any), then the waveforms, the mean voltages and the new amplitudes follow. If the
+device refuses a step, the classes start again from an amplitude of 0 V on every channel.
+
 At full amplitude, each sample is the mean voltage's DAC code plus an offset rounded half away
 from zero, so samples the same distance above and below the mean voltage are the same number of
 codes from it: when the mean voltage falls exactly on a DAC code (as 0 V does in the bipolar
@@ -265,7 +273,8 @@ a later op 85 replaces a stored set. Outside param sync mode, op 85 applies the 
 
 **Only op 85 is delayed.** The ops that set one setting (70, 87, 65, 77, 86, 68, 66, 69, 84, 73)
 apply at once, in param sync mode as in any other. The Python and MATLAB classes send op 85 from
-`sync_to_device()` / `syncToDevice()`, with their `auto_sync` / `autoSync` switch off.
+`sync_to_device()` / `syncToDevice()`, with their `auto_sync` / `autoSync` switch off, and the
+Python class at the end of a `batch()` block.
 
 **At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set. With
 nothing stored, it does nothing.

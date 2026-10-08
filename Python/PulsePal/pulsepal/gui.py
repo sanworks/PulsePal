@@ -30,6 +30,8 @@ import tkinter as tk
 import weakref
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+from .pulse_pal import CUSTOM_TRAIN_TARGETS, TRIGGER_MODES
+
 # Widget colors for each theme. The light palette matches the platform's
 # native widget colors, so light mode can keep the native ttk theme.
 _PALETTES = {
@@ -320,10 +322,16 @@ class PulsePalGUI:
     # so their indicators sit left of center by this much.
     _INDICATOR_OFFSET = 2
 
+    # The GUI keeps each choice as its index in these lists, which are in the
+    # order of the device's codes: TRIGGER_MODES and CUSTOM_TRAIN_TARGETS in
+    # pulse_pal.py name the same choices for the device.
     _PULSE_TYPES = ("Monophasic", "Biphasic")
     _CUSTOM_TRAIN_TARGETS = ("Pulses", "Bursts")
     _TRIGGER_MODES = ("Normal", "Toggle", "Pulse Gated", "Param Sync")
     _PARAM_SYNC_MODE = 3  # Index of "Param Sync" above. Pulse Pal 3 only
+    # Parameters that are on or off: 0 or 1 here, False or True on the device
+    _BOOLEAN_PARAMS = ("is_biphasic", "link_trigger_channel1",
+                       "link_trigger_channel2", "custom_train_loop")
 
     _DEFAULT_OUTPUT_PARAMS = {
         "is_biphasic": 0,
@@ -1707,14 +1715,21 @@ class PulsePalGUI:
                 return
 
         try:
-            for name, values in self._params.items():
-                getattr(device, name)[1:5] = list(values)
             # Captured before the assignment below overwrites the client's
             # record of the modes the device was last told
-            device_modes = [int(value) for value in device.trigger_mode[1:3]]
-            device.trigger_mode[1:3] = list(self._trigger_mode)
-            buffered = self._program_trigger_modes(device_modes, leaving=True)
-            device.sync_to_device()
+            device_modes = [TRIGGER_MODES.index(mode)
+                            for mode in device.trigger_mode[1:3]]
+            # The batch sends the whole program in one command when it ends
+            with device.batch():
+                for name, values in self._params.items():
+                    getattr(device, name)[1:5] = [
+                        self._device_value(name, value) for value in values
+                    ]
+                device.trigger_mode[1:3] = [
+                    TRIGGER_MODES[int(mode)] for mode in self._trigger_mode
+                ]
+                buffered = self._program_trigger_modes(device_modes,
+                                                       leaving=True)
             self._program_trigger_modes(device_modes, leaving=False)
             for train_id, times, voltages in custom_trains:
                 device.send_custom_pulse_train(train_id, times, voltages)
@@ -1727,6 +1742,16 @@ class PulsePalGUI:
         else:
             self._set_status("Program Loaded to Device")
 
+    def _device_value(self, name, value):
+        """Convert a parameter value from the GUI's form to the device's."""
+        if name in self._BOOLEAN_PARAMS:
+            return bool(int(value))
+        if name == "custom_train_target":
+            return CUSTOM_TRAIN_TARGETS[int(value)]
+        if name == "custom_train_id":
+            return int(value)
+        return float(value)
+
     def _program_trigger_modes(self, device_modes, leaving):
         """Program the trigger modes that sync_to_device cannot carry.
 
@@ -1738,9 +1763,10 @@ class PulsePalGUI:
         that waits for a TTL. Every other mode change rides along in the
         sync, as it always has.
 
-        device_modes is what the device was last told, and is updated in
-        place. Returns whether a channel is in param sync mode, which for
-        the call before the sync is whether the sync was buffered.
+        device_modes is what the device was last told, as indices into
+        TRIGGER_MODES, and is updated in place. Returns whether a channel
+        is in param sync mode, which for the call before the sync is
+        whether the sync was buffered.
         """
         device = self._device
         for channel in (1, 2):
@@ -1751,7 +1777,8 @@ class PulsePalGUI:
             else:
                 send = new_mode == self._PARAM_SYNC_MODE and not was_param_sync
             if send:
-                device.set_trigger_param("trigger_mode", channel, new_mode)
+                device.set_trigger_param("trigger_mode", channel,
+                                         TRIGGER_MODES[new_mode])
                 device_modes[channel - 1] = new_mode
         return self._PARAM_SYNC_MODE in device_modes
 

@@ -187,7 +187,7 @@ The MATLAB class has its own test (about 15 s, verified with R2025a):
 matlab -batch "addpath('MATLAB', 'MATLAB/tests'); testSynthPalDevice('COM3')"
 ```
 
-A change to the protocol needs both classes, `/Python/PulsePal/SynthPal.py` and
+A change to the protocol needs both classes, `/Python/PulsePal/pulsepal/synth_pal.py` and
 `/MATLAB/@SynthPalDevice/SynthPalDevice.m`, updated to match.
 
 Only a scope, a TTL source and a person can check the rest. After a change to playback,

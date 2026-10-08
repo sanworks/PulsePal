@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from PulsePal import PulsePalDevice  # noqa: E402
+from pulsepal import PulsePalDevice  # noqa: E402
 
 
 def timed(function, repeats):

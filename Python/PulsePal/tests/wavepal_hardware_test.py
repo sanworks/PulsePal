@@ -1,13 +1,17 @@
 """Test a connected Wave Pal: data transfer, playback, and timing budget.
 
-Run it after changing the Wave Pal firmware or WavePal.py:
+Run it after changing the Wave Pal firmware or pulsepal/wave_pal.py:
 
     python tests/wavepal_hardware_test.py COM3
     python tests/wavepal_hardware_test.py /dev/ttyACM0 --quick
+    python tests/wavepal_hardware_test.py COM3 --driver COM4
 
 The device must be a Pulse Pal 3 running Wave Pal firmware. Nothing needs to be
 connected to it, but the outputs play random waveforms of up to +/-10 V, so
-disconnect anything that should not receive them.
+disconnect anything that should not receive them. With --driver, a Pulse Pal
+running Pulse Pal firmware, whose output channel 1 is wired to the Wave Pal's
+trigger channel 1, sends the TTL edges that the trigger mode tests need; without
+it, those tests are skipped.
 
 Every sample the device plays is checked: its firmware sums the DAC codes each
 channel plays (op 90), and each test compares the sums with the waveforms it
@@ -25,9 +29,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import WavePal  # noqa: E402
-from WavePal import WavePalDevice, WavePalError  # noqa: E402
-from PulsePal import PulsePalDevice, PulsePalError  # noqa: E402
+from pulsepal import wave_pal as WavePal  # noqa: E402
+from pulsepal import PulsePalDevice, PulsePalError, WavePalDevice  # noqa: E402
 
 RNG = np.random.default_rng(1)
 
@@ -88,7 +91,7 @@ def test_waveforms_play_exactly_once_around_the_buffer_size(W):
     buffer = W.info.buffer_samples
     for n in (1, 2, buffer - 1, buffer, buffer + 1, 2 * buffer, 2 * buffer + 1, 3 * buffer + 7):
         codes = load(W, 1, random_waveform(n))
-        W.play(1)
+        W.trigger(1)
         wait_until_stopped(W, [1], timeout=5)
         check_played(W, 1, codes, n)
 
@@ -105,7 +108,7 @@ def test_loop_durations_wrap_exactly_around_the_buffer_size(W):
             codes = load(W, 1, random_waveform(n))
             n_played = int(3.3 * n) + 1
             W.loop_duration[1] = n_played / W.actual_sampling_rate
-            W.play(1)
+            W.trigger(1)
             wait_until_stopped(W, [1], timeout=10)
             check_played(W, 1, codes, n_played)
     finally:
@@ -119,7 +122,7 @@ def test_loop_duration_is_exact_in_samples(W):
     W.loop_mode[2] = True
     W.loop_duration[2] = 0.12345
     try:
-        W.play(2)
+        W.trigger(2)
         wait_until_stopped(W, [2], timeout=2)
         check_played(W, 2, codes, 12345)
     finally:
@@ -135,7 +138,7 @@ def test_full_length_waveform_transfer_and_playback(W, report):
     seconds = time.perf_counter() - start
     report(f"load 1M samples: {seconds:.2f} s, {2 * volts.size / seconds / 1e6:.2f} MB/s")
     underruns_before = W.status().underruns[1]
-    W.play(1)
+    W.trigger(1)
     longest = wait_until_stopped(W, [1], timeout=15)
     check_played(W, 1, codes, volts.size)
     assert W.status().underruns[1] == underruns_before, "underruns during playback"
@@ -155,7 +158,7 @@ def test_four_channels_at_100khz(W, report, seconds=25):
     try:
         underruns_before = W.status().underruns
         W.status()  # Reset the longest interrupt
-        W.play([1, 2, 3, 4])
+        W.trigger([1, 2, 3, 4])
         longest = wait_until_stopped(W, [1, 2, 3, 4], timeout=seconds + 5)
         for channel in (1, 2, 3, 4):
             check_played(W, channel, codes[channel], n_played)
@@ -178,7 +181,7 @@ def test_loading_while_other_channels_play(W, report):
     W.loop_mode[1:4] = [True] * 3
     try:
         underruns_before = W.status().underruns
-        W.play([1, 2, 3])
+        W.trigger([1, 2, 3])
         time.sleep(0.5)
         start = time.perf_counter()
         load(W, 4, random_waveform(W.info.max_samples))
@@ -197,48 +200,104 @@ def test_loading_while_other_channels_play(W, report):
         W.loop_mode = False
 
 
-def test_trigger_modes(W):
+class Skipped(Exception):
+    """Raised by a test that needs something this run does not have."""
+
+
+def driver_pulse(D, width=0.001):
+    """A TTL pulse on the driver's output channel 1, 0 V to 4 V: the Wave Pal's trigger inputs take
+    3 to 5 V. Returns once it has ended."""
+    D.phase1_duration[1] = width
+    D.pulse_train_duration[1] = width
+    D.trigger(1)
+    time.sleep(width + 0.02)
+
+
+def open_driver(port):
+    """The driving Pulse Pal, set up for single positive pulses on output channel 1."""
+    D = PulsePalDevice(port)
+    with D.batch():
+        D.phase1_voltage = 4
+        D.inter_pulse_interval = 0.001
+        D.link_trigger_channel1 = False
+    return D
+
+
+def test_soft_triggers_start_idle_channels_only(W):
+    """As in Pulse Pal, whatever the trigger mode: a soft trigger is ignored while the channel plays."""
     W.sampling_rate = 10000
     load(W, 1, random_waveform(100000))  # 10 s
-
-    W.trigger_mode[1] = "Normal"          # A second trigger is ignored
-    W.play(1)
-    time.sleep(0.5)
-    W.play(1)
-    time.sleep(0.2)
-    played, _ = W._playback_checksums()
-    assert played[1] > 6000, f"normal mode restarted the waveform ({played[1]} samples)"
-
-    W.trigger_mode[1] = "Master"          # A second trigger restarts it
-    W.play(1)
-    time.sleep(0.2)
-    played, _ = W._playback_checksums()
-    assert played[1] < 4000, f"master mode did not restart the waveform ({played[1]} samples)"
-
-    W.trigger_mode[1] = "Toggle"          # A second trigger stops it
-    W.play(1)
-    time.sleep(0.05)
-    assert 1 not in W.status().playing, "toggle mode did not stop the waveform"
-    W.play(1)
-    time.sleep(0.05)
-    assert 1 in W.status().playing, "toggle mode did not start the waveform"
-    W.stop(1)
-    assert 1 not in W.status().playing
-    W.trigger_mode[1] = "Normal"
+    try:
+        for mode in W.info.trigger_modes:
+            W.trigger_mode[1] = mode
+            W.trigger(1)
+            time.sleep(0.5)
+            W.trigger(1)
+            time.sleep(0.2)
+            played, _ = W._playback_checksums()
+            assert played[1] > 6000, f"a soft trigger in {mode} mode restarted the waveform ({played[1]} samples)"
+            assert 1 in W.status().playing, f"a soft trigger in {mode} mode stopped the waveform"
+            W.stop(1)
+            assert 1 not in W.status().playing
+    finally:
+        W.trigger_mode[1] = "Normal"
 
 
-def test_restarts_part_way_through_a_streamed_waveform(W):
+def test_trigger_modes(W, D):
+    """Each mode of trigger channel 1, with TTL pulses from the driver."""
+    if D is None:
+        raise Skipped("needs --driver")
+    W.sampling_rate = 10000
+    load(W, 1, random_waveform(100000))  # 10 s
+    W.link_trigger_channel1[1] = True
+    try:
+        W.trigger_mode[1] = "Normal"          # A second edge is ignored
+        driver_pulse(D)
+        time.sleep(0.5)
+        driver_pulse(D)
+        played, _ = W._playback_checksums()
+        assert played[1] > 5000, f"normal mode restarted the waveform ({played[1]} samples)"
+        W.stop(1)
+
+        W.trigger_mode[1] = "Master"          # A second edge restarts it
+        driver_pulse(D)
+        time.sleep(0.5)
+        driver_pulse(D)
+        played, _ = W._playback_checksums()
+        assert played[1] < 2000, f"master mode did not restart the waveform ({played[1]} samples)"
+        W.stop(1)
+
+        W.trigger_mode[1] = "Toggle"          # A second edge stops it
+        driver_pulse(D)
+        assert 1 in W.status().playing, "toggle mode did not start the waveform"
+        driver_pulse(D)
+        assert 1 not in W.status().playing, "toggle mode did not stop the waveform"
+
+        W.trigger_mode[1] = "Gated"           # It plays while the TTL is high
+        driver_pulse(D, width=0.3)
+        played, _ = W._playback_checksums()
+        assert 1 not in W.status().playing, "gated mode did not stop the waveform at the falling edge"
+        assert 2900 <= played[1] <= 3100, f"gated mode played {played[1]} samples for a 0.3 s pulse"
+    finally:
+        W.trigger_mode[1] = "Normal"
+        W.stop(1)
+
+
+def test_restarts_part_way_through_a_streamed_waveform(W, D):
     """Master mode restarts at points where the playback buffers hold blocks from
     the middle of the waveform. After each restart the whole waveform must play
     again, exactly."""
+    if D is None:
+        raise Skipped("needs --driver")
     W.sampling_rate = 100000
     codes = load(W, 1, random_waveform(7 * W.info.buffer_samples + 100))  # 1.15 s
     W.trigger_mode[1] = "Master"
+    W.link_trigger_channel1[1] = True
     try:
         for restart_after in (0.05, 0.2, 0.35, 0.6, 0.9):
-            W.play(1)
+            W.trigger(1)
             time.sleep(restart_after)
-            W.play(1)
+            driver_pulse(D)
             wait_until_stopped(W, [1], timeout=3)
             check_played(W, 1, codes, codes.size)
     finally:
@@ -249,7 +308,7 @@ def test_sampling_rate_change_during_playback(W):
     """The rate can change while a waveform plays: no sample is lost or repeated."""
     W.sampling_rate = 20000
     codes = load(W, 3, random_waveform(60000))  # 3 s at 20 kHz
-    W.play(3)
+    W.trigger(3)
     time.sleep(0.5)
     W.sampling_rate = 100000
     wait_until_stopped(W, [3], timeout=3)
@@ -261,9 +320,9 @@ def test_channel_joining_a_running_clock_plays_exactly(W):
     W.sampling_rate = 50000
     codes1 = load(W, 1, random_waveform(200000))   # 4 s
     codes2 = load(W, 2, random_waveform(30000))    # 0.6 s
-    W.play(1)
+    W.trigger(1)
     time.sleep(0.3)
-    W.play(2)
+    W.trigger(2)
     wait_until_stopped(W, [1, 2], timeout=6)
     check_played(W, 1, codes1, codes1.size)
     check_played(W, 2, codes2, codes2.size)
@@ -285,7 +344,7 @@ def test_output_range_change_reloads_waveforms(W):
         assert W.status().samples_loaded == lengths
         for channel in (1, 2, 3, 4):
             codes = W._volts_to_codes(W.waveforms[channel])
-            W.play(channel)
+            W.trigger(channel)
             wait_until_stopped(W, [channel], timeout=3)
             check_played(W, channel, codes, codes.size)
     finally:
@@ -302,7 +361,7 @@ def test_every_output_range_plays(W):
             W.output_range = range_name  # The class loads the waveforms again, re-encoded
             low, high = WavePal.OUTPUT_RANGES[range_name]
             codes = load(W, 1, random_waveform(20000, low, high))
-            W.play(1)
+            W.trigger(1)
             wait_until_stopped(W, [1], timeout=3)
             check_played(W, 1, codes, codes.size)
             load(W, 1, [0.0])
@@ -326,7 +385,10 @@ def main():
     parser.add_argument("port", help="Serial port of the Wave Pal, e.g. COM3 or /dev/ttyACM0")
     parser.add_argument("--quick", action="store_true",
                         help="Skip the tests that stream 1M sample waveforms")
+    parser.add_argument("--driver", metavar="PORT",
+                        help="A Pulse Pal whose output 1 drives trigger channel 1, for the trigger mode tests")
     arguments = parser.parse_args()
+    D = open_driver(arguments.driver) if arguments.driver else None
 
     notes = []
     tests = [
@@ -334,8 +396,9 @@ def main():
         test_waveforms_play_exactly_once_around_the_buffer_size,
         test_loop_durations_wrap_exactly_around_the_buffer_size,
         test_loop_duration_is_exact_in_samples,
-        test_trigger_modes,
-        test_restarts_part_way_through_a_streamed_waveform,
+        test_soft_triggers_start_idle_channels_only,
+        lambda W: test_trigger_modes(W, D),
+        lambda W: test_restarts_part_way_through_a_streamed_waveform(W, D),
         test_sampling_rate_change_during_playback,
         test_channel_joining_a_running_clock_plays_exactly,
         test_fixed_voltage_and_stop,
@@ -350,7 +413,7 @@ def main():
         ]
     tests.append(test_pulse_pal_class_is_refused)  # Last: it closes the connection
 
-    failures = 0
+    failures = skipped = 0
     with WavePalDevice(arguments.port) as W:
         for test in tests:
             name = getattr(test, "__name__", "test")
@@ -360,7 +423,10 @@ def main():
             try:
                 test(W)
                 result = "ok"
-            except (AssertionError, WavePalError) as error:
+            except Skipped as reason:
+                skipped += 1
+                result = f"skipped ({reason})"
+            except (AssertionError, PulsePalError) as error:
                 failures += 1
                 result = f"FAILED: {error}"
                 if not W._closed:
@@ -368,7 +434,10 @@ def main():
             print(f"{name:<60} {time.perf_counter() - start:6.1f} s  {result}")
             while notes:
                 print("    " + notes.pop(0))
-    print(f"\n{len(tests) - failures}/{len(tests)} tests passed")
+    if D is not None:
+        D.close()
+    print(f"\n{len(tests) - failures - skipped}/{len(tests) - skipped} tests passed"
+          + (f", {skipped} skipped" if skipped else ""))
     return 1 if failures else 0
 
 

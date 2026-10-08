@@ -43,7 +43,7 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
 1. **Only interrupts at `PLAYBACK_IRQ_PRIORITY`, or `loop()` with interrupts disabled, may use
    the DAC.** `handler()` and the trigger pin interrupts share that priority, so neither can
    interrupt the other's SPI transfer. `loop()` calls `startChannels()`, `stopChannels()`,
-   `holdChannels()`, `triggerChannels()` and the DAC functions only between `noInterrupts()`
+   `holdChannels()`, `softTrigger()` and the DAC functions only between `noInterrupts()`
    and `interrupts()`. An SPI transfer interrupted by another one leaves the first waiting
    forever; this froze Pulse Pal devices in the field. The one exception is `setup()`, before
    the interrupts are attached.
@@ -88,7 +88,7 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
 | Sample clock | `handler()` | Every sample period while a channel plays. `startChannels()` starts it, and it stops itself when no channel is playing |
 | Trigger channels | `trigger1ISR()`, `trigger2ISR()` | Every edge on the trigger inputs |
 
-They call `startChannels()`, `stopChannels()`, `holdChannels()`, `triggerChannels()`,
+They call `startChannels()`, `stopChannels()`, `holdChannels()`, `processTriggerEdge()`,
 `releaseGatedChannels()`, `fetchNextSample()` and the DAC functions. Shared with `loop()`:
 the playback state (`playing`, `stopAfterWrite`, `playChunk`, ...), `bufferChunk`,
 `nSamples`, the settings (`loopMode`, `loopDuration`, `triggerMode`, `TriggerAddress`) and
@@ -110,12 +110,16 @@ With a Wave Pal on a USB port (about 70 s; `--quick` skips the 1M sample tests):
 
 ```bash
 cd /Python/PulsePal && uv run python tests/wavepal_hardware_test.py COM3
+
+# With a Pulse Pal (Pulse Pal firmware) whose output 1 drives trigger channel 1, for the trigger mode tests
+cd /Python/PulsePal && uv run python tests/wavepal_hardware_test.py COM3 --driver COM4
 ```
 
 It checks every sample played against the waveforms it loaded, using op 90, including
 waveforms at the buffer size and one sample either side, loop wraps, restarts part way through
-a streamed waveform, rate changes during playback, four channels streaming at 100 kHz, and a
-waveform loaded while three channels stream. It also reports transfer speed, underruns and the
+a streamed waveform (master mode, with `--driver`), rate changes during playback, four channels
+streaming at 100 kHz, and a waveform loaded while three channels stream. With `--driver`, it also
+checks each trigger mode with TTL pulses. It also reports transfer speed, underruns and the
 longest sample clock interrupt.
 
 The MATLAB class has its own test, in the same way (about 20 s, verified with R2020b and
@@ -125,7 +129,7 @@ R2025b):
 matlab -batch "addpath('MATLAB', 'MATLAB/tests'); testWavePalDevice('COM3')"
 ```
 
-A change to the protocol needs both classes, `/Python/PulsePal/WavePal.py` and
+A change to the protocol needs both classes, `/Python/PulsePal/pulsepal/wave_pal.py` and
 `/MATLAB/@WavePalDevice/WavePalDevice.m`, updated to match.
 
 Only a scope and a person can check the rest. After a change to playback, triggers or the
@@ -135,9 +139,10 @@ menu, check:
   as long as the others.
 - Trigger latency: from a TTL edge to the first sample, with all channels idle (a few µs), and
   with another channel playing (up to one sample period).
-- TTL triggers in normal, master, toggle and gated modes, from both trigger channels. Gated
-  mode with loop mode on plays for as long as the TTL is high. The trigger LEDs follow the
-  TTL, and the output LEDs light while a channel plays.
+- TTL triggers in normal, toggle, gated and master modes, from both trigger channels, including
+  gated mode with both trigger channels linked to one output. Gated mode with loop mode on plays
+  for as long as the TTL is high. The trigger LEDs follow the TTL, and the output LEDs light while
+  a channel plays.
 - The joystick menu: scroll through the channels, device info, reboot and exit; play and stop
   a channel from its item, and see the item change back when the waveform ends. The splash
   screen shows the Wave Pal logo.

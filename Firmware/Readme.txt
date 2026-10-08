@@ -22,15 +22,16 @@ the code map, build instructions and the rules to follow when changing the firmw
 Wave Pal: alternative firmware for Pulse Pal 3 (Teensy 4.1) that makes it a four channel waveform
 player. Each output channel plays a waveform of up to 1 million samples, stored on the microSD card,
 when it is triggered by TTL, by software or from the joystick. It is controlled with the Python class
-in /Python/PulsePal/WavePal.py. PROTOCOL.md and AGENTS.md in that folder describe its USB protocol and
-code.
+pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py) or the MATLAB class in /MATLAB/@WavePalDevice.
+PROTOCOL.md and AGENTS.md in that folder describe its USB protocol and code.
 
 /SynthPal
 Synth Pal: alternative firmware for Pulse Pal 3 (Teensy 4.1) that makes it a four channel waveform
 synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a fixed
-voltage, with its own amplitude, resting voltage and play duration, when it is triggered by TTL, by
-software or from the joystick. One frequency, 1 Hz to 20 kHz, applies to all four. It is controlled
-with the Python class in /Python/PulsePal/SynthPal.py or the MATLAB class in /MATLAB/@SynthPalDevice.
+voltage, with its own levels, play duration and ramps, when it is triggered by TTL, by software or
+from the joystick. One frequency, 1 Hz to 20 kHz, applies to all four. It is controlled with the
+Python class pulsepal.SynthPalDevice (/Python/PulsePal/pulsepal/synth_pal.py) or the MATLAB class in
+/MATLAB/@SynthPalDevice.
 PROTOCOL.md and AGENTS.md in that folder describe its USB protocol and code.
 
 /Old

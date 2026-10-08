@@ -31,7 +31,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   startChannels()
 //   holdChannels()
 //   stopChannels()
-//   triggerChannels()
+//   softTrigger()
 //   releaseGatedChannels()
 //   trigger1ISR(), trigger2ISR()
 //   handleTriggerLine()
@@ -53,8 +53,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // after its trigger. The channels share the clock, so this cannot be avoided without disturbing the others.
 //
 // Triggers. TTL edges on the trigger channels raise an interrupt (trigger1ISR() and trigger2ISR()), so their timing
-// does not depend on a polling rate. What a rising edge does depends on the trigger mode of each linked output channel
-// (triggerChannels()). Soft triggers from USB (op 80) take the same path.
+// does not depend on a polling rate. What an edge does to the output channels linked to it depends on the trigger
+// channel's mode, as in Pulse Pal firmware (processTriggerEdge()). Soft triggers from USB (op 80) start idle channels,
+// as in Pulse Pal firmware, whatever the modes (softTrigger()).
 //
 // Buffers. A waveform is played in blocks ("chunks") of BUFFER_SAMPLES samples. Chunk 0 is the pre-buffer, filled when
 // the waveform is loaded and kept in RAM, so a triggered waveform starts at once. Later chunks are read from the
@@ -231,46 +232,34 @@ void stopChannels(byte channelBits) {
   holdChannels(channelBits, DACBits_ZeroVolts);
 }
 
-// A trigger on the selected output channels (one bit per channel): a rising edge on a trigger channel linked to them,
-// or a soft trigger. What it does depends on each channel's trigger mode. Channels without a waveform are skipped.
-void triggerChannels(byte channelBits) {
+// A channel is playing unless its waveform has just ended (stopAfterWrite), which counts as stopped
+static inline boolean isPlaying(byte channel) {
+  return playing[channel] && !stopAfterWrite[channel];
+}
+
+// A soft trigger (op 80) on the selected output channels (one bit per channel): starts those that are idle, as in Pulse
+// Pal firmware. Channels that are playing ignore it, whatever the trigger modes, and channels without a waveform are
+// skipped. Interrupt context, or loop() with interrupts disabled.
+void softTrigger(byte channelBits) {
   byte toStart = 0;
-  byte toStop = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
-    if (!bitRead(channelBits, i) || (nSamples[i] == 0)) {
-      continue;
-    }
-    boolean isPlaying = playing[i] && !stopAfterWrite[i]; // A channel whose waveform has just ended counts as stopped
-    switch (triggerMode[i]) {
-      case TRIGGER_MODE_MASTER: {
-        bitSet(toStart, i); // Restarts it if it is playing
-      } break;
-      case TRIGGER_MODE_TOGGLE: {
-        if (isPlaying) {
-          bitSet(toStop, i);
-        } else {
-          bitSet(toStart, i);
-        }
-      } break;
-      default: { // TRIGGER_MODE_NORMAL and TRIGGER_MODE_GATED
-        if (!isPlaying) {
-          bitSet(toStart, i);
-        }
-      } break;
+    if (bitRead(channelBits, i) && (nSamples[i] > 0) && !isPlaying(i)) {
+      bitSet(toStart, i);
     }
   }
-  stopChannels(toStop);
   startChannels(toStart);
 }
 
-// A falling edge on a trigger channel: stops the output channels it gates, unless the other trigger channel also gates
-// them and is still high
+// A falling edge on a trigger channel in gated mode: stops the output channels linked to it, unless the other trigger
+// channel is also linked to them, in gated mode and still high
 void releaseGatedChannels(byte triggerChannel) {
   byte otherChannel = 1 - triggerChannel;
   byte toStop = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
-    if (TriggerAddress[triggerChannel][i] && (triggerMode[i] == TRIGGER_MODE_GATED) && playing[i] && !stopAfterWrite[i]) {
-      if (!(TriggerAddress[otherChannel][i] && triggerLineActive[otherChannel])) {
+    if (TriggerAddress[triggerChannel][i] && isPlaying(i)) {
+      boolean heldByOther = TriggerAddress[otherChannel][i] && (triggerMode[otherChannel] == TRIGGER_MODE_GATED) &&
+                            triggerLineActive[otherChannel];
+      if (!heldByOther) {
         bitSet(toStop, i);
       }
     }
@@ -304,18 +293,32 @@ void handleTriggerLine(byte triggerChannel, boolean isActive) {
   processTriggerEdge(triggerChannel, isActive);
 }
 
+// An edge on a trigger channel (0 or 1). What it does to each linked output channel depends on the trigger channel's
+// mode, as in Pulse Pal firmware: a rising edge starts an idle channel in every mode, stops a playing one in toggle
+// mode, and restarts a playing one from its first sample in master mode. A falling edge stops a playing channel in
+// gated mode (releaseGatedChannels()). Channels without a waveform are skipped.
 void processTriggerEdge(byte triggerChannel, boolean isRisingEdge) {
-  if (isRisingEdge) {
-    byte linkedChannels = 0;
-    for (byte i = 0; i < N_CHANNELS; i++) {
-      if (TriggerAddress[triggerChannel][i]) {
-        bitSet(linkedChannels, i);
-      }
+  byte mode = triggerMode[triggerChannel];
+  if (!isRisingEdge) {
+    if (mode == TRIGGER_MODE_GATED) {
+      releaseGatedChannels(triggerChannel);
     }
-    triggerChannels(linkedChannels);
-  } else {
-    releaseGatedChannels(triggerChannel);
+    return;
   }
+  byte toStart = 0;
+  byte toStop = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (!TriggerAddress[triggerChannel][i] || (nSamples[i] == 0)) {
+      continue;
+    }
+    if (!isPlaying(i) || (mode == TRIGGER_MODE_MASTER)) {
+      bitSet(toStart, i); // startChannels() restarts a channel that is playing
+    } else if (mode == TRIGGER_MODE_TOGGLE) {
+      bitSet(toStop, i);
+    }
+  }
+  stopChannels(toStop);
+  startChannels(toStart);
 }
 
 // Sets the sampling rate of all channels, in Hz. It takes effect from the next sample, also during playback.

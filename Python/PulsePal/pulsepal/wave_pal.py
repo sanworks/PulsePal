@@ -12,13 +12,13 @@ the device's serial port, load waveforms, and trigger, e.g.
 
 ```python
 import numpy as np
-from WavePal import WavePalDevice
+from pulsepal import WavePalDevice
 
 with WavePalDevice("COM3") as W:
     W.sampling_rate = 50000                         # Hz, all channels
     t = np.arange(50000) / 50000                    # 1 second
     W.load_waveform(1, 5 * np.sin(2 * np.pi * 10 * t))
-    W.play(1)
+    W.trigger(1)
 ```
 
 The device needs Wave Pal firmware, which is in
@@ -31,15 +31,18 @@ Pulse Pal repository. Its USB protocol is documented in
 Settings that apply to one output channel, such as
 `WavePalDevice.loop_mode`, are lists indexed by channel number: index 0
 is unused and holds `None`, and indices 1 to 4 hold the settings of
-output channels 1-4, as in `PulsePal.PulsePalDevice`. Setting an element
+output channels 1-4, as in `pulsepal.PulsePalDevice`. Setting an element
 or a slice programs the device at once. Assigning a whole list sets all
 four channels, and a single value sets them all to that value:
 
 ```python
 W.loop_mode[2] = True          # channel 2 only
 W.loop_duration[1:5] = [1, 2, 3, 4]
-W.trigger_mode = "Toggle"      # all four channels
+W.loop_mode = False            # all four channels
 ```
+
+`WavePalDevice.trigger_mode` is indexed the same way by trigger channel
+number, 1 or 2, as in Pulse Pal.
 
 ## Units
 
@@ -67,36 +70,31 @@ from dataclasses import dataclass
 import math
 import numbers
 import struct
-import weakref
 
 import numpy as np
 import serial
-import serial.tools.list_ports
 
-__all__ = ["WavePalDevice", "DeviceInfo", "DeviceStatus", "WavePalError"]
+from . import _common
+from ._common import ChannelSettings, PulsePalError, to_bool, to_name
+
+__all__ = ["WavePalDevice", "DeviceInfo", "DeviceStatus", "OUTPUT_RANGES", "TRIGGER_MODES"]
 __docformat__ = "google"
 
-# Output ranges in order of their range index on the device, with their
-# limits in volts. See "Output ranges" in /Firmware/WavePal/PROTOCOL.md.
 OUTPUT_RANGES = {
     "0V:5V": (0.0, 5.0),
     "0V:10V": (0.0, 10.0),
     "-5V:5V": (-5.0, 5.0),
     "-10V:10V": (-10.0, 10.0),
 }
+"""Output ranges in order of their range index on the device, with their
+limits in volts. See "Output ranges" in /Firmware/WavePal/PROTOCOL.md."""
 
-# Trigger modes in order of their code on the device
-TRIGGER_MODES = ("Normal", "Master", "Toggle", "Gated")
+TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Master")
+"""Names of the trigger modes. See `WavePalDevice.trigger_mode`."""
 
-
-class WavePalError(Exception):
-    """Raised when Wave Pal communication or configuration fails.
-
-    This covers serial reads that time out, short serial writes,
-    commands the device rejects, and values that are out of range, such
-    as a voltage outside the output range or a sampling rate the device
-    cannot play.
-    """
+# Each trigger mode's code on the device. The first three are Pulse Pal's codes; 3 is Pulse Pal's
+# param sync mode, which Wave Pal does not have.
+_TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Master": 4}
 
 
 @dataclass
@@ -179,87 +177,6 @@ class DeviceStatus:
     """
 
 
-# SynthPal.py has a copy of this class, which also serves its two trigger
-# channels. A fix to one usually belongs in both.
-class ChannelSettings(list):
-    """One setting per output channel, indexed by channel number.
-
-    Index 0 is unused and holds `None`, so `settings[2]` belongs to output
-    channel 2. Setting an element or a slice programs the device at once;
-    if the device refuses the new values, the list is left unchanged.
-    The list always holds five elements, so methods that would change
-    its length raise `TypeError`. `list(settings)` or `copy.copy` gives a
-    plain list, detached from the device.
-    """
-
-    def __init__(self, name, values, device, apply_method):
-        super().__init__([None, *values])
-        self._name = name
-        # A weak reference, so that the device and its settings do not form
-        # a reference cycle: deleting the device then closes its port at once
-        self._device = weakref.ref(device)
-        self._apply_method = apply_method
-
-    def __setitem__(self, index, value):
-        values = list(self)
-        values[index] = value
-        if len(values) != 5:
-            raise WavePalError(
-                f"{self._name} holds one value per output channel, at "
-                "indices 1-4. A slice assignment must keep its length."
-            )
-        if values[0] is not None:
-            raise WavePalError(
-                f"{self._name}[0] is unused: output channels are numbered "
-                "1-4."
-            )
-        self._set_all(values[1:])
-
-    def _assign(self, values):
-        """Set all four channels from a single value, 4 values, or a
-        5-element list with index 0 unused."""
-        if isinstance(values, (str, bytes)) or not _is_iterable(values):
-            values = [values] * 4
-        else:
-            values = list(values)
-            if len(values) == 5:
-                values = values[1:]
-            elif len(values) != 4:
-                raise WavePalError(
-                    f"{self._name} needs one value for all channels, or "
-                    f"one value per output channel 1-4. Received "
-                    f"{len(values)} values."
-                )
-        self._set_all(values)
-
-    def _set_all(self, values):
-        device = self._device()
-        if device is None:
-            raise WavePalError(f"The device that owns {self._name} is gone.")
-        normalized = getattr(device, self._apply_method)(values)
-        super().__setitem__(slice(0, 5), [None, *normalized])
-
-    def __reduce__(self):
-        return (list, (list(self),))
-
-    def _refuse(self, *args, **kwargs):
-        raise TypeError(
-            f"{self._name} holds exactly one value per output channel. "
-            "Set its elements instead."
-        )
-
-    append = extend = insert = pop = remove = clear = _refuse
-    sort = reverse = __delitem__ = __iadd__ = __imul__ = _refuse
-
-
-def _is_iterable(value):
-    try:
-        iter(value)
-    except TypeError:
-        return False
-    return True
-
-
 class WavePalDevice:
     """A class to control a Wave Pal on a USB serial port.
 
@@ -267,14 +184,14 @@ class WavePalDevice:
     runs Wave Pal firmware, reads its properties into
     `WavePalDevice.info`, shows "PYTHON Connected" on the device's
     screen, stops any playback and programs the default settings (see
-    `WavePalDevice.set_defaults`).
+    `WavePalDevice.set_default_params`).
 
     ```python
-    from WavePal import WavePalDevice
+    from pulsepal import WavePalDevice
 
     W = WavePalDevice("COM3")
     W.load_waveform(1, [0, 1, 2, 3, 4, 5, 0])
-    W.play(1)
+    W.trigger(1)
     W.close()
     ```
 
@@ -295,15 +212,15 @@ class WavePalDevice:
 
     _CURRENT_FIRMWARE_VERSION = 1
 
-    _OP_MENU_BYTE = 213
-    _OP_HANDSHAKE = 72
+    _OP_MENU_BYTE = _common.OP_MENU_BYTE
+    _OP_HANDSHAKE = _common.OP_HANDSHAKE
     _OP_DISCONNECT = 81
     _OP_SET_CLIENT_NAME = 89
     _OP_HARDWARE_INFO = ord("N")
     _OP_SET_SAMPLING_RATE = ord("S")
     _OP_SET_OUTPUT_RANGE = ord("R")
     _OP_LOAD_WAVEFORM = ord("L")
-    _OP_PLAY = ord("P")
+    _OP_TRIGGER = ord("P")
     _OP_STOP = ord("X")
     _OP_SET_FIXED_VOLTAGE = ord("!")
     _OP_SET_LOOP_MODE = ord("O")
@@ -313,9 +230,7 @@ class WavePalDevice:
     _OP_GET_STATUS = ord("G")
     _OP_GET_PLAYBACK_CHECKSUMS = ord("Z")
 
-    _WAVE_PAL_HANDSHAKE_REPLY = 87  # 'W'
-    _PULSE_PAL_HANDSHAKE_REPLY = 75  # 'K': the device runs Pulse Pal firmware
-    _SYNTH_PAL_HANDSHAKE_REPLY = 83  # 'S': the device runs Synth Pal firmware
+    _HANDSHAKE_REPLY = 87  # 'W'
     _HARDWARE_INFO_FORMAT = "<BBIIII"
     _STATUS_FORMAT = "<B4I4II"
     _DAC_BITMAX = 65535
@@ -333,9 +248,9 @@ class WavePalDevice:
                 waveform onto a slow microSD card can take a few seconds.
 
         Raises:
-            WavePalError: If the device does not reply to the handshake,
-                runs Pulse Pal firmware, or runs Wave Pal firmware newer
-                than this module supports.
+            PulsePalError: If the device does not reply to the handshake,
+                runs other firmware, or runs Wave Pal firmware newer than
+                this module supports.
             serial.SerialException: If the serial port cannot be opened.
         """
         self._closed = True
@@ -348,7 +263,7 @@ class WavePalDevice:
         self._loop_duration = ChannelSettings(
             "loop_duration", [0.0] * 4, self, "_apply_loop_duration")
         self._trigger_mode = ChannelSettings(
-            "trigger_mode", ["Normal"] * 4, self, "_apply_trigger_mode")
+            "trigger_mode", ["Normal"] * 2, self, "_apply_trigger_mode")
         self._link_trigger_channel1 = ChannelSettings(
             "link_trigger_channel1", [True] * 4, self,
             "_apply_trigger_channel1_links")
@@ -371,7 +286,7 @@ class WavePalDevice:
             # Client name op + "PYTHON" in ASCII, shown as "PYTHON Connected"
             self._write_command(self._OP_SET_CLIENT_NAME, b"PYTHON")
             self.stop()
-            self.set_defaults()
+            self.set_default_params()
         except BaseException:
             # Op 81 means something else to other devices, so it is sent
             # only once the device has identified itself as a Wave Pal
@@ -395,62 +310,28 @@ class WavePalDevice:
             Sorted list of port names, such as `["COM3", "COM7"]`.
 
         Raises:
-            WavePalError: If `ports_to_list` is not `available` or `all`.
+            PulsePalError: If `ports_to_list` is not `available` or `all`.
         """
-        mode = str(ports_to_list).lower()
-        if mode not in ("available", "all"):
-            raise WavePalError(
-                f"Unknown port list type: {ports_to_list}. "
-                "Use 'available' or 'all'."
-            )
-        port_names = []
-        for port_info in serial.tools.list_ports.comports():
-            is_usb = port_info.vid is not None or "USB" in (
-                port_info.hwid or ""
-            ).upper()
-            if not is_usb:
-                continue
-            if mode == "available" and not WavePalDevice._port_is_free(
-                port_info.device
-            ):
-                continue
-            port_names.append(port_info.device)
-        return sorted(port_names)
-
-    @staticmethod
-    def _port_is_free(port_name):
-        """Return True if the port is not already open in another program."""
-        port = serial.Serial()
-        port.port = port_name
-        # Leaving the control lines low avoids resetting boards that
-        # reset on DTR while the port is probed.
-        port.dtr = False
-        port.rts = False
-        try:
-            port.open()
-        except (serial.SerialException, OSError):
-            return False
-        port.close()
-        return True
+        return _common.serialportlist(ports_to_list)
 
     # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
 
-    def set_defaults(self):
+    def set_default_params(self):
         """Program the default settings on the device.
 
         The defaults are a 10 kHz sampling rate, the -10 V to 10 V output
-        range, loop mode off with loop durations of 0, normal trigger
-        mode, and all output channels linked to trigger channel 1 and not
-        to trigger channel 2. They match the settings the device starts
-        with.
+        range, loop mode off with loop durations of 0, both trigger
+        channels in normal mode, and all output channels linked to trigger
+        channel 1 and not to trigger channel 2. They match the settings
+        the device starts with.
 
         Loaded waveforms are kept, and loaded again if the output range
         changes (see `WavePalDevice.output_range`).
 
         Raises:
-            WavePalError: If a loaded waveform does not fit the default
+            PulsePalError: If a loaded waveform does not fit the default
                 output range, -10 V to 10 V.
         """
         self.sampling_rate = 10000
@@ -474,11 +355,11 @@ class WavePalDevice:
     def sampling_rate(self, rate):
         try:
             rate_hz = int(rate)
-            is_whole = rate_hz == rate and not isinstance(rate, bool)
+            is_whole = rate_hz == rate and not isinstance(rate, (bool, str))
         except (TypeError, ValueError, OverflowError):
             is_whole = False
         if not is_whole or not 1 <= rate_hz <= self.info.max_sampling_rate:
-            raise WavePalError(
+            raise PulsePalError(
                 "sampling_rate must be a whole number of Hz from 1 to "
                 f"{self.info.max_sampling_rate}. Received {rate!r}."
             )
@@ -530,7 +411,7 @@ class WavePalDevice:
             waveform = self._waveforms[channel]
             if waveform is not None and (
                     waveform.min() < low or waveform.max() > high):
-                raise WavePalError(
+                raise PulsePalError(
                     f"The waveform on channel {channel} spans "
                     f"{waveform.min():g} V to {waveform.max():g} V, which "
                     f"does not fit the {name} range. Load a new waveform "
@@ -584,24 +465,27 @@ class WavePalDevice:
 
     @property
     def trigger_mode(self):
-        """How each output channel responds to a trigger.
+        """How each trigger channel acts on the output channels linked to it.
 
-        Indexed by channel number (see "Channel settings" above). A
-        trigger is a rising edge on a linked trigger channel, or a call to
-        `WavePalDevice.play`:
+        Indexed by trigger channel number, 1 or 2 (index 0 is unused), as
+        in Pulse Pal. A TTL edge on a trigger channel acts on the output
+        channels linked to it (`WavePalDevice.link_trigger_channel1`,
+        `WavePalDevice.link_trigger_channel2`):
 
-        - `"Normal"`: starts the waveform. Triggers during playback are
-          ignored.
-        - `"Master"`: starts the waveform, or restarts it from the first
-          sample if it is playing.
-        - `"Toggle"`: starts the waveform, or stops it if it is playing.
-        - `"Gated"`: starts the waveform, and a falling edge on the
-          trigger channel stops it, unless the other trigger channel is
-          also linked and still high. The waveform plays while the TTL is
-          high: with loop mode on and a loop duration of 0, it plays for
-          exactly as long.
+        - `"Normal"`: a rising edge starts the linked channels' waveforms.
+          Channels that are playing ignore it.
+        - `"Toggle"`: a rising edge starts the linked channels, or stops
+          those that are playing.
+        - `"Gated"`: a rising edge starts the linked channels, and a
+          falling edge stops them, unless the other trigger channel is also
+          gated, linked to them, and still high. With loop mode on and a
+          loop duration of 0, a waveform plays for exactly as long as the
+          TTL is high.
+        - `"Master"`: a rising edge starts the linked channels, and
+          restarts those that are playing from their first sample.
 
-        Names are not case sensitive.
+        The first three are Pulse Pal's trigger modes. Names are not case
+        sensitive.
         """
         return self._trigger_mode
 
@@ -669,14 +553,14 @@ class WavePalDevice:
                 `WavePalDevice.output_range`.
 
         Raises:
-            WavePalError: If the channel or waveform is invalid, or the
+            PulsePalError: If the channel or waveform is invalid, or the
                 device could not store the waveform. The channel is then
                 left without a waveform.
         """
         channel = self._channel_number(channel)
         samples = np.array(waveform, dtype=float).ravel()
         if not 1 <= samples.size <= self.info.max_samples:
-            raise WavePalError(
+            raise PulsePalError(
                 f"A waveform must have 1 to {self.info.max_samples} samples. "
                 f"Received {samples.size}."
             )
@@ -690,36 +574,33 @@ class WavePalDevice:
         samples.flags.writeable = False
         self._waveforms[channel] = samples
 
-    def play(self, channels):
+    def trigger(self, channels):
         """Trigger output channels in software.
 
-        Each channel responds according to its
-        `WavePalDevice.trigger_mode`, as if a linked trigger channel had
-        gone high. Channels start on the same sample. Channels without a
-        waveform are ignored.
+        Idle channels start their waveforms from the first sample,
+        together. Channels that are playing ignore it, as Pulse Pal's
+        channels ignore a soft trigger while they play a pulse train.
+        Channels without a waveform are ignored.
 
         ```python
-        W.play(1)
-        W.play([2, 4])
+        W.trigger(1)
+        W.trigger([2, 4])     # a list, tuple or NumPy array
         ```
 
         Args:
-            channels: Output channel number 1-4, or a list of them.
+            channels: Output channel number 1-4, or several as a list,
+                tuple or NumPy array.
         """
-        bits = self._channel_bits(channels)
-        self._write_command(self._OP_PLAY, bytes([bits]))
+        self._write_command(self._OP_TRIGGER, bytes([_common.channel_bits(channels)]))
 
     def stop(self, channels=None):
         """Stop playback. The stopped channels output 0 V.
 
         Args:
-            channels: Output channel number 1-4, or a list of them.
-                `None` stops all channels.
+            channels: Output channel number 1-4, or several as a list,
+                tuple or NumPy array. `None` stops all channels.
         """
-        if channels is None:
-            bits = self._ALL_CHANNELS
-        else:
-            bits = self._channel_bits(channels)
+        bits = self._ALL_CHANNELS if channels is None else _common.channel_bits(channels)
         self._write_command(self._OP_STOP, bytes([bits]))
 
     def set_fixed_voltage(self, channels, voltage):
@@ -729,14 +610,15 @@ class WavePalDevice:
         channel is triggered or stopped.
 
         Args:
-            channels: Output channel number 1-4, or a list of them.
+            channels: Output channel number 1-4, or several as a list,
+                tuple or NumPy array.
             voltage: Voltage, within `WavePalDevice.output_range`.
 
         Raises:
-            WavePalError: If the voltage is outside the output range, or
+            PulsePalError: If the voltage is outside the output range, or
                 the device rejects the command.
         """
-        bits = self._channel_bits(channels)
+        bits = _common.channel_bits(channels)
         code = int(self._volts_to_codes([voltage])[0])
         self._write_command(self._OP_SET_FIXED_VOLTAGE,
                             struct.pack("<BH", bits, code))
@@ -833,7 +715,7 @@ class WavePalDevice:
             pass
 
     def __repr__(self):
-        """Describe the device and its settings."""
+        """Describe the device and its settings, e.g. with `print(W)`."""
         port = getattr(getattr(self, "port", None), "port", None)
         loaded = ", ".join(
             f"{ch}: {'none' if w is None else f'{w.size} samples'}"
@@ -861,35 +743,24 @@ class WavePalDevice:
         self._write_command(self._OP_HANDSHAKE)
         try:
             reply = self._read_raw(1)[0]
-        except WavePalError as exc:
-            raise WavePalError(
+        except PulsePalError as exc:
+            raise PulsePalError(
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Wave Pal firmware?"
             ) from exc
-        other_firmware = {
-            self._PULSE_PAL_HANDSHAKE_REPLY: ("Pulse Pal",
-                                              "PulsePal.PulsePalDevice"),
-            self._SYNTH_PAL_HANDSHAKE_REPLY: ("Synth Pal",
-                                              "SynthPal.SynthPalDevice"),
-        }
-        if reply in other_firmware:
-            name, client = other_firmware[reply]
-            version = struct.unpack("<I", self._read_raw(4))[0]
-            raise WavePalError(
-                f"The device on {self.port.port} runs {name} firmware "
-                f"(v{version}). Load Wave Pal firmware onto it "
-                f"(/Firmware/WavePal), or connect with {client}."
-            )
-        if reply != self._WAVE_PAL_HANDSHAKE_REPLY:
-            raise WavePalError(
+        if reply != self._HANDSHAKE_REPLY:
+            if reply in _common.FIRMWARE_BY_HANDSHAKE_REPLY:
+                version = struct.unpack("<I", self._read_raw(4))[0]
+                raise _common.other_firmware_error(reply, version, self.port.port, "Wave Pal")
+            raise PulsePalError(
                 "Incorrect handshake returned. Expected "
-                f"{self._WAVE_PAL_HANDSHAKE_REPLY}, received {reply}."
+                f"{self._HANDSHAKE_REPLY}, received {reply}."
             )
         version = struct.unpack("<I", self._read_raw(4))[0]
         if version > self._CURRENT_FIRMWARE_VERSION:
-            raise WavePalError(
-                f"Future firmware detected, v{version}. Please update "
-                "WavePal.py or load Wave Pal firmware "
+            raise PulsePalError(
+                f"Future firmware detected, v{version}. Please update the "
+                "pulsepal package or load Wave Pal firmware "
                 f"v{self._CURRENT_FIRMWARE_VERSION}."
             )
         self.info.firmware_version = version
@@ -909,7 +780,7 @@ class WavePalDevice:
         )
 
     def _apply_loop_mode(self, values):
-        modes = [self._to_bool(value, "loop_mode") for value in values]
+        modes = [to_bool(value, "loop_mode") for value in values]
         self._write_command(self._OP_SET_LOOP_MODE, bytes(map(int, modes)))
         self._read_ack("setting loop_mode")
         return modes
@@ -917,13 +788,13 @@ class WavePalDevice:
     def _apply_loop_duration(self, values):
         durations = []
         for value in values:
-            if isinstance(value, bool) or not isinstance(value, numbers.Real):
-                raise WavePalError(
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
+                raise PulsePalError(
                     f"loop_duration must be in seconds. Received {value!r}."
                 )
             duration = float(value)
             if not math.isfinite(duration) or duration < 0:
-                raise WavePalError(
+                raise PulsePalError(
                     "loop_duration must be 0 (loop until stopped) or a "
                     f"positive number of seconds. Received {value!r}."
                 )
@@ -946,7 +817,7 @@ class WavePalDevice:
             if duration > 0:
                 n = max(n, 1)  # 0 samples would mean "loop until stopped"
             if n > self._UINT32_MAX:
-                raise WavePalError(
+                raise PulsePalError(
                     f"A loop_duration of {duration} s is too long at "
                     f"{rate_hz} Hz. The longest is "
                     f"{self._UINT32_MAX / actual_rate:.0f} s."
@@ -955,20 +826,10 @@ class WavePalDevice:
         return samples
 
     def _apply_trigger_mode(self, values):
-        names = []
-        for value in values:
-            matches = [mode for mode in TRIGGER_MODES
-                       if isinstance(value, str)
-                       and mode.lower() == value.lower()]
-            if not matches:
-                raise WavePalError(
-                    f"Unknown trigger mode: {value!r}. Valid modes are "
-                    f"{', '.join(TRIGGER_MODES)}."
-                )
-            names.append(matches[0])
+        names = [to_name(value, TRIGGER_MODES, "trigger mode") for value in values]
         self._write_command(
             self._OP_SET_TRIGGER_MODE,
-            bytes(TRIGGER_MODES.index(name) for name in names),
+            bytes(_TRIGGER_MODE_CODES[name] for name in names),
         )
         self._read_ack("setting trigger_mode")
         return names
@@ -976,21 +837,20 @@ class WavePalDevice:
     # One op programs both trigger channels' links, so each list is sent
     # with the other's current values
     def _apply_trigger_channel1_links(self, values):
-        links1 = [self._to_bool(v, "link_trigger_channel1") for v in values]
+        links1 = [to_bool(v, "link_trigger_channel1") for v in values]
         self._send_trigger_links(links1, self._link_trigger_channel2[1:])
         return links1
 
     def _apply_trigger_channel2_links(self, values):
-        links2 = [self._to_bool(v, "link_trigger_channel2") for v in values]
+        links2 = [to_bool(v, "link_trigger_channel2") for v in values]
         self._send_trigger_links(self._link_trigger_channel1[1:], links2)
         return links2
 
     def _set_trigger_links(self, links1, links2):
         """Program both trigger channels' links with one command."""
         self._send_trigger_links(links1, links2)
-        # Bypasses ChannelSettings.__setitem__, which would send them again
-        list.__setitem__(self._link_trigger_channel1, slice(1, 5), links1)
-        list.__setitem__(self._link_trigger_channel2, slice(1, 5), links2)
+        self._link_trigger_channel1._store(links1)
+        self._link_trigger_channel2._store(links2)
 
     def _send_trigger_links(self, links1, links2):
         self._write_command(self._OP_SET_TRIGGER_LINKS,
@@ -1007,7 +867,7 @@ class WavePalDevice:
             for name in OUTPUT_RANGES:
                 if name.lower() == range_name.replace(" ", "").lower():
                     return name
-        raise WavePalError(
+        raise PulsePalError(
             f"Unknown output range: {range_name!r}. Valid ranges are "
             f"{', '.join(OUTPUT_RANGES)}."
         )
@@ -1017,9 +877,9 @@ class WavePalDevice:
         low, high = OUTPUT_RANGES[self._output_range]
         volts = np.asarray(volts, dtype=float)
         if not np.all(np.isfinite(volts)):
-            raise WavePalError("Voltages must be finite numbers.")
+            raise PulsePalError("Voltages must be finite numbers.")
         if volts.min() < low or volts.max() > high:
-            raise WavePalError(
+            raise PulsePalError(
                 f"Voltages must be within the output range, {low:g} V to "
                 f"{high:g} V. Received {volts.min():g} V to "
                 f"{volts.max():g} V. Change output_range to use a wider "
@@ -1029,44 +889,23 @@ class WavePalDevice:
         return codes.astype("<u2")
 
     @staticmethod
-    def _to_bool(value, name):
-        if isinstance(value, (bool, np.bool_)):
-            return bool(value)
-        if isinstance(value, numbers.Integral) and value in (0, 1):
-            return bool(value)
-        raise WavePalError(f"{name} values must be True or False. "
-                           f"Received {value!r}.")
-
-    @staticmethod
     def _channel_number(channel):
         if (
             not isinstance(channel, numbers.Integral)
-            or isinstance(channel, bool)
+            or isinstance(channel, (bool, np.bool_))
             or not 1 <= channel <= 4
         ):
-            raise WavePalError(
+            raise PulsePalError(
                 f"Output channels are numbered 1-4. Received {channel!r}."
             )
         return int(channel)
-
-    def _channel_bits(self, channels):
-        """Convert a channel number, or a list of them, to channel bits."""
-        if isinstance(channels, numbers.Integral):
-            channels = [channels]
-        channels = list(channels)
-        if not channels:
-            raise WavePalError("No output channels were given.")
-        bits = 0
-        for channel in channels:
-            bits |= 1 << (self._channel_number(channel) - 1)
-        return bits
 
     def _write_command(self, op_code, data=b""):
         """Send one command, with its framing byte, in a single write."""
         message = bytes([self._OP_MENU_BYTE, op_code]) + data
         bytes_written = self.port.write(message)
         if bytes_written != len(message):
-            raise WavePalError(
+            raise PulsePalError(
                 f"Wrote {bytes_written} byte(s), expected to write "
                 f"{len(message)} byte(s)."
             )
@@ -1075,7 +914,7 @@ class WavePalDevice:
         """Read exactly n_bytes from the serial port."""
         message = self.port.read(n_bytes)
         if len(message) < n_bytes:
-            raise WavePalError(
+            raise PulsePalError(
                 f"Serial port timed out. {len(message)} byte(s) read. "
                 f"Expected {n_bytes} byte(s)."
             )
@@ -1086,12 +925,12 @@ class WavePalDevice:
         command, 0 if it rejected it."""
         try:
             reply = self._read_raw(1)[0]
-        except WavePalError as exc:
-            raise WavePalError(
+        except PulsePalError as exc:
+            raise PulsePalError(
                 f"Wave Pal did not confirm {context}."
             ) from exc
         if reply != 1:
-            raise WavePalError(
+            raise PulsePalError(
                 f"Wave Pal rejected {context}. A value was out of range, "
                 "or a waveform could not be written to the microSD card."
             )

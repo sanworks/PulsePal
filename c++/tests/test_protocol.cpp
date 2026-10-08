@@ -23,7 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // These tests need no Pulse Pal: a fake serial port records what the class writes, and replies to its reads. They
 // check that the class still matches the firmware's serial protocol, documented in /Firmware/PROTOCOL.md, and that
-// op 92 and op 73 messages match those sent by the Python class (/Python/PulsePal/PulsePal.py).
+// op 92 and op 73 messages match those sent by the Python class (/Python/PulsePal/pulsepal/pulse_pal.py).
 //
 // Build and run them with CMake (see README.md):
 //   ctest --test-dir build -C Release --output-on-failure
