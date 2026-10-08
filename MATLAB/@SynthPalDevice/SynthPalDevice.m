@@ -53,6 +53,28 @@
 %   'Gated'   A rising edge starts the linked channels, and a falling edge stops them, unless the other trigger
 %             channel is also gated, linked to them, and still high. With a playDuration of 0, a channel plays for
 %             exactly as long as the TTL is high.
+%   'Param Sync' A rising edge starts and stops nothing (the channel's links are ignored). It loads the settings most
+%             recently sent by syncToDevice(), if any: this is how the next trial's settings are sent during the
+%             current trial and applied the instant it starts. At the edge, the frequency and both trigger modes
+%             change at once: they are shared by all channels. An output channel at its resting voltage takes its new
+%             settings at once. One that is playing (off ramp included) finishes on the settings it started with, at
+%             the new frequency, and takes the new ones the moment it reaches its resting voltage, so the next
+%             trigger plays them. A trigger mode sent by syncToDevice() applies from the next edge. To start channels
+%             on the same edge, wire the TTL to the other trigger channel too: the settings load first.
+%
+% Param sync and autoSync. With autoSync on (the default), assigning a setting programs the device at once, also
+% while a trigger channel is in param sync mode; so leaving param sync mode means assigning triggerMode with autoSync
+% on. With autoSync off, assignments change only this object's copy of the settings, checking each value, and
+% syncToDevice() sends all of them in one command, checking that they go together. While a trigger channel is in
+% param sync mode the device stores that set, replacing any stored before, for the channel's next rising edge;
+% otherwise it applies it at once. When no trigger channel is left in the mode, the device discards a stored set.
+% setDefaults(), which the constructor calls, programs the device at once and takes both trigger channels out of
+% param sync mode.
+%   S.triggerMode{2} = 'Param Sync';  % Sent at once
+%   S.autoSync = false;
+%   S.frequency = 880;
+%   S.amplitude(1) = 2;
+%   S.syncToDevice();                  % Stored for trigger channel 2's next rising edge
 % play() starts idle channels, and channels that are playing ignore it. When no channel is playing, a trigger starts
 % the waveform 8 microseconds later. A channel triggered while another plays starts on the next sample of the shared
 % sample clock.
@@ -107,8 +129,10 @@ classdef SynthPalDevice < handle
         offRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades out when it stops. 0 for no ramp.
         linkTriggerChannel1 = true(1,4) % 1x4. true if trigger channel 1 triggers the output channel
         linkTriggerChannel2 = false(1,4) % 1x4. true if trigger channel 2 triggers the output channel
-        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle' or 'Gated'.
-                                           % See "Triggers" above. Not case sensitive.
+        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or
+                                           % 'Param Sync'. See "Triggers" above. Not case sensitive.
+        autoSync = true % true: assigning a setting programs the device at once. false: assignments change only this
+                        % object's copy, and syncToDevice() sends them all. See "Param sync and autoSync" above.
     end
 
     properties (SetAccess = private)
@@ -143,6 +167,7 @@ classdef SynthPalDevice < handle
         OpSetOffRampDuration = 'E'
         OpSetTriggerLinks = 'I'
         OpSetTriggerMode = 'T'
+        OpSetAllSettings = 'U'
         OpPlay = 'P'
         OpStop = 'X'
         OpGetStatus = 'G'
@@ -152,7 +177,7 @@ classdef SynthPalDevice < handle
         WavePalHandshakeReply = 87 % 'W': the device runs Wave Pal firmware
         WaveformNames = {'Sine', 'Triangle', 'Square', 'Sawtooth', 'Fixed Voltage'} % In order of their code on the
                                                                                     % device
-        TriggerModeNames = {'Normal', 'Toggle', 'Gated'} % In order of their code on the device
+        TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync'} % In order of their code on the device
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         MaxVoltage_uV = 10000000 % Every output voltage stays within +/-10 V
     end
@@ -221,7 +246,11 @@ classdef SynthPalDevice < handle
             % Programs the default settings on the device: a frequency of 100 Hz, and on every output channel a
             % sine wave of 5 V peak to peak around a mean voltage of 0 V, resting at 0 V, played for 1 second with no
             % ramps. Both trigger channels in 'Normal' mode, and all output channels linked to trigger channel 1 and
-            % not to trigger channel 2. They match the settings the device starts with.
+            % not to trigger channel 2. They match the settings the device starts with. They are sent at once, also
+            % while autoSync is off.
+            autoSyncState = obj.autoSync;
+            obj.autoSync = true;
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
             obj.frequency = 100;
             % In this order, each is valid whatever the device holds: a mean of 0 V goes with any amplitude, a
             % resting voltage with any waveform, 5 V is then a valid amplitude for any waveform, and a sine wave is
@@ -236,6 +265,31 @@ classdef SynthPalDevice < handle
             obj.triggerMode = 'Normal';
             obj.linkTriggerChannel1 = true;
             obj.linkTriggerChannel2 = false;
+            clear cleanup
+        end
+
+        function syncToDevice(obj)
+            % Sends every setting to the device in one command: frequency, and for each channel waveform, amplitude,
+            % meanVoltage, restingVoltage, playDuration, onRampDuration, offRampDuration, linkTriggerChannel1 and
+            % linkTriggerChannel2, and triggerMode. While a trigger channel is in param sync mode, the device stores
+            % the set, replacing any set stored before, and that channel's next rising edge loads it. Otherwise the
+            % device applies it at once. The properties read as sent, including while a set waits for its edge. See
+            % "Param sync and autoSync" above. Raises an error, and sends nothing, if a channel's levels do not suit
+            % its waveform.
+            amplitudes = obj.roundHalfEven(obj.amplitude*1e6);
+            means = obj.roundHalfEven(obj.meanVoltage*1e6);
+            obj.checkLevels(obj.waveform, amplitudes, means, 'sync');
+            waveformCodes = obj.namesToCodes(obj.waveform, obj.WaveformNames, 4, 'waveform', 'output channel');
+            modeCodes = obj.namesToCodes(obj.triggerMode, obj.TriggerModeNames, 2, 'triggerMode', 'trigger channel');
+            data = [typecast(uint32(obj.roundHalfEven(obj.frequency*100)), 'uint8'), uint8(waveformCodes), ...
+                    typecast(int32(amplitudes), 'uint8'), typecast(int32(means), 'uint8'), ...
+                    typecast(int32(obj.roundHalfEven(obj.restingVoltage*1e6)), 'uint8'), ...
+                    typecast(uint32(obj.roundHalfEven(obj.playDuration*1e6)), 'uint8'), ...
+                    typecast(uint32(obj.roundHalfEven(obj.onRampDuration*1e6)), 'uint8'), ...
+                    typecast(uint32(obj.roundHalfEven(obj.offRampDuration*1e6)), 'uint8'), ...
+                    uint8([obj.linkTriggerChannel1 obj.linkTriggerChannel2]), uint8(modeCodes)];
+            obj.writeCommand(obj.OpSetAllSettings, data);
+            obj.confirmWrite('syncToDevice()');
         end
 
         function play(obj, channels)
@@ -309,22 +363,26 @@ classdef SynthPalDevice < handle
             if centiHz < 100 || centiHz > 2000000
                 error('frequency must be 1 to 20000 Hz.')
             end
-            if obj.initialized %#ok<MCSUP> The device must be connected
+            if obj.initialized && obj.autoSync %#ok<MCSUP> The device must be connected
                 obj.writeCommand(obj.OpSetFrequency, typecast(uint32(centiHz), 'uint8'));
                 reply = obj.readBytes(5, 'setting frequency');
                 if reply(1) ~= 1
                     error('Synth Pal rejected the frequency.')
                 end
                 obj.samplesPerCycle = double(typecast(uint8(reply(2:5)), 'uint32')); %#ok<MCSUP>
+            else
+                obj.samplesPerCycle = 4*floor(2500000/centiHz); %#ok<MCSUP> As the device works it out
             end
             obj.frequency = centiHz/100;
         end
 
         function set.waveform(obj, names)
             codes = obj.namesToCodes(names, obj.WaveformNames, 4, 'waveform', 'output channel');
-            obj.checkLevels(obj.WaveformNames(codes+1), obj.roundHalfEven(obj.amplitude*1e6),... %#ok<MCSUP>
-                            obj.roundHalfEven(obj.meanVoltage*1e6), 'waveform'); %#ok<MCSUP>
-            if obj.initialized %#ok<MCSUP>
+            if obj.autoSync %#ok<MCSUP> With autoSync off, syncToDevice() checks the whole set
+                obj.checkLevels(obj.WaveformNames(codes+1), obj.roundHalfEven(obj.amplitude*1e6),... %#ok<MCSUP>
+                                obj.roundHalfEven(obj.meanVoltage*1e6), 'waveform'); %#ok<MCSUP>
+            end
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetWaveform, uint8(codes));
                 obj.confirmWrite('setting waveform');
             end
@@ -336,8 +394,10 @@ classdef SynthPalDevice < handle
             volts = obj.checkVolts(volts, 'amplitude', -10, 20,...
                                    ' (0 to 20 peak to peak, or -10 to 10 on a Fixed Voltage channel)');
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(obj.waveform, microvolts, obj.roundHalfEven(obj.meanVoltage*1e6), 'amplitude'); %#ok<MCSUP>
-            if obj.initialized %#ok<MCSUP>
+            if obj.autoSync %#ok<MCSUP>
+                obj.checkLevels(obj.waveform, microvolts, obj.roundHalfEven(obj.meanVoltage*1e6), 'amplitude'); %#ok<MCSUP>
+            end
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetAmplitude, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting amplitude');
             end
@@ -347,8 +407,10 @@ classdef SynthPalDevice < handle
         function set.meanVoltage(obj, volts)
             volts = obj.checkVolts(volts, 'meanVoltage', -10, 10);
             microvolts = obj.roundHalfEven(volts*1e6);
-            obj.checkLevels(obj.waveform, obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'meanVoltage'); %#ok<MCSUP>
-            if obj.initialized %#ok<MCSUP>
+            if obj.autoSync %#ok<MCSUP>
+                obj.checkLevels(obj.waveform, obj.roundHalfEven(obj.amplitude*1e6), microvolts, 'meanVoltage'); %#ok<MCSUP>
+            end
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetMeanVoltage, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting meanVoltage');
             end
@@ -358,7 +420,7 @@ classdef SynthPalDevice < handle
         function set.restingVoltage(obj, volts)
             volts = obj.checkVolts(volts, 'restingVoltage', -10, 10); % Any resting voltage goes with any waveform
             microvolts = obj.roundHalfEven(volts*1e6);
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(microvolts), 'uint8'));
                 obj.confirmWrite('setting restingVoltage');
             end
@@ -367,7 +429,7 @@ classdef SynthPalDevice < handle
 
         function set.playDuration(obj, seconds)
             seconds = obj.checkDurations(seconds, 'playDuration', '0 (play until stopped)');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetPlayDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting playDuration');
             end
@@ -376,7 +438,7 @@ classdef SynthPalDevice < handle
 
         function set.onRampDuration(obj, seconds)
             seconds = obj.checkDurations(seconds, 'onRampDuration', '0 (no ramp)');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetOnRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting onRampDuration');
             end
@@ -385,7 +447,7 @@ classdef SynthPalDevice < handle
 
         function set.offRampDuration(obj, seconds)
             seconds = obj.checkDurations(seconds, 'offRampDuration', '0 (no ramp)');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetOffRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting offRampDuration');
             end
@@ -394,7 +456,7 @@ classdef SynthPalDevice < handle
 
         function set.triggerMode(obj, modes)
             codes = obj.namesToCodes(modes, obj.TriggerModeNames, 2, 'triggerMode', 'trigger channel');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetTriggerMode, uint8(codes));
                 obj.confirmWrite('setting triggerMode');
             end
@@ -403,7 +465,7 @@ classdef SynthPalDevice < handle
 
         function set.linkTriggerChannel1(obj, links)
             links = obj.checkLogical(links, 'linkTriggerChannel1');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.sendTriggerLinks(links, obj.linkTriggerChannel2); %#ok<MCSUP>
             end
             obj.linkTriggerChannel1 = links;
@@ -411,10 +473,17 @@ classdef SynthPalDevice < handle
 
         function set.linkTriggerChannel2(obj, links)
             links = obj.checkLogical(links, 'linkTriggerChannel2');
-            if obj.initialized %#ok<MCSUP>
+            if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.sendTriggerLinks(obj.linkTriggerChannel1, links); %#ok<MCSUP>
             end
             obj.linkTriggerChannel2 = links;
+        end
+
+        function set.autoSync(obj, value)
+            if ~(islogical(value) || isnumeric(value)) || ~isscalar(value) || ~(value == 0 || value == 1)
+                error('autoSync must be true or false.')
+            end
+            obj.autoSync = logical(value);
         end
 
         function delete(obj)
@@ -498,6 +567,11 @@ classdef SynthPalDevice < handle
             obj.confirmWrite('setting the trigger channel links');
         end
 
+        function restoreAutoSync(obj, state)
+            % For setDefaults(): puts autoSync back, also if programming the defaults failed
+            obj.autoSync = state;
+        end
+
         function seconds = checkDurations(obj, seconds, name, zeroMeaning)
             % Checks a duration for each output channel: 0 to info.maxPlayDuration seconds
             seconds = obj.expandToChannels(seconds, name);
@@ -535,6 +609,8 @@ classdef SynthPalDevice < handle
                             advice = ' Change meanVoltage first, or choose a smaller amplitude.';
                         case 'meanVoltage'
                             advice = ' Change amplitude first, or choose a smaller meanVoltage.';
+                        case 'sync'
+                            advice = ' Change amplitude or meanVoltage.';
                         otherwise
                             advice = ' Change amplitude or meanVoltage first.';
                     end

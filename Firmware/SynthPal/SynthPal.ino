@@ -107,6 +107,8 @@ enum OpCode {
   OP_SET_OFF_RAMP_DURATION = 'E',     // 69. Off ramp of each output channel, at the End of playback, in microseconds
   OP_SET_TRIGGER_LINKS = 'I',         // 73. Links from the trigger channels to the output channels
   OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each trigger channel. See enum TriggerModeValue
+  OP_SET_ALL_SETTINGS = 'U',          // 85. Every setting at once. While a trigger channel is in param sync mode, stored
+                                      // for its next rising edge instead (see "Param sync" in Playback.ino)
   OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel)
   OP_STOP = 'X',                      // 88. Stop output channels (1 bit per channel)
   OP_GET_STATUS = 'G',                // 71. Returns the playback state
@@ -130,9 +132,10 @@ enum WaveformValue {
 enum TriggerModeValue {
   TRIGGER_MODE_NORMAL = 0,            // A rising edge starts the linked output channels. It is ignored by channels that play.
   TRIGGER_MODE_TOGGLE = 1,            // A rising edge starts the linked output channels, or stops those that play
-  TRIGGER_MODE_GATED = 2              // A rising edge starts the linked output channels, and a falling edge stops them
+  TRIGGER_MODE_GATED = 2,             // A rising edge starts the linked output channels, and a falling edge stops them
+  TRIGGER_MODE_PARAM_SYNC = 3         // A rising edge loads the settings op 85 stored. It starts and stops nothing.
 };
-#define MAX_TRIGGER_MODE TRIGGER_MODE_GATED
+#define MAX_TRIGGER_MODE TRIGGER_MODE_PARAM_SYNC
 
 // The AD5754R's output ranges that Synth Pal uses, one per output channel, chosen from the channel's settings by
 // outputRangeFor() in Settings.ino: the first range in this order that holds the whole waveform. The 10.8V ranges are not
@@ -358,6 +361,34 @@ volatile uint32_t offRampSamples[N_CHANNELS] = {0}; // offRampMicros in samples.
 volatile float onRampReciprocal[N_CHANNELS] = {0}; // 1 / onRampSamples, which the envelope is multiplied by
 volatile float offRampReciprocal[N_CHANNELS] = {0}; // 1 / offRampSamples
 
+// ---------------------------------------------------------------------------------------------------------------
+// Param sync mode (TRIGGER_MODE_PARAM_SYNC). Op 85 sends every setting at once. While a trigger channel is in param sync
+// mode, the set is stored here instead of applied, and the channel's next rising edge loads it. See "Param sync" in
+// Playback.ino.
+// ---------------------------------------------------------------------------------------------------------------
+struct SettingsSet {
+  uint32_t frequencyCentiHz;
+  byte waveform[N_CHANNELS];
+  int32_t amplitudeMicrovolts[N_CHANNELS];
+  int32_t meanVoltageMicrovolts[N_CHANNELS];
+  int32_t restingVoltageMicrovolts[N_CHANNELS];
+  uint32_t playDurationMicros[N_CHANNELS];
+  uint32_t onRampMicros[N_CHANNELS];
+  uint32_t offRampMicros[N_CHANNELS];
+  byte triggerLinks[2][N_CHANNELS]; // As TriggerAddress
+  byte triggerMode[2];
+  ChannelOutput output[N_CHANNELS]; // Worked out from the levels when the set is stored, so that an edge only copies it
+};
+SettingsSet storedSettings; // The set op 85 stored, waiting for an edge. Written by loop() with interrupts disabled.
+volatile boolean paramSyncPending = false; // True while storedSettings holds a set no edge has loaded yet
+SettingsSet syncedSettings; // The set the last param sync edge loaded, for the channels that were playing at the edge
+volatile byte paramSyncChannelsWaiting = 0; // One bit per output channel that was playing at the edge, and takes
+                                            // syncedSettings when it stops
+volatile byte syncedChannelsForLoop = 0; // One bit per output channel that took syncedSettings, which loop() has not yet
+                                         // copied into its settings arrays (takeSyncedSettings())
+volatile boolean edgeHandledEarly[2] = {0}; // A trigger channel's edge was handled by the other channel's interrupt
+                                            // (triggerInterrupt())
+
 // Playback state of each output channel. Changed by the playback interrupts, and by loop() with interrupts disabled.
 volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays, off ramp included
 volatile boolean stopAfterWrite[N_CHANNELS] = {0}; // The channel has stopped: its resting voltage is waiting to be written
@@ -506,6 +537,7 @@ void setup() {
 // loop() handles commands from the PC and runs the joystick menu. All sample output is done by the playback interrupts,
 // in Playback.ino, so loop() may wait (e.g. while a value is edited with the joystick) without disturbing playback.
 void loop() {
+  takeSyncedSettings(); // Settings that output channels took at a param sync edge, before a command can change them
   processUSBCommands(); // Read and execute a command from the PC, if one is available
   PPUSB.flush(); // Send any reply from this pass as a single USB packet
   updateScreenSaver(); // After the reply is sent, so that waking the screen never delays it

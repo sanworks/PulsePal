@@ -58,6 +58,8 @@ class FakeSynthPal:
         self.mean = [0] * 4
         self.on_ramp = [0] * 4
         self.off_ramp = [0] * 4
+        self.trigger_mode = [0, 0]
+        self.stored = None  # A set op 85 stored for a param sync edge
         self.status_reply = bytes(17)
 
     def write(self, data):
@@ -72,8 +74,8 @@ class FakeSynthPal:
         payload = data[2:]
         expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, ord("N"): 0, ord("F"): 4, ord("W"): 4,
                             ord("A"): 16, ord("V"): 16, ord("M"): 16, ord("D"): 16, ord("B"): 16,
-                            ord("E"): 16, ord("I"): 8, ord("T"): 2, ord("P"): 1, ord("X"): 1,
-                            ord("G"): 0, ord("Z"): 0}
+                            ord("E"): 16, ord("I"): 8, ord("T"): 2, ord("U"): 114, ord("P"): 1,
+                            ord("X"): 1, ord("G"): 0, ord("Z"): 0}
         assert op in expected_lengths, f"unknown op {op}"
         assert len(payload) == expected_lengths[op], f"op {chr(op)!r} data length"
         if op == 72:
@@ -109,6 +111,34 @@ class FakeSynthPal:
             ok = self.ack and all(d <= 3_600_000_000 for d in durations)
             if ok:
                 setattr(self, "on_ramp" if op == ord("B") else "off_ramp", durations)
+            return bytes([ok])
+        if op == ord("T"):
+            ok = self.ack and all(mode <= 3 for mode in payload)
+            if ok:
+                self.trigger_mode = list(payload)
+                if 3 not in self.trigger_mode:
+                    self.stored = None  # Leaving param sync mode discards a stored set
+            return bytes([ok])
+        if op == ord("U"):
+            # As op 85 in /Firmware/SynthPal/USBOps.ino: checked whole, then stored in param sync mode, or applied
+            values = struct.unpack("<I4B4i4i4i4I4I4I8B2B", payload)
+            settings = {"centihz": values[0], "waveform": list(values[1:5]), "amplitude": list(values[5:9]),
+                        "mean": list(values[9:13]), "resting": list(values[13:17]),
+                        "play_duration": list(values[17:21]), "on_ramp": list(values[21:25]),
+                        "off_ramp": list(values[25:29]), "links": list(values[29:37]),
+                        "trigger_mode": list(values[37:39])}
+            ok = (self.ack and 100 <= settings["centihz"] <= 2_000_000
+                  and all(map(self.is_valid_output_level, settings["waveform"], settings["resting"],
+                              settings["mean"], settings["amplitude"]))
+                  and all(d <= 3_600_000_000 for name in ("play_duration", "on_ramp", "off_ramp")
+                          for d in settings[name])
+                  and all(link <= 1 for link in settings["links"])
+                  and all(mode <= 3 for mode in settings["trigger_mode"]))
+            if ok and 3 in self.trigger_mode:
+                self.stored = settings
+            elif ok:
+                for name, value in settings.items():
+                    setattr(self, name, value)
             return bytes([ok])
         return bytes([self.ack])
 
@@ -448,6 +478,75 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     expect_error(device.trigger_mode.__setitem__, 1, 0)
     expect_error(setattr, device, "trigger_mode", ["Normal"] * 4)
     assert len(fake.writes) == 3
+
+
+def test_param_sync_is_trigger_mode_3():
+    device, fake = connect()
+    device.trigger_mode[2] = "param sync"
+    assert fake.writes == [command("T", bytes([0, 3]))]
+    assert device.trigger_mode == [None, "Normal", "Param Sync"]
+
+
+def test_auto_sync_off_keeps_settings_here_until_sync_to_device():
+    device, fake = connect()
+    device.auto_sync = False
+    device.frequency = 300
+    device.waveform[1:3] = ["Fixed Voltage", "Square"]
+    device.amplitude[1:3] = [-2.5, 3]  # A fixed voltage of -2.5 V, before the waveform would allow it
+    device.mean_voltage[2] = 1.25
+    device.resting_voltage[3] = -0.5
+    device.play_duration[4] = 0.25
+    device.on_ramp_duration[1] = 0.01
+    device.off_ramp_duration[2] = 0.02
+    device.trigger_mode = ["Toggle", "Param Sync"]
+    device.link_trigger_channel2[4] = True
+    assert fake.writes == [], fake.ops()
+    assert device.samples_per_cycle == 332 and device.frequency == 300  # As the device would work it out
+    device.sync_to_device()
+    assert fake.writes == [command("U", struct.pack(
+        "<I4B4i4i4i4I4I4I8B2B", 30000, 4, 2, 0, 0, -2_500_000, 3_000_000, 5_000_000, 5_000_000,
+        0, 1_250_000, 0, 0, 0, 0, -500_000, 0, 1_000_000, 1_000_000, 1_000_000, 250_000,
+        10_000, 0, 0, 0, 0, 20_000, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 3))]
+    assert fake.amplitude[0] == -2_500_000 and fake.trigger_mode == [1, 3]  # Applied: no channel was in param sync
+    assert device.amplitude == [None, -2.5, 3, 5, 5]
+
+
+def test_sync_to_device_in_param_sync_mode_is_stored_by_the_device():
+    device, fake = connect()
+    device.trigger_mode[1] = "Param Sync"  # Sent at once
+    device.auto_sync = False
+    device.amplitude[2] = 7
+    device.sync_to_device()
+    assert fake.stored["amplitude"] == [5_000_000, 7_000_000, 5_000_000, 5_000_000]
+    assert fake.amplitude == [5_000_000] * 4  # Not applied: it waits for an edge
+    device.auto_sync = True
+    device.trigger_mode[1] = "Normal"
+    assert fake.stored is None
+
+
+def test_sync_to_device_checks_the_whole_set():
+    device, fake = connect()
+    device.auto_sync = False
+    device.amplitude[1] = -1  # Accepted here: the waveform could still become a fixed voltage
+    error = expect_error(device.sync_to_device)
+    assert "channel 1" in str(error) and "negative" in str(error), error
+    device.amplitude[1] = 4
+    device.mean_voltage[1] = 9  # 9 V + 2 V
+    error = expect_error(device.sync_to_device)
+    assert "would reach 11 V" in str(error) and "Change amplitude or mean_voltage." in str(error), error
+    for bad in (-10.5, 20.5, "1"):
+        expect_error(device.amplitude.__setitem__, 2, bad)
+    for bad in ("yes", 2, None):
+        expect_error(setattr, device, "auto_sync", bad)
+    assert fake.writes == []
+
+
+def test_set_defaults_programs_the_device_with_auto_sync_off():
+    device, fake = connect()
+    device.auto_sync = False
+    device.set_defaults()
+    assert fake.ops() == ["F", "M", "V", "A", "W", "D", "B", "E", "T", "I"]
+    assert device.auto_sync is False
 
 
 def test_trigger_links_travel_together():

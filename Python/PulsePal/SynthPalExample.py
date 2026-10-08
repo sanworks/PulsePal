@@ -94,9 +94,21 @@ S.link_trigger_channel2[4] = True
 S.trigger_mode[2] = "Gated"
 S.play_duration[4] = 0
 
-# The other trigger mode: "Toggle" starts idle channels and stops playing
+# The other trigger modes: "Toggle" starts idle channels and stops playing
 # ones. In "Normal" mode, channels that are playing ignore a trigger.
 S.trigger_mode[1] = "Toggle"
+
+# "Param Sync": a rising edge loads the settings most recently sent by
+# sync_to_device(), and starts nothing. With auto_sync off, assignments are
+# kept here until sync_to_device() sends them all at once. Here trigger
+# channel 2 becomes the param sync channel, and the next trial's frequency
+# and amplitude wait on the device for its next rising edge.
+S.trigger_mode[2] = "Param Sync"  # Sent at once
+S.auto_sync = False
+S.frequency = 660
+S.amplitude[1] = 2
+S.sync_to_device()                # Stored: applied at the next edge
+S.auto_sync = True
 
 # Playback state, and the output range the device chose for each channel
 print(S.status())

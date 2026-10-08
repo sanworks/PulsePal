@@ -38,9 +38,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   isPlaying()
 //   isOutputActive()
 //   trigger1ISR(), trigger2ISR()
+//   triggerInterrupt()
 //   handleTriggerLine()
 //   processTriggerEdge()
 //   releaseGatedChannels()
+//   startParamSync()
+//   loadSyncedChannel()
 //
 // ---------------------------------------------------------------------------------------------------------------
 // HOW PLAYBACK WORKS
@@ -112,6 +115,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Triggers. TTL edges on the trigger channels raise an interrupt (trigger1ISR() and trigger2ISR()), so their timing
 // does not depend on a polling rate. What an edge does depends on the trigger channel's mode (processTriggerEdge()).
 // Soft triggers (op 80) start idle channels, as in Pulse Pal firmware.
+//
+// Param sync. As in Pulse Pal firmware, param sync mode (TRIGGER_MODE_PARAM_SYNC) lets the settings of the next trial
+// be sent during the current one, and applied the instant it starts. While a trigger channel is in the mode, op 85
+// (every setting at once) is stored in storedSettings instead of applied, and the channel's next rising edge loads it
+// (startParamSync()); the other ops still apply at once. The edge starts and stops nothing. At the edge:
+//   - The frequency and the trigger modes change at once: they are shared by all channels.
+//   - An output channel at rest takes its new settings at once (loadSyncedChannel()): what it plays (pendingOutput[],
+//     as for a change from loop()), its play duration, ramps and trigger links.
+//   - A channel that is playing, off ramp included, finishes on the settings it started with (at the new frequency),
+//     and takes the new ones the moment it reaches its resting voltage (paramSyncChannelsWaiting, in handler()). A
+//     second edge before then gives it the newer set.
+// The set is copied to syncedSettings at the edge, so that op 85 can store the next one meanwhile. The playback
+// interrupts never write loop()'s settings arrays (waveform[], amplitudeMicrovolts[], ...): loop() copies a channel's
+// synced settings into them on its next pass (takeSyncedSettings() in Settings.ino). When the same TTL reaches both
+// trigger channels, the param sync edge is handled first, so that a channel the other edge starts plays the new
+// settings (triggerInterrupt()). A start also takes a channel's pendingOutput[] first, for the same reason.
 //
 // Interrupt rules. handler() and the trigger interrupts run at the same priority (PLAYBACK_IRQ_PRIORITY), so neither
 // can interrupt the other. That makes it safe for both to write to the DAC over SPI. loop() calls the functions below
@@ -275,11 +294,15 @@ void handler() {
   byte nWritten = dacLoadTimed(); // Write the samples fetched on the previous run
   // Fetch the next samples while the writes settle, before the latch
   boolean anyPlaying = false;
+  byte stoppedWaiting = 0; // Channels that stop now, and were playing at a param sync edge
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (stopAfterWrite[i]) { // Its resting voltage is in this update
       playing[i] = false;
       stopAfterWrite[i] = false;
       digitalWriteFast(OutputLEDLines[i], LOW);
+      if (bitRead(paramSyncChannelsWaiting, i)) {
+        bitSet(stoppedWaiting, i);
+      }
     } else if (playing[i]) {
       anyPlaying = true;
       if (i != pendingChannel) {
@@ -294,6 +317,11 @@ void handler() {
     takePendingOutput(pendingChannel);
     if (playing[pendingChannel]) {
       fetchNextSample(pendingChannel);
+    }
+  }
+  for (byte i = 0; i < N_CHANNELS; i++) { // At rest now: they take the settings of the param sync edge (after the latch)
+    if (bitRead(stoppedWaiting, i)) {
+      loadSyncedChannel(i);
     }
   }
   if (!anyPlaying) {
@@ -365,6 +393,9 @@ void startChannels(byte channelBits) {
   }
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(toStart, i)) {
+      if (bitRead(pendingOutputChannels, i)) { // New settings handler() has not taken yet: the channel plays them
+        takePendingOutput(i);
+      }
       phase[i] = 0;
       rampStage[i] = STAGE_ON_RAMP;
       rampPosition[i] = 0;
@@ -427,11 +458,32 @@ boolean isOutputActive(byte channel) {
 
 // Pin interrupts for the trigger channels, on every edge. See setup() for their priority.
 void trigger1ISR() {
-  handleTriggerLine(0, digitalReadFast(TriggerLines[0]) == TriggerLevel);
+  triggerInterrupt(0);
 }
 
 void trigger2ISR() {
-  handleTriggerLine(1, digitalReadFast(TriggerLines[1]) == TriggerLevel);
+  triggerInterrupt(1);
+}
+
+// A trigger channel's (0 or 1) pin interrupt. When the same TTL reaches both trigger channels and one is in param sync
+// mode, either interrupt can run first: so if the other channel is in param sync mode and has just gone high, its edge
+// is handled first, and the settings load before this edge starts anything (see "Param sync" above). Its own interrupt
+// then finds the edge handled.
+void triggerInterrupt(byte triggerChannel) {
+  byte otherChannel = 1 - triggerChannel;
+  boolean levels[2] = {digitalReadFast(TriggerLines[0]) == TriggerLevel, digitalReadFast(TriggerLines[1]) == TriggerLevel};
+  if ((TriggerMode[otherChannel] == TRIGGER_MODE_PARAM_SYNC) && levels[otherChannel] &&
+      !triggerLineActive[otherChannel]) {
+    handleTriggerLine(otherChannel, true);
+    edgeHandledEarly[otherChannel] = true;
+  }
+  if (edgeHandledEarly[triggerChannel]) {
+    edgeHandledEarly[triggerChannel] = false;
+    if (levels[triggerChannel] == triggerLineActive[triggerChannel]) {
+      return; // The other channel's interrupt handled this edge, and the level has not changed since
+    }
+  }
+  handleTriggerLine(triggerChannel, levels[triggerChannel]);
 }
 
 // Handles a change on a trigger channel (0 or 1). isActive is its level now: true if the TTL is high.
@@ -454,8 +506,19 @@ void handleTriggerLine(byte triggerChannel, boolean isActive) {
 // An edge on a trigger channel (0 or 1), or a trigger from the joystick menu (a rising edge). What it does to each
 // linked output channel depends on the trigger channel's mode, as in Pulse Pal firmware: a rising edge starts an idle
 // channel in every mode, and in toggle mode it also stops a playing one. A falling edge stops a playing channel in
-// gated mode (releaseGatedChannels()).
+// gated mode (releaseGatedChannels()). In param sync mode, a rising edge loads the stored settings, and starts and stops
+// nothing: its links are ignored. That includes an edge whose set moves it to another mode, which applies from the
+// next edge.
 void processTriggerEdge(byte triggerChannel, boolean isRisingEdge) {
+  if (TriggerMode[triggerChannel] == TRIGGER_MODE_PARAM_SYNC) {
+    if (isRisingEdge) {
+      screenSaverActivity = true;
+      if (paramSyncPending) {
+        startParamSync();
+      }
+    }
+    return;
+  }
   if (!isRisingEdge) {
     if (TriggerMode[triggerChannel] == TRIGGER_MODE_GATED) {
       releaseGatedChannels(triggerChannel);
@@ -494,4 +557,56 @@ void releaseGatedChannels(byte triggerChannel) {
     }
   }
   stopChannels(toStop);
+}
+
+// A rising edge on a trigger channel in param sync mode, with a set stored (see "Param sync" above). The set becomes
+// syncedSettings, the frequency and the trigger modes change at once, and each output channel at rest takes its new
+// settings; the others take them when they stop. Playback interrupt context: it neither waits nor touches the screen
+// or the USB port. Measured: about 2us with all four channels at rest, plus about 2.5us for each one whose output range
+// changes (the DAC writes are made here only while the sample clock is stopped), and about 3us with four channels
+// playing and a new frequency.
+void startParamSync() {
+  paramSyncPending = false;
+  syncedSettings = storedSettings;
+  TriggerMode[0] = syncedSettings.triggerMode[0];
+  TriggerMode[1] = syncedSettings.triggerMode[1];
+  if (syncedSettings.frequencyCentiHz != frequencyCentiHz) {
+    // The channels still playing keep their durations from the settings arrays; those that take the set get its own
+    uint32_t newCentiHz = syncedSettings.frequencyCentiHz;
+    uint32_t newDurations[N_CHANNELS];
+    uint32_t newOnRamps[N_CHANNELS];
+    uint32_t newOffRamps[N_CHANNELS];
+    durationsInSamples(newCentiHz * samplesPerCycleFor(newCentiHz), newDurations, newOnRamps, newOffRamps);
+    applyFrequency(newCentiHz, newDurations, newOnRamps, newOffRamps);
+  }
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (isOutputActive(i)) {
+      bitSet(paramSyncChannelsWaiting, i); // It takes the set when it reaches its resting voltage
+    } else {
+      loadSyncedChannel(i);
+    }
+  }
+}
+
+// Gives an output channel at rest its settings from syncedSettings: what it plays (pendingOutput[], taken as a change
+// from loop() is), its play duration and ramps in samples at the sampling rate in use, and its trigger links. loop()
+// copies the rest into its settings arrays (takeSyncedSettings()). Playback interrupt context.
+void loadSyncedChannel(byte channel) {
+  pendingOutput[channel] = syncedSettings.output[channel];
+  if (timerRunning) {
+    bitSet(pendingOutputChannels, channel); // handler() takes it on a tick, or a start takes it first
+  } else {
+    takePendingOutput(channel);
+  }
+  uint32_t onRamp = durationToSamples(syncedSettings.onRampMicros[channel], ditherDenominator);
+  uint32_t offRamp = durationToSamples(syncedSettings.offRampMicros[channel], ditherDenominator);
+  playDurationSamples[channel] = durationToSamples(syncedSettings.playDurationMicros[channel], ditherDenominator);
+  onRampSamples[channel] = onRamp;
+  offRampSamples[channel] = offRamp;
+  onRampReciprocal[channel] = rampReciprocal(onRamp);
+  offRampReciprocal[channel] = rampReciprocal(offRamp);
+  TriggerAddress[0][channel] = syncedSettings.triggerLinks[0][channel];
+  TriggerAddress[1][channel] = syncedSettings.triggerLinks[1][channel];
+  bitClear(paramSyncChannelsWaiting, channel);
+  bitSet(syncedChannelsForLoop, channel);
 }

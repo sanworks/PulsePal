@@ -4,10 +4,14 @@ Run it after changing the Synth Pal firmware or SynthPal.py:
 
     python tests/synthpal_hardware_test.py COM3
     python tests/synthpal_hardware_test.py /dev/ttyACM0 --quick
+    python tests/synthpal_hardware_test.py COM3 --driver COM4
 
 The device must be a Pulse Pal 3 running Synth Pal firmware. Nothing needs to
 be connected to it, but the outputs play waveforms of up to +/-10 V, so
-disconnect anything that should not receive them.
+disconnect anything that should not receive them. With --driver, a Pulse Pal
+running Pulse Pal firmware, whose output channels 1 and 2 are wired to the Synth
+Pal's trigger channels 1 and 2, sends the TTL edges that the param sync tests
+need; without it, those tests are skipped.
 
 Every sample the device plays is checked: its firmware counts the samples each
 channel plays and sums their DAC codes (op 90), and each test compares them with
@@ -230,6 +234,31 @@ def configure(S, channel, waveform, amplitude, resting, mean=None):
 
 def centihz(S):
     return round(S.frequency * 100)
+
+
+class Skipped(Exception):
+    """Raised by a test that needs something this run does not have."""
+
+
+def driver_pulse(D, channels, width=0.001):
+    """A TTL pulse on the driver's output channels (1, 2 or both, together), 0 V to 4 V: the
+    Synth Pal's trigger inputs take 3 to 5 V."""
+    D.set_output_param("phase1_voltage", list(channels), [4.0] * len(channels))
+    D.set_output_param("phase1_duration", list(channels), [width] * len(channels))
+    D.set_output_param("pulse_train_duration", list(channels), [width] * len(channels))
+    D.trigger(list(channels))
+    time.sleep(width + 0.02)
+
+
+def open_driver(port):
+    """The driving Pulse Pal, set up for single positive pulses that start nothing else."""
+    D = PulsePalDevice(port)
+    channels = [1, 2, 3, 4]
+    for name, value in (("is_biphasic", 0), ("resting_voltage", 0), ("pulse_train_delay", 0),
+                        ("inter_pulse_interval", 0.001), ("burst_duration", 0), ("inter_burst_interval", 0),
+                        ("custom_train_id", 0), ("link_trigger_channel1", 0), ("link_trigger_channel2", 0)):
+        D.set_output_param(name, channels, [value] * 4)
+    return D
 
 
 def test_connection(S):
@@ -558,6 +587,137 @@ def test_settings_change_during_playback(S):
     check_played(S, 1, expected_samples(1, centihz(S)))
 
 
+def test_sync_to_device_applies_at_once_outside_param_sync(S):
+    """With no trigger channel in param sync mode, sync_to_device() programs the device at once."""
+    configure(S, 1, "Sine", 4, 0)
+    S.auto_sync = False
+    try:
+        S.frequency = 2000
+        S.waveform[1] = "Triangle"
+        S.amplitude[1] = 3
+        S.mean_voltage[1] = 1.5
+        S.resting_voltage[1] = 0.5
+        S.play_duration[1] = 0.01
+        S.sync_to_device()
+    finally:
+        S.auto_sync = True
+    status = S.status()
+    assert status.samples_per_cycle == 48 and status.output_ranges[1] == "0V:5V", status
+    S.play(1)
+    wait_until_stopped(S, [1], timeout=1)
+    check_played(S, 1, expected_samples(0.01, 200_000),
+                 expected_cycle("Triangle", 3_000_000, 500_000, 48, 1_500_000))
+    configure(S, 1, "Sine", 5, 0)
+    S.play_duration[1] = 1
+
+
+def store_next_trial(S, trigger_modes=("Normal", "Param Sync")):
+    """Put trigger channel 2 in param sync mode, and store a set for its next edge: channels 1-4 at
+    3000 Hz (32 samples per cycle), channel 1 a fixed voltage of 2 V, channels 2-4 a square wave of
+    6 V peak to peak around 1 V, all played for 10 ms."""
+    S.trigger_mode = ["Normal", "Param Sync"]
+    S.auto_sync = False
+    try:
+        S.frequency = 3000
+        S.waveform = ["Fixed Voltage", "Square", "Square", "Square"]
+        S.amplitude = [2, 6, 6, 6]
+        S.mean_voltage = [0, 1, 1, 1]
+        S.resting_voltage = 0
+        S.play_duration = 0.01
+        S.trigger_mode = list(trigger_modes)
+        S.sync_to_device()
+    finally:
+        S.auto_sync = True
+
+
+def old_settings(S):
+    """The settings before store_next_trial(): 1000 Hz, a 4 V peak to peak sine wave on every
+    channel, played for 10 ms."""
+    S.trigger_mode = ["Normal", "Normal"]
+    S.frequency = 1000
+    for channel in (1, 2, 3, 4):
+        configure(S, channel, "Sine", 4, 0)
+    S.play_duration = 0.01
+    S.link_trigger_channel1 = [True] * 4
+    S.link_trigger_channel2 = [False] * 4
+
+
+def test_param_sync_holds_the_set_until_an_edge(S):
+    """In param sync mode, sync_to_device() stores the set: the device plays on with its settings,
+    and leaving the mode discards the set."""
+    old_settings(S)
+    store_next_trial(S)
+    status = S.status()
+    assert status.samples_per_cycle == 100 and status.output_ranges[1:] == ["-5V:5V"] * 4, status
+    S.play(1)
+    wait_until_stopped(S, [1], timeout=1)
+    check_played(S, 1, 1000, expected_cycle("Sine", 4_000_000, 0, 100))
+    S.trigger_mode[2] = "Normal"  # Leaving param sync mode discards the set...
+    S.trigger_mode[2] = "Param Sync"  # ...so coming back to it finds none
+    assert S.status().samples_per_cycle == 100
+    old_settings(S)  # The class's copy holds the discarded set: back to what the device has
+
+
+def test_a_param_sync_edge_loads_the_set(S, D):
+    """A rising edge on the param sync channel loads the stored set into channels at rest, changes
+    the frequency, and starts nothing."""
+    if D is None:
+        raise Skipped("needs --driver")
+    old_settings(S)
+    store_next_trial(S)
+    driver_pulse(D, [2])
+    status = S.status()
+    assert status.playing == [], f"the param sync edge started {status.playing}"
+    assert status.samples_per_cycle == 32 and status.output_ranges[1:] == ["0V:5V"] + ["-5V:5V"] * 3, status
+    S.play([1, 2])
+    wait_until_stopped(S, [1, 2], timeout=1)
+    n = expected_samples(0.01, 300_000)
+    check_played(S, 1, n, expected_cycle("Fixed Voltage", 2_000_000, 0, 32))
+    check_played(S, 2, n, expected_cycle("Square", 6_000_000, 0, 32, 1_000_000))
+    old_settings(S)
+
+
+def test_a_channel_playing_at_the_edge_finishes_on_its_settings(S, D):
+    """A channel playing at the edge plays on with its settings (at the new frequency), and takes
+    the new ones when it stops: the next start plays them."""
+    if D is None:
+        raise Skipped("needs --driver")
+    old_settings(S)
+    S.play_duration[3] = 0
+    store_next_trial(S)
+    S.play(3)
+    time.sleep(0.05)
+    driver_pulse(D, [2])
+    status = S.status()
+    assert status.playing == [3] and status.output_ranges[3] == "-5V:5V", status  # Still the sine's range
+    played_before, _ = S._playback_checksums()
+    S.stop(3)
+    wait_until_stopped(S, [3], timeout=1)
+    assert S.status().output_ranges[3] == "-5V:5V"  # The square wave around 1 V, in its range
+    S.play(3)
+    wait_until_stopped(S, [3], timeout=1)
+    check_played(S, 3, expected_samples(0.01, 300_000), expected_cycle("Square", 6_000_000, 0, 32, 1_000_000))
+    assert played_before[3] > 1000
+    old_settings(S)
+
+
+def test_the_same_ttl_on_both_trigger_channels_plays_the_new_set(S, D):
+    """One TTL on both trigger channels: trigger channel 1 starts channel 4, trigger channel 2 loads
+    the set. The set loads first, whichever pin interrupt runs first, so channel 4 plays it."""
+    if D is None:
+        raise Skipped("needs --driver")
+    old_settings(S)
+    S.link_trigger_channel1 = [False, False, False, True]
+    for attempt in range(5):
+        store_next_trial(S)
+        driver_pulse(D, [1, 2])
+        wait_until_stopped(S, [4], timeout=1)
+        check_played(S, 4, expected_samples(0.01, 300_000), expected_cycle("Square", 6_000_000, 0, 32, 1_000_000))
+        old_settings(S)
+        S.link_trigger_channel1 = [False, False, False, True]
+    old_settings(S)
+
+
 def test_four_channels_at_100khz(S, report, seconds=10):
     """All four channels play a sine wave at 100 kHz for `seconds`, the first and last fifth of
     it in their ramps: the interrupt must leave time for the rest of the firmware, and update the
@@ -604,7 +764,10 @@ def main():
     parser.add_argument("port", help="Serial port of the Synth Pal, e.g. COM3 or /dev/ttyACM0")
     parser.add_argument("--quick", action="store_true",
                         help="Skip the test that plays four channels for 10 s")
+    parser.add_argument("--driver", metavar="PORT",
+                        help="A Pulse Pal whose outputs 1 and 2 drive the trigger channels, for the param sync tests")
     arguments = parser.parse_args()
+    D = open_driver(arguments.driver) if arguments.driver else None
 
     notes = []
     tests = [
@@ -625,12 +788,17 @@ def main():
         test_a_channel_joining_a_running_clock_plays_exactly,
         test_frequency_change_keeps_the_time_left_to_play,
         test_settings_change_during_playback,
+        test_sync_to_device_applies_at_once_outside_param_sync,
+        test_param_sync_holds_the_set_until_an_edge,
+        lambda S: test_a_param_sync_edge_loads_the_set(S, D),
+        lambda S: test_a_channel_playing_at_the_edge_finishes_on_its_settings(S, D),
+        lambda S: test_the_same_ttl_on_both_trigger_channels_plays_the_new_set(S, D),
     ]
     if not arguments.quick:
         tests.append(lambda S: test_four_channels_at_100khz(S, notes.append))
     tests.append(test_other_classes_are_refused)  # Last: it closes the connection
 
-    failures = 0
+    failures = skipped = 0
     with SynthPalDevice(arguments.port) as S:
         for test in tests:
             name = getattr(test, "__name__", "test")
@@ -640,17 +808,24 @@ def main():
             try:
                 test(S)
                 result = "ok"
+            except Skipped as reason:
+                skipped += 1
+                result = f"skipped ({reason})"
             except (AssertionError, SynthPalError) as error:
                 failures += 1
                 result = f"FAILED: {error}"
                 if not S._closed:
+                    S.auto_sync = True
                     S.stop()
             print(f"{name:<75} {time.perf_counter() - start:6.1f} s  {result}")
             while notes:
                 print("    " + notes.pop(0))
         if not S._closed:
             S.set_defaults()
-    print(f"\n{len(tests) - failures}/{len(tests)} tests passed")
+    if D is not None:
+        D.close()
+    print(f"\n{len(tests) - failures - skipped}/{len(tests) - skipped} tests passed"
+          + (f", {skipped} skipped" if skipped else ""))
     return 1 if failures else 0
 
 

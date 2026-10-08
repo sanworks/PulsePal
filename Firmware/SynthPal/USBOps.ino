@@ -258,6 +258,32 @@ void processUSBCommands() {
       TriggerMode[0] = newModes[0];
       TriggerMode[1] = newModes[1];
       interrupts();
+      updateParamSyncPending(); // A set stored for param sync mode is discarded when the last channel leaves the mode
+      PPUSB.writeByte(1);
+    } break;
+
+    case OP_SET_ALL_SETTINGS: { // Op 85 ('U'). Every setting, in the order of struct SettingsSet. See "Param sync" in
+                                // Playback.ino.
+      SettingsSet set;
+      set.frequencyCentiHz = PPUSB.readUint32();
+      PPUSB.readByteArray(set.waveform, N_CHANNELS);
+      PPUSB.readUint32Array((uint32_t*)set.amplitudeMicrovolts, N_CHANNELS); // Two's complement, so the bytes are the same
+      PPUSB.readUint32Array((uint32_t*)set.meanVoltageMicrovolts, N_CHANNELS);
+      PPUSB.readUint32Array((uint32_t*)set.restingVoltageMicrovolts, N_CHANNELS);
+      PPUSB.readUint32Array(set.playDurationMicros, N_CHANNELS);
+      PPUSB.readUint32Array(set.onRampMicros, N_CHANNELS);
+      PPUSB.readUint32Array(set.offRampMicros, N_CHANNELS);
+      PPUSB.readByteArray(&set.triggerLinks[0][0], 2 * N_CHANNELS);
+      PPUSB.readByteArray(set.triggerMode, 2);
+      if (PPUSB.timedOut() || !isValidSettingsSet(set)) { // A set whose read timed out is mostly zeros: never stored
+        PPUSB.writeByte(0);
+        break;
+      }
+      if (paramSyncEnabled()) {
+        storeSettings(set); // For the next rising edge of a trigger channel in param sync mode
+      } else {
+        applySettings(set);
+      }
       PPUSB.writeByte(1);
     } break;
 

@@ -72,6 +72,25 @@ waveform's cycle, and plays its play duration again. A channel stopped
 during its on ramp fades out from where it is, at the off ramp's rate.
 The output never jumps.
 
+## Param sync
+
+`"Param Sync"`, Pulse Pal's param sync trigger mode, lets the settings of
+the next trial be sent during the current one, and applied the instant it
+starts. Set `SynthPalDevice.auto_sync` to `False`, change settings (they
+are then kept here, not sent), and call `SynthPalDevice.sync_to_device`:
+while a trigger channel is in param sync mode, the device stores the
+whole set, and that channel's next rising edge loads it.
+
+```python
+S.trigger_mode[2] = "Param Sync"   # sent at once: auto_sync is on
+S.auto_sync = False
+S.frequency = 880
+S.amplitude[1] = 2
+S.sync_to_device()                 # stored for trigger channel 2's next edge
+```
+
+See `SynthPalDevice.trigger_mode` for what the edge does.
+
 ## License
 
 This file is part of the Sanworks PulsePal repository.
@@ -108,7 +127,7 @@ FIXED_VOLTAGE = "Fixed Voltage"  # Its amplitude is a voltage, not peak to peak
 
 # Trigger modes in order of their code on the device. These are Pulse Pal's
 # trigger modes, with the same codes.
-TRIGGER_MODES = ("Normal", "Toggle", "Gated")
+TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync")
 
 # The output ranges the device chooses from, in order of their index on the
 # device, with their limits in volts. See "Output ranges" in
@@ -344,6 +363,7 @@ class SynthPalDevice:
     _OP_SET_OFF_RAMP_DURATION = ord("E")
     _OP_SET_TRIGGER_LINKS = ord("I")
     _OP_SET_TRIGGER_MODE = ord("T")
+    _OP_SET_ALL_SETTINGS = ord("U")
     _OP_PLAY = ord("P")
     _OP_STOP = ord("X")
     _OP_GET_STATUS = ord("G")
@@ -373,6 +393,7 @@ class SynthPalDevice:
             serial.SerialException: If the serial port cannot be opened.
         """
         self._closed = True
+        self._auto_sync = True
         self.info = DeviceInfo()
         self._frequency = None
         self._samples_per_cycle = None
@@ -492,8 +513,17 @@ class SynthPalDevice:
         0 V, resting at 0 V, played for 1 second with no ramps. Both
         trigger channels are in normal mode, and all output channels are
         linked to trigger channel 1 and not to trigger channel 2. They
-        match the settings the device starts with.
+        match the settings the device starts with. They are sent at once,
+        also while `SynthPalDevice.auto_sync` is off.
         """
+        auto_sync = self._auto_sync
+        self._auto_sync = True
+        try:
+            self._program_defaults()
+        finally:
+            self._auto_sync = auto_sync
+
+    def _program_defaults(self):
         self.frequency = 100
         # In this order, each is valid whatever the device holds: a mean
         # of 0 V goes with any amplitude, a resting voltage with any
@@ -535,15 +565,77 @@ class SynthPalDevice:
                 f"frequency must be {self.info.min_frequency:g} to "
                 f"{self.info.max_frequency:g} Hz. Received {value!r}."
             )
-        self._write_command(self._OP_SET_FREQUENCY,
-                            struct.pack("<I", centihz))
-        confirmed, samples_per_cycle = struct.unpack(
-            "<BI", self._read_raw(5))
-        if confirmed != 1:
-            raise SynthPalError(
-                f"Synth Pal rejected the frequency {value!r} Hz.")
+        if self._auto_sync:
+            self._write_command(self._OP_SET_FREQUENCY,
+                                struct.pack("<I", centihz))
+            confirmed, samples_per_cycle = struct.unpack(
+                "<BI", self._read_raw(5))
+            if confirmed != 1:
+                raise SynthPalError(
+                    f"Synth Pal rejected the frequency {value!r} Hz.")
+        else:
+            # As the device works it out (see samples_per_cycle)
+            samples_per_cycle = 4 * (2_500_000 // centihz)
         self._frequency = centihz / 100
         self._samples_per_cycle = samples_per_cycle
+
+    @property
+    def auto_sync(self):
+        """Whether assigning a setting programs the device at once.
+
+        `True` (the default): each assignment, such as `S.amplitude[1] = 2`,
+        programs the device at once, as the device's own op for that
+        setting does, also while a trigger channel is in param sync mode.
+
+        `False`: assignments change only this object's copy of the settings,
+        checking each value; `SynthPalDevice.sync_to_device` then sends all
+        of them at once, and checks that they go together. Use it to store
+        the next trial's settings for a param sync edge (see
+        `SynthPalDevice.trigger_mode`), or to change several settings in one
+        command. Turning it back on does not send changes made meanwhile:
+        call `SynthPalDevice.sync_to_device` first. `play`, `stop`,
+        `status` and `set_defaults` act at once either way.
+        """
+        return self._auto_sync
+
+    @auto_sync.setter
+    def auto_sync(self, value):
+        self._auto_sync = self._to_bool(value, "auto_sync")
+
+    def sync_to_device(self):
+        """Send every setting to the device in one command.
+
+        While a trigger channel is in param sync mode, the device stores
+        the set, replacing any set stored before, and that channel's next
+        rising edge loads it (see `SynthPalDevice.trigger_mode`). Otherwise
+        the device applies it at once. The settings sent are this object's:
+        `frequency`, and for each channel `waveform`, `amplitude`,
+        `mean_voltage`, `resting_voltage`, `play_duration`,
+        `on_ramp_duration`, `off_ramp_duration`, `link_trigger_channel1`
+        and `link_trigger_channel2`, and `trigger_mode`. They read as sent,
+        including while a set waits for its edge.
+
+        Raises:
+            SynthPalError: If a channel's levels do not suit its waveform
+                (nothing is sent), or the device rejects the set.
+        """
+        self._check_output_levels(self._waveform[1:], self._amplitude_uv[1:],
+                                  self._mean_uv[1:], "sync")
+        links = [int(link) for link in (*self._link_trigger_channel1[1:],
+                                        *self._link_trigger_channel2[1:])]
+        payload = struct.pack(
+            "<I4B4i4i4i4I4I4I8B2B",
+            round(self._frequency * 100),
+            *(WAVEFORMS.index(name) for name in self._waveform[1:]),
+            *self._amplitude_uv[1:], *self._mean_uv[1:], *self._resting_uv[1:],
+            *(round(d * 1e6) for d in self._play_duration[1:]),
+            *(round(d * 1e6) for d in self._on_ramp_duration[1:]),
+            *(round(d * 1e6) for d in self._off_ramp_duration[1:]),
+            *links,
+            *(TRIGGER_MODES.index(name) for name in self._trigger_mode[1:]),
+        )
+        self._write_command(self._OP_SET_ALL_SETTINGS, payload)
+        self._read_ack("sync_to_device()")
 
     @property
     def samples_per_cycle(self):
@@ -727,6 +819,31 @@ class SynthPalDevice:
           also gated, linked to them, and still high. With a play
           duration of 0, a channel plays for exactly as long as the TTL is
           high.
+        - `"Param Sync"`: a rising edge starts and stops nothing (the
+          channel's links are ignored). It loads the settings most recently
+          sent by `SynthPalDevice.sync_to_device`, if any. This is how the
+          next trial's settings are sent during the current trial and
+          applied the instant it starts.
+
+        At a param sync edge, the frequency and both trigger modes change
+        at once: they are shared by all channels. An output channel at its
+        resting voltage takes its new settings at once. One that is playing
+        (off ramp included) finishes on the settings it started with, at
+        the new frequency, and takes the new ones the moment it reaches its
+        resting voltage, so the next trigger plays them. A trigger mode
+        sent by `SynthPalDevice.sync_to_device` applies from the next
+        edge.
+
+        Only `SynthPalDevice.sync_to_device` is held back for the edge:
+        with `SynthPalDevice.auto_sync` on, every assignment programs the
+        device at once, also in param sync mode. So leaving param sync mode
+        means assigning `trigger_mode` with `auto_sync` on. When no trigger
+        channel is left in the mode, the device discards a stored set.
+
+        To start channels on the same edge, wire the TTL to the other
+        trigger channel too: the settings load first, so the channels it
+        starts play the new settings. Connecting, and `set_defaults`, take
+        both trigger channels out of param sync mode.
 
         Names are not case sensitive.
         """
@@ -936,6 +1053,7 @@ class SynthPalDevice:
             f"play_duration: {list(self._play_duration)}\n"
             f"on_ramp_duration: {list(self._on_ramp_duration)}\n"
             f"off_ramp_duration: {list(self._off_ramp_duration)}\n"
+            f"auto_sync: {self._auto_sync}\n"
             f"trigger_mode: {list(self._trigger_mode)}\n"
             f"link_trigger_channel1: {list(self._link_trigger_channel1)}\n"
             f"link_trigger_channel2: {list(self._link_trigger_channel2)}"
@@ -1013,19 +1131,24 @@ class SynthPalDevice:
                     f"{', '.join(WAVEFORMS)}."
                 )
             names.append(matches[0])
-        self._check_output_levels(names, self._amplitude_uv[1:],
-                                  self._mean_uv[1:], "waveform")
-        self._write_command(
-            self._OP_SET_WAVEFORM,
-            bytes(WAVEFORMS.index(name) for name in names),
-        )
-        self._read_ack("setting waveform")
+        if self._auto_sync:
+            self._check_output_levels(names, self._amplitude_uv[1:],
+                                      self._mean_uv[1:], "waveform")
+            self._write_command(
+                self._OP_SET_WAVEFORM,
+                bytes(WAVEFORMS.index(name) for name in names),
+            )
+            self._read_ack("setting waveform")
         return names
 
     def _apply_amplitude(self, values):
         volts = []
         for channel, value in enumerate(values, start=1):
-            if self._waveform[channel] == FIXED_VOLTAGE:
+            if not self._auto_sync:  # The waveform may change too before sync_to_device()
+                volts.append(self._to_volts(
+                    value, "amplitude", -10, 20,
+                    " (0 to 20 peak to peak, or -10 to 10 for a Fixed Voltage)"))
+            elif self._waveform[channel] == FIXED_VOLTAGE:
                 volts.append(self._to_volts(
                     value, "amplitude", -10, 10,
                     " on a Fixed Voltage channel: the voltage it steps to"))
@@ -1036,11 +1159,12 @@ class SynthPalDevice:
                     f"(channel {channel}). Only a Fixed Voltage can be "
                     "negative"))
         microvolts = [round(v * 1e6) for v in volts]
-        self._check_output_levels(self._waveform[1:], microvolts,
-                                  self._mean_uv[1:], "amplitude")
-        self._write_command(self._OP_SET_AMPLITUDE,
-                            struct.pack("<4i", *microvolts))
-        self._read_ack("setting amplitude")
+        if self._auto_sync:
+            self._check_output_levels(self._waveform[1:], microvolts,
+                                      self._mean_uv[1:], "amplitude")
+            self._write_command(self._OP_SET_AMPLITUDE,
+                                struct.pack("<4i", *microvolts))
+            self._read_ack("setting amplitude")
         self._amplitude_uv[1:] = microvolts
         return volts
 
@@ -1048,11 +1172,13 @@ class SynthPalDevice:
         volts = [self._to_volts(value, "mean_voltage", -10, 10)
                  for value in values]
         microvolts = [round(v * 1e6) for v in volts]
-        self._check_output_levels(self._waveform[1:], self._amplitude_uv[1:],
-                                  microvolts, "mean_voltage")
-        self._write_command(self._OP_SET_MEAN_VOLTAGE,
-                            struct.pack("<4i", *microvolts))
-        self._read_ack("setting mean_voltage")
+        if self._auto_sync:
+            self._check_output_levels(self._waveform[1:],
+                                      self._amplitude_uv[1:], microvolts,
+                                      "mean_voltage")
+            self._write_command(self._OP_SET_MEAN_VOLTAGE,
+                                struct.pack("<4i", *microvolts))
+            self._read_ack("setting mean_voltage")
         self._mean_uv[1:] = microvolts
         return volts
 
@@ -1061,9 +1187,10 @@ class SynthPalDevice:
         volts = [self._to_volts(value, "resting_voltage", -10, 10)
                  for value in values]
         microvolts = [round(v * 1e6) for v in volts]
-        self._write_command(self._OP_SET_RESTING_VOLTAGE,
-                            struct.pack("<4i", *microvolts))
-        self._read_ack("setting resting_voltage")
+        if self._auto_sync:
+            self._write_command(self._OP_SET_RESTING_VOLTAGE,
+                                struct.pack("<4i", *microvolts))
+            self._read_ack("setting resting_voltage")
         self._resting_uv[1:] = microvolts
         return volts
 
@@ -1093,18 +1220,20 @@ class SynthPalDevice:
                        "waveform" else "")
                 )
             elif 2 * abs(mean) + amplitude > 2 * self._MAX_VOLTAGE_UV:
-                other = {"amplitude": "mean_voltage",
-                         "mean_voltage": "amplitude",
-                         "waveform": "amplitude or mean_voltage"}[setting]
+                advice = {
+                    "amplitude": "Change mean_voltage first, or choose a "
+                                 "smaller amplitude.",
+                    "mean_voltage": "Change amplitude first, or choose a "
+                                    "smaller mean_voltage.",
+                    "waveform": "Change amplitude or mean_voltage first.",
+                    "sync": "Change amplitude or mean_voltage.",
+                }[setting]
                 raise SynthPalError(
                     f"On channel {channel}, a mean voltage of "
                     f"{mean / 1e6:g} V and an amplitude of "
                     f"{amplitude / 1e6:g} V peak to peak would reach "
                     f"{(abs(mean) + amplitude / 2) / 1e6:g} V. The "
-                    "waveform must stay within -10 V to 10 V. Change "
-                    f"{other} first"
-                    + (f", or choose a smaller {setting}."
-                       if setting != "waveform" else ".")
+                    f"waveform must stay within -10 V to 10 V. {advice}"
                 )
 
     def _apply_play_duration(self, values):
@@ -1139,8 +1268,9 @@ class SynthPalDevice:
                 )
             durations.append(duration)
         microseconds = [round(d * 1e6) for d in durations]
-        self._write_command(op, struct.pack("<4I", *microseconds))
-        self._read_ack(f"setting {name}")
+        if self._auto_sync:
+            self._write_command(op, struct.pack("<4I", *microseconds))
+            self._read_ack(f"setting {name}")
         return durations
 
     def _apply_trigger_mode(self, values):
@@ -1155,11 +1285,12 @@ class SynthPalDevice:
                     f"{', '.join(TRIGGER_MODES)}."
                 )
             names.append(matches[0])
-        self._write_command(
-            self._OP_SET_TRIGGER_MODE,
-            bytes(TRIGGER_MODES.index(name) for name in names),
-        )
-        self._read_ack("setting trigger_mode")
+        if self._auto_sync:
+            self._write_command(
+                self._OP_SET_TRIGGER_MODE,
+                bytes(TRIGGER_MODES.index(name) for name in names),
+            )
+            self._read_ack("setting trigger_mode")
         return names
 
     # One op programs both trigger channels' links, so each list is sent
@@ -1182,9 +1313,10 @@ class SynthPalDevice:
         list.__setitem__(self._link_trigger_channel2, slice(1, 5), links2)
 
     def _send_trigger_links(self, links1, links2):
-        self._write_command(self._OP_SET_TRIGGER_LINKS,
-                            bytes([*map(int, links1), *map(int, links2)]))
-        self._read_ack("setting the trigger channel links")
+        if self._auto_sync:
+            self._write_command(self._OP_SET_TRIGGER_LINKS,
+                                bytes([*map(int, links1), *map(int, links2)]))
+            self._read_ack("setting the trigger channel links")
 
     @staticmethod
     def _to_volts(value, name, low, high, note=""):

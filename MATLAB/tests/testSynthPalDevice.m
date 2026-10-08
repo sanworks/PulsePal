@@ -37,7 +37,7 @@ function testSynthPalDevice(portString)
 tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAreExactInSamples, ...
     @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
-    @testSettingsChangeDuringPlayback, @testInvalidArgumentsAreRefused};
+    @testSettingsChangeDuringPlayback, @testSyncToDevice, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused};
 S = SynthPalDevice(portString);
 nFailed = 0;
 for i = 1:numel(tests)
@@ -244,6 +244,56 @@ assert(elapsed > 0.95 && elapsed < 1.2, 'channel 4 played for %.3f s', elapsed);
 checkPlayed(S, 4, expectedSamples(S, 1));
 end
 
+function testSyncToDevice(S)
+% With autoSync off, settings change only the object's copy, and syncToDevice() sends them all: with no trigger
+% channel in param sync mode, the device applies them at once
+S.frequency = 1000;
+S.autoSync = false;
+cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
+S.frequency = 2000;
+S.waveform{1} = 'Fixed Voltage';
+S.amplitude(1) = 2;
+S.restingVoltage(1) = 0.5;
+S.playDuration(1) = 0.005;
+assert(S.status().samplesPerCycle == 100, 'a setting reached the device before syncToDevice()');
+assert(S.samplesPerCycle == 48, 'samplesPerCycle %d, expected 48', S.samplesPerCycle);
+S.syncToDevice();
+status = S.status();
+assert(status.samplesPerCycle == 48 && strcmp(status.outputRanges{1}, '0V:5V'), 'the set was not applied');
+S.play(1);
+waitUntilStopped(S, 1, 1);
+checkPlayed(S, 1, 480, 480*round(2/5*65536)); % 5 ms at 96 kHz, at the fixed voltage's code
+S.autoSync = true;
+setChannel(S, 1, 'Sine', 5, 0);
+S.playDuration(1) = 1;
+end
+
+function testParamSyncStoresTheSet(S)
+% While a trigger channel is in param sync mode, syncToDevice() stores the set for its next rising edge: the device
+% plays on with its settings. Leaving the mode discards the set.
+S.frequency = 1000;
+setChannel(S, 1, 'Fixed Voltage', 1, 0);
+S.playDuration(1) = 0.005;
+S.triggerMode{2} = 'Param Sync';
+S.autoSync = false;
+cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
+S.amplitude(1) = 3;
+S.frequency = 2000;
+S.syncToDevice();
+assert(S.status().samplesPerCycle == 100, 'the stored set was applied');
+S.play(1);
+waitUntilStopped(S, 1, 1);
+checkPlayed(S, 1, 500, 500*round(1/5*65536)); % Still the fixed voltage of 1 V, at 100 kHz
+S.autoSync = true;
+S.triggerMode{2} = 'Normal'; % Discards the stored set
+S.triggerMode{2} = 'Param Sync';
+assert(S.status().samplesPerCycle == 100, 'a discarded set was applied');
+S.triggerMode{2} = 'Normal';
+S.frequency = 1000; % The object's copy held the discarded set
+setChannel(S, 1, 'Sine', 5, 0);
+S.playDuration(1) = 1;
+end
+
 function testInvalidArgumentsAreRefused(S)
 % Each must raise an error without changing the setting
 setLevels(S, 1, 2, 9);
@@ -267,6 +317,13 @@ expectError(@() setProperty(S, 'linkTriggerChannel1', [1 0 2 0]));
 expectError(@() S.play([1 7]));
 expectError(@() S.play([]));
 expectError(@() S.setScreenSaver(2));
+expectError(@() setProperty(S, 'autoSync', 2));
+expectError(@() setProperty(S, 'triggerMode', 'Sync'));
+S.autoSync = false;
+S.amplitude(2) = -1; % Accepted here: the waveform could still become a fixed voltage...
+expectError(@() S.syncToDevice()); % ...but not with a sine wave
+S.amplitude(2) = 5;
+S.autoSync = true;
 assert(S.amplitude(1) == 2 && S.meanVoltage(1) == 9 && S.restingVoltage(1) == 9, 'a refused level was changed');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'a refused trigger mode was changed');
 setLevels(S, 1, 5, 0);

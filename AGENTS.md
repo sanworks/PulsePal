@@ -13,7 +13,7 @@ files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse 
 | `/Firmware/PulsePal3/` | Current firmware, for **both** Pulse Pal 2 and Pulse Pal 3. Read its `AGENTS.md` before changing it |
 | `/Firmware/PROTOCOL.md` | The USB serial protocol: op codes, parameter codes, replies, settings file layout |
 | `/Firmware/WavePal/` | Wave Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform player. Its own `AGENTS.md` and `PROTOCOL.md` |
-| `/Firmware/SynthPal/` | Synth Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (sine, triangle, square, sawtooth, fixed voltage). Its own `AGENTS.md` and `PROTOCOL.md` |
+| `/Firmware/SynthPal/` | Synth Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (sine, triangle, square, sawtooth, fixed voltage), with Pulse Pal's trigger modes, param sync included. Its own `AGENTS.md` and `PROTOCOL.md` |
 | `/Firmware/tools/` | `build_check.py`: compiles both hardware versions (or Wave Pal and Synth Pal, with `--sketch wavepal` and `--sketch synthpal`), and compares compiled functions between git revisions |
 | `/Firmware/Old/` | Archived firmware, no longer developed |
 | `/Python/PulsePal/` | Python class, GUI and offline tests. `WavePal.py` and `SynthPal.py` are the Python classes for Wave Pal and Synth Pal |

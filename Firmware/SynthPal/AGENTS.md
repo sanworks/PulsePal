@@ -3,7 +3,8 @@
 Synth Pal is alternative firmware for Pulse Pal 3 hardware (Teensy 4.1): a four channel waveform
 synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
 fixed voltage, with its own amplitude, mean voltage, resting voltage, play duration, and linear
-on and off ramps, when a TTL edge, a USB command or the joystick menu triggers it. One
+on and off ramps, when a TTL edge, a USB command or the joystick menu triggers it. The trigger
+channels have Pulse Pal's trigger modes, param sync included. One
 frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four. The USB protocol is in
 `PROTOCOL.md` in this folder. Read this page before changing anything here.
 
@@ -92,22 +93,52 @@ joystick button line as the DAC's SYNC output. Synth Pal needs no microSD card.
    fixed** once a client is released. Add new op codes rather than changing existing ones. The
    EEPROM addresses are Pulse Pal firmware's, and must stay so.
 10. **Use ArCOM for USB, and only from `loop()`**, as in Pulse Pal firmware. See `ArCOM.h`.
+11. **Anything except a param sync edge that sets `TriggerMode` must then call
+    `updateParamSyncPending()`**, as in Pulse Pal firmware: otherwise a set stored for param sync
+    mode survives the channel leaving the mode, and loads at a later edge. Op 84, op 85 applied at
+    once, the menu and `LoadDefaultSettings()` do.
+12. **The playback interrupts never write `loop()`'s settings arrays** (`waveform[]`,
+    `amplitudeMicrovolts[]`, `playDurationMicros[]`, ...). At a param sync edge they change only
+    what playback reads (`pendingOutput[]`, the durations in samples, `TriggerAddress`,
+    `TriggerMode`, the sample clock), and `loop()` copies the synced settings into its arrays on
+    its next pass (`takeSyncedSettings()`). An op that `loop()` is part way through when the edge
+    comes would otherwise work from half old, half new settings.
 
 ## What runs in the playback interrupts
 
 | Interrupt | Entry point | When |
 |---|---|---|
 | Sample clock | `handler()` | Every sample period while a channel plays. `startChannels()` starts the clock, and `handler()` stops it when no channel plays |
-| Trigger channels | `trigger1ISR()`, `trigger2ISR()` | Every edge on the trigger inputs |
+| Trigger channels | `trigger1ISR()`, `trigger2ISR()` (both call `triggerInterrupt()`) | Every edge on the trigger inputs |
 
 They call `startChannels()`, `stopChannels()`, `processTriggerEdge()`,
-`releaseGatedChannels()`, `takePendingOutput()`, `fetchNextSample()`, `continueRamp()`,
-`startSampleClock()`, `stopSampleClock()` and the DAC functions. Shared with `loop()`: the
-playback state (`playing`, `stopAfterWrite`, `phase`, `rampStage`, `rampPosition`,
-`holdSamples`, `fetchedEnvelope`, `samplesPlayed`, ...), the sample clock variables,
-`activeOutput`, `pendingOutput`, `pendingOutputChannels`, `playDurationSamples`, the ramp
-lengths (`onRampSamples`, `offRampSamples` and their reciprocals), the trigger settings
-(`TriggerMode`, `TriggerAddress`) and the DAC state.
+`releaseGatedChannels()`, `startParamSync()`, `loadSyncedChannel()`, `takePendingOutput()`,
+`fetchNextSample()`, `continueRamp()`, `applyFrequency()`, `startSampleClock()`,
+`stopSampleClock()` and the DAC functions. Shared with `loop()`: the playback state (`playing`,
+`stopAfterWrite`, `phase`, `rampStage`, `rampPosition`, `holdSamples`, `fetchedEnvelope`,
+`samplesPlayed`, ...), the sample clock variables, `activeOutput`, `pendingOutput`,
+`pendingOutputChannels`, `playDurationSamples`, the ramp lengths (`onRampSamples`,
+`offRampSamples` and their reciprocals), the trigger settings (`TriggerMode`, `TriggerAddress`),
+param sync's `storedSettings`, `syncedSettings`, `paramSyncPending`,
+`paramSyncChannelsWaiting` and `syncedChannelsForLoop`, and the DAC state.
+
+When one TTL reaches both trigger channels and one is in param sync mode, the GPIO interrupt
+handles trigger channel 1's pin first. `triggerInterrupt()` therefore handles the other
+channel's param sync edge before a start: without it, a channel started by trigger channel 1
+played the old settings (10 times out of 10, with the set loaded on trigger channel 2). "Param
+sync" in `Playback.ino` explains the rest.
+
+Param sync costs, measured with the trigger interrupt's own cycle count:
+
+| At a sync edge | Trigger interrupt |
+|---|---|
+| Four channels at rest, all changing output range, new frequency | 12.1 µs |
+| Four channels at rest, no range change | 2.0 µs |
+| Four channels playing (they wait), new frequency | 2.8 µs |
+| For comparison: a normal edge starting four idle channels | 2.8 µs |
+
+A range change needs DAC writes (about 2.5 µs per channel), made at the edge only while the
+sample clock is stopped; while it runs, `handler()` takes them one channel per tick.
 
 A channel in its off ramp is `playing` but not `isPlaying()`: a trigger starts it again, as if
 it had stopped, and `isOutputActive()` (op 71's playing bits, the settings that rescale a
@@ -131,6 +162,9 @@ With a Synth Pal on a USB port (about 25 s; `--quick` skips the 10 s four channe
 
 ```bash
 cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3
+
+# With a Pulse Pal (Pulse Pal firmware) whose outputs 1 and 2 drive the trigger channels 1 and 2
+cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3 --driver COM4
 ```
 
 It checks every sample played against a model of the firmware's synthesis, which computes each
@@ -139,8 +173,10 @@ DAC code as `synthesizeCode()` does, in single precision (`ChannelModel`): every
 exactly at the mean voltage, whatever the resting voltage, play durations exact to the sample,
 every code of the on and off ramps, a stop at full amplitude, a trigger during the off ramp,
 frequency and setting changes during playback, a channel joining a running clock, the
-firmware's own checks of the levels (with commands sent past the class's checks), and the
-timing budget with four channels in their ramps. A change to the synthesis must change the
+firmware's own checks of the levels (with commands sent past the class's checks), op 85
+applied at once and stored in param sync mode, and the timing budget with four channels in their
+ramps. With `--driver`, it also sends param sync edges: a set loaded into channels at rest, a
+channel playing at the edge finishing first, and one TTL on both trigger channels. A change to the synthesis must change the
 model too. `synthesizeCode()`'s multiply-adds are explicit `fmaf()` calls, so that each rounds
 once whatever the compiler would do: it fused the full amplitude one by itself when the ramps
 were added, and the model went one code wrong in a few samples.
@@ -184,6 +220,8 @@ triggers or the menu, check:
 - After a power cycle (unplug the USB cable, plug it back in), all four outputs play. Flashing
   the device does not reset the DAC, so a test right after flashing over other firmware cannot
   catch a fault in `setup()` (rule 4).
+- Param sync from the menu: the trigger mode editor offers "Param Sync"; "Trigger Now" on a
+  param sync channel loads a stored set (and starts nothing).
 - Unplug the USB cable during a transfer: the device shows "COMM. FAILURE!", playback stops, and
   a click loads the default settings.
 

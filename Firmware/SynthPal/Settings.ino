@@ -28,6 +28,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   samplesPerCycleFor()
 //   durationToSamples()
 //   rampReciprocal()
+//   durationsInSamples()
+//   applyFrequency()
 //   setFrequency()
 //   setPlayDurations()
 //   setRampDurations()
@@ -36,8 +38,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   outputRangeFor()
 //   exactCode()
 //   nearestCode()
+//   channelOutputFor()
 //   updateChannelOutput()
 //   takePendingOutputIfIdle()
+//   paramSyncEnabled()
+//   updateParamSyncPending()
+//   isValidSettingsSet()
+//   applySettings()
+//   storeSettings()
+//   takeSyncedSettings()
 //   LoadDefaultSettings()
 //
 // OUTPUT RANGES
@@ -76,22 +85,23 @@ float rampReciprocal(uint32_t samples) {
   return (samples == 0) ? 0.0f : (1.0f / (float)samples);
 }
 
-// Sets the frequency of all output channels, in centiHz (MIN_FREQUENCY_CENTIHZ to MAX_FREQUENCY_CENTIHZ), and the
-// sample clock that plays it. Takes effect at once, also during playback: each playing channel keeps its place in the
-// cycle, the time it has left to play and the envelope its ramp has reached, and the next sample period has the new
-// length. Called from loop().
-void setFrequency(uint32_t newCentiHz) {
+// Each channel's play duration and ramps (from the settings arrays) in samples, at a sampling rate in centiHz
+void durationsInSamples(uint32_t samplingRateCentiHz, uint32_t *durations, uint32_t *onRamps, uint32_t *offRamps) {
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    durations[i] = durationToSamples(playDurationMicros[i], samplingRateCentiHz);
+    onRamps[i] = durationToSamples(onRampMicros[i], samplingRateCentiHz);
+    offRamps[i] = durationToSamples(offRampMicros[i], samplingRateCentiHz);
+  }
+}
+
+// Sets the frequency of all output channels, in centiHz, and the sample clock that plays it, with each channel's play
+// duration and ramps in samples at the new sampling rate (durationsInSamples()). Each playing channel keeps its place in
+// the cycle, the time it has left to play and the envelope its ramp has reached, and the next sample period has the new
+// length. Playback interrupt context (a param sync edge), or loop() with interrupts disabled (setFrequency()).
+void applyFrequency(uint32_t newCentiHz, const uint32_t *newDurations, const uint32_t *newOnRamps,
+                    const uint32_t *newOffRamps) {
   uint32_t newSamplesPerCycle = samplesPerCycleFor(newCentiHz);
   uint32_t newDenominator = newCentiHz * newSamplesPerCycle; // The sampling rate in centiHz, at most 10 million
-  uint32_t newDurations[N_CHANNELS];
-  uint32_t newOnRamps[N_CHANNELS];
-  uint32_t newOffRamps[N_CHANNELS];
-  for (byte i = 0; i < N_CHANNELS; i++) {
-    newDurations[i] = durationToSamples(playDurationMicros[i], newDenominator);
-    newOnRamps[i] = durationToSamples(onRampMicros[i], newDenominator);
-    newOffRamps[i] = durationToSamples(offRampMicros[i], newDenominator);
-  }
-  noInterrupts();
   uint32_t oldSamplesPerCycle = samplesPerCycle;
   uint32_t oldDenominator = ditherDenominator;
   for (byte i = 0; i < N_CHANNELS; i++) {
@@ -127,6 +137,18 @@ void setFrequency(uint32_t newCentiHz) {
     nextPeriodLoad = nextSamplePeriodTicks() - 1;
     sampleClockChannel->LDVAL = nextPeriodLoad;
   }
+}
+
+// Sets the frequency of all output channels, in centiHz (MIN_FREQUENCY_CENTIHZ to MAX_FREQUENCY_CENTIHZ). Takes effect at
+// once, also during playback (see applyFrequency()). Called from loop(): the durations are worked out before interrupts
+// are disabled, to keep that short.
+void setFrequency(uint32_t newCentiHz) {
+  uint32_t newDurations[N_CHANNELS];
+  uint32_t newOnRamps[N_CHANNELS];
+  uint32_t newOffRamps[N_CHANNELS];
+  durationsInSamples(newCentiHz * samplesPerCycleFor(newCentiHz), newDurations, newOnRamps, newOffRamps);
+  noInterrupts();
+  applyFrequency(newCentiHz, newDurations, newOnRamps, newOffRamps);
   interrupts();
 }
 
@@ -229,31 +251,38 @@ uint16_t nearestCode(double code) {
   return (nearest > 65535) ? 65535 : (uint16_t)nearest;
 }
 
-// Works out what an output channel plays from its settings (waveform[], amplitudeMicrovolts[], meanVoltageMicrovolts[]
-// and restingVoltageMicrovolts[], which the caller has checked with isValidOutputLevel()), and hands it to the playback
-// interrupts. See "Output ranges" above. Called from loop().
-void updateChannelOutput(byte channel) {
+// What an output channel plays, worked out from a waveform and levels that isValidOutputLevel() accepts. See "Output
+// ranges" above.
+ChannelOutput channelOutputFor(byte shape, int32_t restingMicrovolts, int32_t meanMicrovolts, int32_t amplitudeMicrovolts) {
   ChannelOutput out;
-  out.waveform = waveform[channel];
-  out.range = outputRangeFor(out.waveform, restingVoltageMicrovolts[channel], meanVoltageMicrovolts[channel],
-                             amplitudeMicrovolts[channel]);
+  out.waveform = shape;
+  out.range = outputRangeFor(shape, restingMicrovolts, meanMicrovolts, amplitudeMicrovolts);
   double codesPerMicrovolt = 65536.0 / (rangeMaxMicrovolts[out.range] - rangeMinMicrovolts[out.range]);
-  double restingCode = exactCode(restingVoltageMicrovolts[channel], out.range);
+  double restingCode = exactCode(restingMicrovolts, out.range);
   out.restCode = nearestCode(restingCode);
   out.restCodeFraction = (float)(restingCode - floor(restingCode + 0.5));
-  double meanCode = exactCode(meanVoltageMicrovolts[channel], out.range);
+  double meanCode = exactCode(meanMicrovolts, out.range);
   out.meanCode = nearestCode(meanCode);
   out.meanCodeFraction = (float)(meanCode - floor(meanCode + 0.5));
-  if (out.waveform == WAVEFORM_FIXED_VOLTAGE) { // The amplitude is a voltage, rounded to a code as the resting voltage is
-    double fixedCode = exactCode(amplitudeMicrovolts[channel], out.range);
+  if (shape == WAVEFORM_FIXED_VOLTAGE) { // The amplitude is a voltage, rounded to a code as the resting voltage is
+    double fixedCode = exactCode(amplitudeMicrovolts, out.range);
     out.fixedCode = nearestCode(fixedCode);
     out.halfAmplitudeCodes = 0;
     out.rampOffsetCodes = (float)(fixedCode - restingCode);
   } else {
     out.fixedCode = 0;
-    out.halfAmplitudeCodes = (float)(amplitudeMicrovolts[channel] * 0.5 * codesPerMicrovolt);
+    out.halfAmplitudeCodes = (float)(amplitudeMicrovolts * 0.5 * codesPerMicrovolt);
     out.rampOffsetCodes = (float)(meanCode - restingCode);
   }
+  return out;
+}
+
+// Works out what an output channel plays from its settings (waveform[], amplitudeMicrovolts[], meanVoltageMicrovolts[]
+// and restingVoltageMicrovolts[], which the caller has checked with isValidOutputLevel()), and hands it to the playback
+// interrupts. Called from loop().
+void updateChannelOutput(byte channel) {
+  ChannelOutput out = channelOutputFor(waveform[channel], restingVoltageMicrovolts[channel],
+                                       meanVoltageMicrovolts[channel], amplitudeMicrovolts[channel]);
   noInterrupts();
   pendingOutput[channel] = out;
   if (timerRunning) {
@@ -272,6 +301,110 @@ void takePendingOutputIfIdle() {
     takePendingOutput(__builtin_ctz(pendingOutputChannels));
   }
   interrupts();
+}
+
+// True if a trigger channel is in param sync mode, in which case op 85 stores its settings for the channel's next
+// rising edge instead of applying them
+bool paramSyncEnabled() {
+  return (TriggerMode[0] == TRIGGER_MODE_PARAM_SYNC) || (TriggerMode[1] == TRIGGER_MODE_PARAM_SYNC);
+}
+
+// Discards a set that op 85 stored, once no trigger channel is left in param sync mode, so that a channel put back into
+// the mode later cannot load a set sent long before. Call it after anything except a param sync edge changes
+// TriggerMode: op 84, op 85 outside param sync mode, the menu, and the default settings.
+void updateParamSyncPending() {
+  if (!paramSyncEnabled()) {
+    paramSyncPending = false;
+  }
+}
+
+// True if every setting in a set is in range, and every channel's levels suit its waveform
+bool isValidSettingsSet(const SettingsSet &set) {
+  if ((set.frequencyCentiHz < MIN_FREQUENCY_CENTIHZ) || (set.frequencyCentiHz > MAX_FREQUENCY_CENTIHZ) ||
+      (set.triggerMode[0] > MAX_TRIGGER_MODE) || (set.triggerMode[1] > MAX_TRIGGER_MODE)) {
+    return false;
+  }
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if ((set.waveform[i] > MAX_WAVEFORM) ||
+        !isValidOutputLevel(set.waveform[i], set.restingVoltageMicrovolts[i], set.meanVoltageMicrovolts[i],
+                            set.amplitudeMicrovolts[i]) ||
+        (set.playDurationMicros[i] > MAX_PLAY_DURATION_MICROS) || (set.onRampMicros[i] > MAX_PLAY_DURATION_MICROS) ||
+        (set.offRampMicros[i] > MAX_PLAY_DURATION_MICROS) || (set.triggerLinks[0][i] > 1) ||
+        (set.triggerLinks[1][i] > 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Applies a whole set of settings at once (op 85 while no trigger channel is in param sync mode), as the ops for each
+// setting would. The set has been through isValidSettingsSet().
+void applySettings(const SettingsSet &set) {
+  if (set.frequencyCentiHz != frequencyCentiHz) {
+    setFrequency(set.frequencyCentiHz);
+  }
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    waveform[i] = set.waveform[i];
+    amplitudeMicrovolts[i] = set.amplitudeMicrovolts[i];
+    meanVoltageMicrovolts[i] = set.meanVoltageMicrovolts[i];
+    restingVoltageMicrovolts[i] = set.restingVoltageMicrovolts[i];
+    updateChannelOutput(i);
+  }
+  setPlayDurations(set.playDurationMicros);
+  setRampDurations(set.onRampMicros, set.offRampMicros);
+  noInterrupts(); // So that a trigger sees all the new links and modes, or none
+  memcpy((void*)TriggerAddress, set.triggerLinks, sizeof(TriggerAddress));
+  TriggerMode[0] = set.triggerMode[0];
+  TriggerMode[1] = set.triggerMode[1];
+  interrupts();
+  updateParamSyncPending();
+}
+
+// Stores a set of settings for the next param sync edge (op 85 while a trigger channel is in param sync mode),
+// replacing any set stored before. What each channel plays is worked out here, so that the edge only copies it. The
+// set has been through isValidSettingsSet().
+void storeSettings(SettingsSet &set) {
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    set.output[i] = channelOutputFor(set.waveform[i], set.restingVoltageMicrovolts[i], set.meanVoltageMicrovolts[i],
+                                     set.amplitudeMicrovolts[i]);
+  }
+  noInterrupts(); // An edge must never load a half-copied set
+  storedSettings = set;
+  paramSyncPending = true;
+  interrupts();
+}
+
+// Copies the settings that output channels took at a param sync edge into the settings arrays, which loop() works
+// from: the menu, the USB ops and frequency changes. The playback interrupts never write those arrays (see "Param
+// sync" in Playback.ino). The channels' settings are then handed to the playback interrupts again, from the arrays:
+// if an op or a menu edit changed a channel while the edge was being handled, the synced set wins, as it would have a
+// moment later. loop() calls this on every pass, before it reads a command.
+void takeSyncedSettings() {
+  if (!syncedChannelsForLoop) {
+    return;
+  }
+  noInterrupts();
+  byte channels = syncedChannelsForLoop;
+  syncedChannelsForLoop = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (bitRead(channels, i)) {
+      waveform[i] = syncedSettings.waveform[i];
+      amplitudeMicrovolts[i] = syncedSettings.amplitudeMicrovolts[i];
+      meanVoltageMicrovolts[i] = syncedSettings.meanVoltageMicrovolts[i];
+      restingVoltageMicrovolts[i] = syncedSettings.restingVoltageMicrovolts[i];
+      playDurationMicros[i] = syncedSettings.playDurationMicros[i];
+      onRampMicros[i] = syncedSettings.onRampMicros[i];
+      offRampMicros[i] = syncedSettings.offRampMicros[i];
+    }
+  }
+  interrupts();
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (bitRead(channels, i)) {
+      updateChannelOutput(i); // The same output the channel already took, unless an op changed it meanwhile
+    }
+  }
+  setPlayDurations(playDurationMicros);
+  setRampDurations(onRampMicros, offRampMicros);
 }
 
 // The settings the device starts with, also loaded after a comm failure. The Python and MATLAB classes program the same
@@ -298,4 +431,5 @@ void LoadDefaultSettings() {
   TriggerMode[0] = TRIGGER_MODE_NORMAL;
   TriggerMode[1] = TRIGGER_MODE_NORMAL;
   interrupts();
+  updateParamSyncPending(); // Neither trigger channel is in param sync mode now, so a stored set is discarded
 }

@@ -77,7 +77,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 const char* const waveformNames[] = {"Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage"}; // Indexed by enum
                                                                                                  // WaveformValue
-const char* const triggerModeNames[] = {"Normal", "Toggle", "Pulse Gated"}; // Indexed by enum TriggerModeValue
+const char* const triggerModeNames[] = {"Normal", "Toggle", "Pulse Gated", "Param Sync"}; // Indexed by enum
+                                                                                         // TriggerModeValue
 const char* const offOnNames[] = {"Off", "On"};
 
 void UpdateMenu() {
@@ -205,6 +206,7 @@ void onMenuClick() {
           noInterrupts();
           TriggerMode[triggerChannel] = newMode;
           interrupts();
+          updateParamSyncPending(); // This may have taken the channel out of param sync mode
           RefreshTriggerMenu();
         } break;
         default: { // MENU_INPUT_ACTION_EXIT

@@ -48,7 +48,9 @@ The Python and MATLAB classes connect in this order:
    68, 66, 69, 84 and 73. In this order each is valid whatever the device holds (see
    [Levels](#levels)): a mean voltage of 0 V (op 77) goes with any amplitude, a resting voltage
    (op 86) with any waveform, the default amplitude of 5 V (op 65) then goes with any waveform,
-   and a sine wave (op 87) then goes with both.
+   and a sine wave (op 87) then goes with both. These ops apply at once also on a device left in
+   [param sync mode](#param-sync-trigger-mode-3), and op 84 takes both trigger channels out of
+   it, which discards a stored set.
 
 When they close, they send op 81, which puts "Synth Pal v3.0" back on the screen.
 
@@ -73,6 +75,7 @@ so that it is not taken for the next command.
 | 66 | `B` | Set on ramp durations (at the Beginning) | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 for no ramp. See [Ramps](#ramps) | 1 / 0 |
 | 69 | `E` | Set off ramp durations (at the End) | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 for no ramp. See [Ramps](#ramps) | 1 / 0 |
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
+| 85 | `U` | Set all settings: applied at once, or stored for a param sync edge (see [Param sync](#param-sync-trigger-mode-3)) | 114 bytes: frequency in centiHz (uint32), then for channels 1-4: waveforms (4 bytes), amplitudes, mean voltages and resting voltages (4 int32 each), play durations, on ramp durations and off ramp durations (4 uint32 each); then trigger links (8 bytes, as op 73) and trigger modes (2 bytes, as op 84). Each value as in the op that sets it alone | 1 / 0 |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
 | 80 | `P` | Play (soft trigger) | Channel bits (uint8) | none |
 | 88 | `X` | Stop | Channel bits (uint8) | none |
@@ -240,12 +243,59 @@ same codes. An edge on a trigger channel acts on the output channels linked to i
 | 0 | Normal | Starts idle channels. Channels that are playing ignore it | Nothing |
 | 1 | Toggle | Starts idle channels, and stops channels that are playing | Nothing |
 | 2 | Gated | Starts idle channels. Channels that are playing ignore it | Stops the channels, unless the other trigger channel is also gated, linked to them, and still high |
+| 3 | Param Sync | Loads the settings op 85 stored, if any. Starts and stops nothing: its links are ignored | Nothing |
 
 A channel in its off ramp counts as idle here: a rising edge starts it again (see
 [Ramps](#ramps)). With a play duration of 0, a channel in gated mode plays for exactly as long as
 the TTL is high, plus its off ramp.
 A soft trigger (op 80) starts idle channels, and channels that are playing ignore it, as in Pulse
 Pal firmware. Op 88 stops channels.
+
+### Param sync (trigger mode 3)
+
+Param sync mode, as in Pulse Pal 3 firmware (see its
+[param sync](../PROTOCOL.md#param-sync-mode-pulse-pal-3-trigger-mode-3) notes), lets the settings
+of the next trial be sent during the current one, and applied the instant it starts.
+
+**Storing a set.** Op 85 carries every setting at once. While either trigger channel is in param
+sync mode, the device stores the set instead of applying it. The confirm byte reports whether
+every value was in range, and every channel's levels suit its waveform (see [Levels](#levels)):
+the set is checked whole, so its settings may be in any order. A rejected set is not stored, and
+a later op 85 replaces a stored set. Outside param sync mode, op 85 applies the set at once.
+
+**Only op 85 is delayed.** The ops that set one setting (70, 87, 65, 77, 86, 68, 66, 69, 84, 73)
+apply at once, in param sync mode as in any other. The Python and MATLAB classes send op 85 from
+`sync_to_device()` / `syncToDevice()`, with their `auto_sync` / `autoSync` switch off.
+
+**At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set. With
+nothing stored, it does nothing.
+
+- The frequency and both trigger modes change at once: they are shared by all output channels.
+- An output channel at its resting voltage takes its new settings at once: waveform, levels,
+  play duration, ramps and trigger links.
+- An output channel that is playing, off ramp included, finishes on the settings it started
+  with, but at the new frequency, and takes its new settings the moment it reaches its resting
+  voltage. So the next trigger plays the new settings. A second edge before then gives it the
+  newer set.
+- The set is copied aside at the edge, so op 85 can store the next set meanwhile.
+- A trigger mode in the set applies from the next edge: the edge that loads it only loads it.
+
+**The param sync channel starts and stops nothing.** Its links to output channels are ignored. To
+start channels on the same edge, wire the TTL to the other trigger channel as well: the settings
+load first, whichever trigger channel's interrupt runs first, so the channels it starts play the
+new settings.
+
+**Leaving param sync mode.** Use op 84 (op 85 in param sync mode is stored with the rest of the
+set). When no trigger channel is left in the mode, by op 84, the menu, or the default settings
+after a comm failure, the stored set is discarded, so putting a channel back into the mode cannot
+load a set sent long before.
+
+**Time at the edge.** Loading a set takes about 2 µs of interrupt time with all four channels at
+rest, plus about 2.5 µs for each channel whose output range changes (12 µs measured with all four
+changing range and a new frequency); a channel started by the same TTL starts that much later
+than usual. While channels play, range changes are left to the sample clock, one channel per
+tick, and an edge that changes the frequency takes about 3 µs, which can make one output update
+late, as op 70 can (see [Timing](#timing)).
 
 ### Timing
 
