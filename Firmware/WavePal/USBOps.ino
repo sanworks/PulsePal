@@ -77,6 +77,7 @@ void processUSBCommands() {
   if (CommandByte != OpMenuByte) { // The first byte must be 213. Others are ignored (reduces interference from port scanning applications)
     return;
   }
+  screenSaverActivity = true; // Every command wakes the screen, once its reply has been sent (see updateScreenSaver())
   CommandByte = PPUSB.readByte(); // The op code
   switch (CommandByte) {
     case OP_HANDSHAKE: { // Op 72
@@ -97,6 +98,19 @@ void processUSBCommands() {
       interrupts();
       strcpy(CommanderString, DefaultCommanderString);
       showTopScreen();
+    } break;
+
+    case OP_SET_SCREEN_SAVER: { // Op 99, as in Pulse Pal firmware: state (0 or 1), then the timeout in seconds (uint16)
+      byte state = PPUSB.readByte();
+      uint16_t timeout = PPUSB.readUint16();
+      if ((state > 1) || (timeout == 0)) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      screenSaverEnabled = state;
+      screenSaverTimeout = timeout;
+      screenSaverSavePending = true; // Saved to the EEPROM once no channel is playing (see updateScreenSaver())
+      PPUSB.writeByte(1);
     } break;
 
     case OP_HARDWARE_INFO: { // Op 78 ('N')
@@ -367,6 +381,7 @@ void HandleReadTimeout() {
   }
   delay(1000);
   LastClickerButtonState = 1; // The click that ended the wait must not also be taken as a click in the menu
+  screenSaverActivity = true; // The click that ended the message. The screen saver's idle time starts again here.
   noInterrupts();
   for (byte i = 0; i < 2; i++) {
     digitalWriteFast(InputLEDLines[i], triggerLineActive[i]);

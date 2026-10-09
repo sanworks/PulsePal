@@ -17,6 +17,7 @@ import copy
 import gc
 import struct
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,8 @@ class FakeWavePal:
     Each write must be one whole command. It is checked against the protocol,
     recorded in `writes`, and the reply the firmware would send is queued for
     reading. Set `ack` to 0 to have the device reject confirmable commands.
+    Bytes in `late_reply` are sent before the reply to the next command, as
+    the reply to a command an earlier session left queued on the device.
     """
 
     def __init__(self, handshake_reply=87, firmware_version=1, ack=1):
@@ -43,6 +46,7 @@ class FakeWavePal:
         self.is_open = True
         self.writes = []
         self.replies = bytearray()
+        self.late_reply = b""
         self.handshake_reply = handshake_reply
         self.firmware_version = firmware_version
         self.ack = ack
@@ -53,6 +57,8 @@ class FakeWavePal:
     def write(self, data):
         data = bytes(data)
         self.writes.append(data)
+        self.replies += self.late_reply
+        self.late_reply = b""
         self.replies += self._execute(data)
         return len(data)
 
@@ -60,7 +66,7 @@ class FakeWavePal:
         assert data[0] == OP_MENU_BYTE, f"command without the framing byte: {list(data)}"
         op = data[1]
         payload = data[2:]
-        expected_lengths = {72: 0, 81: 0, 89: 6, ord("N"): 0, ord("S"): 4, ord("R"): 1,
+        expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, ord("N"): 0, ord("S"): 4, ord("R"): 1,
                             ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4,
                             ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
         if op == ord("L"):
@@ -184,11 +190,57 @@ def test_connecting_to_a_synth_pal_names_the_firmware_and_closes_the_port():
     assert fake.writes == [command(72)]
 
 
-def test_newer_firmware_is_refused():
-    fake = FakeWavePal(firmware_version=2)
-    error = expect_error(connect, fake)
-    assert "Future firmware" in str(error)
-    assert not fake.is_open
+def test_a_late_reply_to_an_earlier_session_is_skipped():
+    """A command an earlier session sent just before it closed can still be waiting on the device,
+    which answers it after the input was discarded, and before the handshake. The handshake's reply is
+    the last 5 bytes the device sends, so the late reply is skipped, also one that looks like a
+    handshake."""
+    for late_reply in (bytes(range(1, 40)), bytes([87, 99, 0, 0, 0]), bytes([1])):
+        fake = FakeWavePal()
+        fake.late_reply = late_reply
+        device, fake = connect(fake)
+        assert device.info.firmware_version == 1, late_reply[:5]
+        assert fake.in_waiting == 0
+        device.close()
+
+
+def test_newer_firmware_warns():
+    """Newer firmware only adds commands, so the class uses it, with a warning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device, fake = connect(FakeWavePal(firmware_version=2))
+    assert any("newer than this pulsepal package knows" in str(w.message) for w in caught)
+    assert device.info.firmware_version == 2
+
+
+def test_set_screen_saver_uses_op_99():
+    device, fake = connect()
+    device.set_screen_saver(True, 300)
+    device.set_screen_saver(False)  # The timeout is always sent: 1800 s when left out
+    assert fake.writes == [command(99, struct.pack("<BH", 1, 300)), command(99, struct.pack("<BH", 0, 1800))]
+    fake.writes.clear()
+    for enabled, timeout in ((2, 600), ("on", 600), (1, 0), (1, 65536), (1, 1.5), (1, True)):
+        expect_error(device.set_screen_saver, enabled, timeout)
+    assert fake.writes == []
+
+
+def test_export_params_holds_every_setting():
+    import json
+    device, fake = connect()
+    device.sampling_rate = 25000
+    device.loop_mode[2] = True
+    device.trigger_mode[1] = "Master"
+    params = json.loads(json.dumps(device.export_params()))
+    assert list(params) == ["sampling_rate", "output_range", "loop_mode", "loop_duration", "trigger_mode",
+                            "link_trigger_channel1", "link_trigger_channel2"]
+    assert params["sampling_rate"] == 25000 and params["output_range"] == "-10V:10V"
+    assert params["loop_mode"] == [False, True, False, False] and params["trigger_mode"] == ["Master", "Normal"]
+
+
+def test_the_public_surface_is_trimmed():
+    device, fake = connect()
+    expect_error(device.close, True, error=TypeError)
+    assert not hasattr(device, "bytes_available")
 
 
 def test_load_waveform_sends_dac_codes_for_the_output_range():

@@ -31,6 +31,8 @@ classdef SimulatedPulsePalPort < handle
         ack = 1 % The confirm byte: 1, or 0 to refuse every command
         loadReply = 1 % The confirm byte of a settings file load (op 90, operation 2)
         lastParams = uint8([]) % The parameters of the last op 92, which op 93 returns
+        lateReply = uint8([]) % Sent before the reply to the next command, as the reply to a command an earlier session
+                              % left queued on the device
     end
 
     properties (SetAccess = private)
@@ -64,6 +66,8 @@ classdef SimulatedPulsePalPort < handle
         function write(obj, data, ~)
             bytes = uint8(double(data(:)'));
             obj.writes{end+1} = bytes;
+            obj.reply(obj.lateReply);
+            obj.lateReply = uint8([]);
             obj.respond(bytes);
         end
 
@@ -99,6 +103,11 @@ classdef SimulatedPulsePalPort < handle
 
         function clearWrites(obj)
             obj.writes = {};
+        end
+
+        function leaveUnread(obj, bytes)
+            % Leaves bytes waiting to be read, as the end of a reply that an earlier session did not read
+            obj.reply(bytes);
         end
     end
 

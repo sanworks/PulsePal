@@ -106,9 +106,10 @@ public:
     bool syncAllParams();
 
     // Upload a custom pulse train. ID is 1-2 on Pulse Pal 2, or 1-4 on Pulse Pal 3. customPulseTimes are pulse onset
-    // times in seconds, relative to the start of the train, and must increase by at least 100us (two timer cycles,
-    // the shortest pulse a trigger channel detects reliably) from each pulse to the next. customVoltages are in volts. nPulses is at most 5000 on Pulse Pal 2, or 10000 on
-    // Pulse Pal 3. Set an output channel's custom train ID to play the train there.
+    // times in seconds from the start of the train: increasing, each a multiple of 100 us (two timer cycles, the
+    // shortest pulse a trigger channel detects reliably), up to 9999.9999 s. customVoltages are in volts, -10 to 10.
+    // nPulses is at most 5000 on Pulse Pal 2, or 10000 on Pulse Pal 3. Set an output channel's custom train ID to play
+    // the train there.
     bool sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float customPulseTimes[], const float customVoltages[]);
 
     // Operations and settings

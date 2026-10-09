@@ -18,6 +18,8 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import contextlib
 import numbers
+import struct
+import time
 import weakref
 
 import numpy as np
@@ -46,6 +48,46 @@ class PulsePalError(Exception):
     rejects, and values it cannot play, which are refused before anything
     is sent.
     """
+
+
+HANDSHAKE_REPLY_BYTES = 5  # The reply to op 72 on all three firmwares: the firmware's letter, then its version (uint32)
+HANDSHAKE_QUIET_TIME = 0.05  # Seconds without a byte that end the handshake's reply (see read_handshake_reply())
+HANDSHAKE_MAX_TIME = 1  # Seconds after the first 5 bytes, at most, to wait for the device to go quiet
+
+
+def read_handshake_reply(port):
+    """Read the reply to op 72, the handshake, once it has been written.
+
+    Returns `(letter, version)`: the firmware's letter (see
+    FIRMWARE_BY_HANDSHAKE_REPLY) and its version. Returns None if fewer than
+    5 bytes arrive within the port's timeout.
+
+    The reply is the last 5 bytes the device sends before it goes quiet. A
+    command that an earlier session sent just before it closed can still be
+    waiting on the device when this session connects, for example while the
+    device redraws its screen. The device answers it first: after the client
+    has discarded its input, and before the handshake. Its reply is skipped.
+    Bytes are read until none has arrived for HANDSHAKE_QUIET_TIME, longer
+    than the device takes to redraw its screen between two replies, and for
+    at most HANDSHAKE_MAX_TIME, so that a device that never stops sending is
+    refused rather than waited for.
+    """
+    received = bytearray(port.read(HANDSHAKE_REPLY_BYTES))  # Waits for a whole reply, up to the port's timeout
+    if len(received) < HANDSHAKE_REPLY_BYTES:
+        return None
+    started = last_arrival = time.monotonic()
+    while True:
+        now = time.monotonic()
+        if now - last_arrival >= HANDSHAKE_QUIET_TIME or now - started >= HANDSHAKE_MAX_TIME:
+            break
+        waiting = port.in_waiting
+        if waiting:
+            received += port.read(waiting)
+            last_arrival = time.monotonic()
+        else:
+            time.sleep(0.001)
+    reply = bytes(received[-HANDSHAKE_REPLY_BYTES:])
+    return reply[0], struct.unpack("<I", reply[1:])[0]
 
 
 def other_firmware_error(handshake_reply, version, port_name, expected):

@@ -40,7 +40,17 @@ The Python, MATLAB and C++ classes connect in this order:
 1. Op 72 (handshake). The reply is `75` ('K') and the firmware version. A device running
    Wave Pal firmware (`/Firmware/WavePal`) replies `87` ('W') instead, and one running Synth
    Pal firmware (`/Firmware/SynthPal`) `83` ('S'). The Python, MATLAB and C++ classes then
-   say which firmware the device runs, and that it needs Pulse Pal firmware.
+   say which firmware the device runs, and that it needs Pulse Pal firmware. They refuse
+   firmware older than v21, and connect to v21 with a notice that v22 is available.
+   A firmware version newer than the client knows is used, with a warning: new firmware only
+   adds ops, so the client's ops work as before.
+   The Python, MATLAB and C++ classes discard any bytes waiting in the port before op 72: the end
+   of a reply that an earlier session did not read would be taken as the handshake. That does not
+   cover a command that an earlier session sent just before it closed, if the device has not
+   reached it yet (it may be redrawing its screen, which takes a few ms): the device answers it
+   after the discard, just before op 72. So the classes read the reply to op 72 until no byte has
+   arrived for 50 ms (at most 1 s), and take the last 5 bytes. This adds about 50 ms to
+   connecting.
 2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
 3. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
    class leaves this to the program, which calls `setClientIDString()`.
@@ -213,8 +223,8 @@ not stored.
 **Only op 92 is delayed.** Ops 73, 74 and 91 program the device immediately, in param sync
 mode as in any other. In the clients, only `sync_to_device()` (Python, also at the end of a
 `batch()` block), `syncToDevice()` (MATLAB) and `syncAllParams()` (C++) store a set; assigning a
-parameter with `auto_sync` / `autoSync` on, `set_output_param()`, `set_trigger_param()` and their
-C++ equivalents take effect at once.
+parameter with `auto_sync` / `autoSync` on, and the C++ class's methods that set one parameter,
+take effect at once.
 
 **At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set.
 With nothing stored, it does nothing.

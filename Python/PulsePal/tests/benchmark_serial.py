@@ -62,11 +62,12 @@ def main():
             P._read_raw(10)
         report("op 94 hardware info (round trip)", timed(hardware_info, arguments.repeats))
 
-        # One parameter on one channel (op 74), and on all four (op 91)
-        report("set_output_param, 1 channel (op 74)",
-               timed(lambda: P.set_output_param("phase1_voltage", 1, 5), arguments.repeats))
-        report("set_output_param, 4 channels (op 91)",
-               timed(lambda: P.set_output_param("phase1_voltage", [1, 2, 3, 4], 5), arguments.repeats))
+        # One parameter on one channel (op 74, which the class uses on firmware v21 only), and on all
+        # four, as an assignment sends it (op 91)
+        report("one parameter, 1 channel (op 74)",
+               timed(lambda: P._send_output_param_to_channel(2, 1, 5.0, "op 74"), arguments.repeats))
+        report("assignment, 4 channels (op 91)",
+               timed(lambda: P.phase1_voltage.__setitem__(1, 5), arguments.repeats))
 
         # Whole parameter set in each direction
         report("sync_to_device (op 92)", timed(P.sync_to_device, arguments.repeats), payload_bytes=178)

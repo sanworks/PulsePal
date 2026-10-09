@@ -290,6 +290,41 @@ void processUSBCommands() {
       PPUSB.writeByte(1);
     } break;
 
+    case OP_GET_ALL_SETTINGS: { // Op 82 ('R'). Every setting the device plays now, in op 85's layout, for the clients'
+                                // read-back. A set stored for the next param sync edge is not part of it.
+      SettingsSet set;
+      noInterrupts(); // A param sync edge changes the frequency, the trigger links and the modes in its interrupt
+      while (syncedChannelsForLoop) { // An edge since this pass of loop() copied a synced set into the settings arrays
+        interrupts();
+        takeSyncedSettings();
+        noInterrupts();
+      }
+      set.frequencyCentiHz = frequencyCentiHz;
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        set.waveform[i] = waveform[i];
+        set.amplitudeMicrovolts[i] = amplitudeMicrovolts[i];
+        set.meanVoltageMicrovolts[i] = meanVoltageMicrovolts[i];
+        set.restingVoltageMicrovolts[i] = restingVoltageMicrovolts[i];
+        set.playDurationMicros[i] = playDurationMicros[i];
+        set.onRampMicros[i] = onRampMicros[i];
+        set.offRampMicros[i] = offRampMicros[i];
+      }
+      memcpy(set.triggerLinks, (const void*)TriggerAddress, sizeof(TriggerAddress));
+      set.triggerMode[0] = TriggerMode[0];
+      set.triggerMode[1] = TriggerMode[1];
+      interrupts();
+      PPUSB.writeUint32(set.frequencyCentiHz);
+      PPUSB.writeByteArray(set.waveform, N_CHANNELS);
+      PPUSB.writeUint32Array((const uint32_t*)set.amplitudeMicrovolts, N_CHANNELS); // Two's complement, as in op 85
+      PPUSB.writeUint32Array((const uint32_t*)set.meanVoltageMicrovolts, N_CHANNELS);
+      PPUSB.writeUint32Array((const uint32_t*)set.restingVoltageMicrovolts, N_CHANNELS);
+      PPUSB.writeUint32Array(set.playDurationMicros, N_CHANNELS);
+      PPUSB.writeUint32Array(set.onRampMicros, N_CHANNELS);
+      PPUSB.writeUint32Array(set.offRampMicros, N_CHANNELS);
+      PPUSB.writeByteArray(&set.triggerLinks[0][0], 2 * N_CHANNELS);
+      PPUSB.writeByteArray(set.triggerMode, 2);
+    } break;
+
     case OP_PLAY: { // Op 80 ('P'). Soft trigger: one bit per output channel. Channels that are playing ignore it.
       byte channelBits = PPUSB.readByte();
       noInterrupts();

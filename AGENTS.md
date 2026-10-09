@@ -105,10 +105,17 @@ share these conventions. Keep them in new code.
   bootloader with the port open). Where .NET Framework is not available (macOS, Linux, or
   MATLAB set to .NET Core with `dotnetenv`), the classes use `serialport`.
 - **Shared code.** The Python classes share `PulsePalError`, `ChannelSettings` (the
-  channel-indexed lists), `serialportlist()`, the handshake table of the three firmwares and
-  `batch()`, in `pulsepal/_common.py`. The three MATLAB classes have no shared code: their
-  constructors' port setup and handshake are copies, as are `namesToCodes()`,
-  `channelBits()` and `roundHalfEven()`. A fix to one usually belongs in all of them.
+  channel-indexed lists), `serialportlist()`, the handshake table of the three firmwares,
+  `read_handshake_reply()` and `batch()`, in `pulsepal/_common.py`. The three MATLAB classes
+  have no shared code: their constructors' port setup and handshake are copies, as are
+  `readHandshakeReply()`, `namesToCodes()`, `channelBits()` and `roundHalfEven()`. A fix to one
+  usually belongs in all of them.
+- **The handshake reads until the device is quiet.** A command an earlier session sent just
+  before it closed can still be queued on the device, which answers it after the client has
+  discarded its input. So every client reads the reply to op 72 until no byte has arrived for
+  50 ms, and takes the last 5 bytes (see "Connecting" in `/Firmware/PROTOCOL.md`). A test fake
+  that queues all its replies in advance must report none of them as waiting, or the handshake
+  reads them all.
 - **Synth Pal's levels.** The device holds one amplitude per channel, a fixed voltage or a
   periodic waveform's peak to peak voltage, and checks each of ops 65, 87 and 77 against the
   other two. The classes keep `peak_to_peak` and `fixed_voltage` apart, and `_send_levels()` /

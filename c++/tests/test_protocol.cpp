@@ -28,6 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Build and run them with CMake (see README.md):
 //   ctest --test-dir build -C Release --output-on-failure
 
+#include <algorithm>
 #include <cmath>
 #include <deque>
 #include <initializer_list>
@@ -41,11 +42,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 typedef std::vector<uint8_t> Bytes;
 
 // Records writes, and replies to reads with the bytes in `replies`. Once those run out, each read returns `ack`,
-// unless `silent` is set, in which case it times out.
+// unless `silent` is set, in which case it times out. The first `waiting` bytes of `replies` count as sent by the
+// device before they are read (bytesWaiting()); the rest only when they are read, so by default the handshake reads
+// exactly its 5 bytes.
 class FakeSerialPort : public SerialPort
 {
 public:
-    FakeSerialPort() : portOpen(false), ack(1), silent(false) {}
+    FakeSerialPort() : portOpen(false), ack(1), silent(false), waiting(0) {}
 
     bool open(const std::string& portName) override { openedName = portName; portOpen = true; return true; }
     void close() override { portOpen = false; }
@@ -63,6 +66,9 @@ public:
             if (!replies.empty()) {
                 data[i] = replies.front();
                 replies.pop_front();
+                if (waiting > 0) {
+                    waiting--;
+                }
             } else if (silent) {
                 return i;
             } else {
@@ -71,6 +77,7 @@ public:
         }
         return nBytes;
     }
+    size_t bytesWaiting() override { return std::min(waiting, replies.size()); }
     std::string lastError() const override { return "fake error"; }
 
     // Queues the handshake reply, and the op 94 reply on firmware v22
@@ -90,6 +97,7 @@ public:
     bool portOpen;
     uint8_t ack;
     bool silent;
+    size_t waiting;
     std::deque<uint8_t> replies;
     std::vector<Bytes> writes;
     std::vector<size_t> reads;
@@ -280,12 +288,9 @@ static void test_connect_to_firmware_v21()
     FakeSerialPort port;
     PulsePal pulsePal(&port);
     port.queueConnectReplies(21, 2);
-    std::ostringstream notice;
-    std::streambuf* previous = std::cout.rdbuf(notice.rdbuf());
-    bool connected = pulsePal.initialize("COM1");
-    std::cout.rdbuf(previous);
-    CHECK(connected);
-    CHECK(contains(notice.str(), "Update to v22"));
+    CaptureErrors notice;
+    CHECK(pulsePal.initialize("COM1"));
+    CHECK(contains(notice.text(), "v22 is available"));
     CHECK(pulsePal.getFirmwareVersion() == 21);
     CHECK(pulsePal.getHardwareVersion() == 2);
     // No op 94 on firmware v21, and parameters are programmed with op 73
@@ -297,6 +302,44 @@ static void test_connect_to_firmware_v21()
     }
 }
 
+static void test_a_late_reply_to_an_earlier_session_is_skipped()
+{
+    // A command an earlier session sent just before it closed can still be waiting on the device, which answers it
+    // after the input was discarded, and before the handshake. The handshake's reply is the last 5 bytes the device
+    // sends, so the late reply is skipped, also one that looks like a handshake.
+    Bytes op93Reply(178, 0);
+    for (size_t i = 0; i < 32; i += 4) {
+        op93Reply[i] = 20; // 20 cycles: 1 ms
+    }
+    const Bytes lateReplies[] = {op93Reply, bytes({75, 99, 0, 0, 0}), bytes({1})};
+    for (const Bytes& lateReply : lateReplies) {
+        FakeSerialPort port;
+        PulsePal pulsePal(&port);
+        port.replies.insert(port.replies.end(), lateReply.begin(), lateReply.end());
+        port.queueConnectReplies(22, 3);
+        port.waiting = lateReply.size() + 5; // The late reply and the handshake's
+        CHECK(pulsePal.initialize("COM1"));
+        CHECK(pulsePal.getFirmwareVersion() == 22);
+        CHECK(pulsePal.getHardwareVersion() == 3);
+        CHECK(port.writes.size() >= 2);
+        if (port.writes.size() >= 2) {
+            CHECK_BYTES(port.writes[1], bytes({213, 94}));
+        }
+    }
+}
+
+static void test_connect_to_newer_firmware_warns()
+{
+    // New firmware only adds commands, so the class connects to it, with a warning
+    FakeSerialPort port;
+    PulsePal pulsePal(&port);
+    port.queueConnectReplies(23, 3);
+    CaptureErrors warning;
+    CHECK(pulsePal.initialize("COM1"));
+    CHECK(contains(warning.text(), "v23 is newer than this C++ class knows"));
+    CHECK(pulsePal.getFirmwareVersion() == 23);
+}
+
 static void test_connect_fails_on_a_bad_handshake_or_unsupported_firmware()
 {
     struct Case { uint8_t replyByte; uint32_t firmwareVersion; const char* message; };
@@ -306,7 +349,6 @@ static void test_connect_fails_on_a_bad_handshake_or_unsupported_firmware()
         {83, 1, "runs Synth Pal firmware (v1)"}, // Synth Pal's
         {75, 19, "Pulse Pal 1"},
         {75, 20, "update the firmware"},
-        {75, 23, "supports firmware up to v22"},
     };
     for (const Case& c : cases) {
         FakeSerialPort port;
@@ -349,9 +391,10 @@ static void test_sync_all_params_matches_python_on_firmware_v21()
 {
     FakeSerialPort port;
     PulsePal pulsePal(&port);
-    std::streambuf* previous = std::cout.rdbuf(NULL); // Hide the firmware update notice
-    connect(pulsePal, port, 21, 2);
-    std::cout.rdbuf(previous);
+    {
+        CaptureErrors notice; // Hides the notice that v22 is available
+        connect(pulsePal, port, 21, 2);
+    }
     fillDistinctParams(pulsePal, true);
     CHECK(pulsePal.syncAllParams());
     CHECK(port.writes.size() == 1);
@@ -578,9 +621,10 @@ static void test_custom_trains_use_ops_75_and_76_on_firmware_v21()
 {
     FakeSerialPort port;
     PulsePal pulsePal(&port);
-    std::streambuf* previous = std::cout.rdbuf(NULL);
-    connect(pulsePal, port, 21, 2);
-    std::cout.rdbuf(previous);
+    {
+        CaptureErrors notice; // Hides the notice that v22 is available
+        connect(pulsePal, port, 21, 2);
+    }
     const float times[1] = {0.5f};
     const float voltages[1] = {5};
     CHECK(pulsePal.sendCustomPulseTrain(1, 1, times, voltages));
@@ -671,6 +715,8 @@ int main()
         {"connect to Pulse Pal 3", test_connect_to_pulse_pal_3},
         {"connect to Pulse Pal 2 on firmware v22", test_connect_to_pulse_pal_2_on_firmware_v22},
         {"connect to firmware v21", test_connect_to_firmware_v21},
+        {"connect to newer firmware warns", test_connect_to_newer_firmware_warns},
+        {"a late reply to an earlier session is skipped", test_a_late_reply_to_an_earlier_session_is_skipped},
         {"connect fails on a bad handshake or unsupported firmware", test_connect_fails_on_a_bad_handshake_or_unsupported_firmware},
         {"syncAllParams matches Python on firmware v22", test_sync_all_params_matches_python_on_firmware_v22},
         {"syncAllParams matches Python on firmware v21", test_sync_all_params_matches_python_on_firmware_v21},

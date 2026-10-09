@@ -484,7 +484,7 @@ obj.ui.Label_4.Text = '4';
 % Create PortLabel
 obj.ui.PortLabel = uilabel(obj.ui.Figure);
 obj.ui.PortLabel.Position = [241 2 160 22];
-obj.ui.PortLabel.Text = ['Port: ' char(obj.Port.Port)];
+obj.ui.PortLabel.Text = ['Port: ' char(obj.port.Port)];
 
 % Create FirmwareLabel
 obj.ui.FirmwareLabel = uilabel(obj.ui.Figure);
@@ -797,28 +797,15 @@ end
 end
 
 function saveProgram(obj)
-% Saves the program as a .json file in the Python GUI's format (/Python/PulsePal/pulsepal/gui.py), so that either GUI
-% opens it: the parameters by their Python names, as the GUI keeps them (on/off as 0 or 1, modes as their codes), the
+% Saves the program as a .json program file, in the Python GUI's format (/Python/PulsePal/pulsepal/gui.py), so that
+% either GUI opens it (see saveParameters()): the parameters by their Python names, as exportParams() holds them, the
 % text of each custom train as typed, and the device's info.
-program = struct;
-program.params = struct;
-names = guiParamNames(obj);
+params = struct;
+names = [guiParamNames(obj) {'triggerMode'}];
 for i = 1:numel(names)
-    program.params.(snakeCase(names{i})) = double(obj.ui.params.(names{i}));
+    params.(names{i}) = obj.ui.params.(names{i});
 end
-program.trigger_mode = double(obj.ui.params.triggerMode);
 nTrains = obj.info.nCustomPulseTrains;
-program.custom_train_timestamps = obj.ui.customTrain.timestamps(1:nTrains);
-program.custom_train_voltages = obj.ui.customTrain.voltages(1:nTrains);
-program.device_info = struct;
-infoNames = fieldnames(obj.info);
-for i = 1:numel(infoNames)
-    value = obj.info.(infoNames{i});
-    if any(strcmp(infoNames{i}, {'outputParameterNames', 'triggerParameterNames'}))
-        value = cellfun(@snakeCase, value, 'UniformOutput', false); % As the Python class names them
-    end
-    program.device_info.(snakeCase(infoNames{i})) = value;
-end
 startName = 'PulsePalProgram.json';
 if ~isempty(obj.ui.lastProgramPath)
     startName = fullfile(obj.ui.lastProgramPath, startName);
@@ -826,18 +813,12 @@ end
 [file, path] = uiputfile({'*.json', 'Pulse Pal program (*.json)'}, 'Save program', startName);
 if ischar(file) && ischar(path)
     obj.ui.lastProgramPath = path;
-    if verLessThan('matlab', '9.10') %#ok<VERLESSMATLAB> jsonencode's PrettyPrint is in R2021a and newer
-        text = jsonencode(program);
-    else
-        text = jsonencode(program, 'PrettyPrint', true);
-    end
-    fileID = fopen(fullfile(path, file), 'w', 'n', 'UTF-8');
-    if fileID < 0
-        errordlg(['Failed to save the program: ' fullfile(path, file) ' could not be opened for writing.'])
-    else
-        fwrite(fileID, text, 'char');
-        fclose(fileID);
+    try
+        obj.writeProgramFile(fullfile(path, file), params, obj.ui.customTrain.timestamps(1:nTrains), ...
+                             obj.ui.customTrain.voltages(1:nTrains));
         obj.ui.StatusLabel.Text = 'Status: Program Saved';
+    catch err
+        errordlg(['Failed to save the program: ' err.message])
     end
 end
 figure(obj.ui.Figure);
@@ -877,51 +858,33 @@ figure(obj.ui.Figure);
 end
 
 function [params, timestamps, voltages] = readJsonProgram(obj, fileName)
-% Reads a program saved by either GUI. Parameters it leaves out take their default values, as in the Python GUI.
-program = jsondecode(fileread(fileName));
-if ~isstruct(program) || ~isfield(program, 'params') || ~isstruct(program.params)
-    error('it is not a Pulse Pal program (it has no params).')
-end
+% Reads a program saved by either GUI or by saveParameters(), into the GUI's form: each mode as its code, each on/off
+% parameter as 0 or 1 (see defaultParams()). Parameters it leaves out take their default values, as in the Python GUI.
+[fileParams, timestamps, voltages] = obj.readProgramFile(fileName);
 params = obj.defaultParams;
-names = guiParamNames(obj);
+names = fieldnames(fileParams);
 for i = 1:numel(names)
-    key = snakeCase(names{i});
-    if isfield(program.params, key)
-        value = program.params.(key);
-        if ~(isnumeric(value) || islogical(value)) || numel(value) ~= 4
-            error([key ' must have one number per output channel.'])
+    value = fileParams.(names{i});
+    nChannels = 4;
+    validNames = obj.CustomTrainTargetNames;
+    if strcmp(names{i}, 'triggerMode')
+        nChannels = 2;
+        validNames = obj.info.triggerModes; % A program saved on Pulse Pal 3 can name Param Sync
+    end
+    if iscell(value) % Names, in files from format_version 1
+        [found, codes] = ismember(lower(string(value)), lower(string(validNames)));
+        if ~all(found)
+            error([names{i} ' names a mode this device does not have.'])
         end
-        params.(names{i}) = double(reshape(value, 1, 4)); % jsondecode returns a column
+        value = codes - 1;
     end
-end
-if isfield(program, 'trigger_mode')
-    value = program.trigger_mode;
-    if ~isnumeric(value) || numel(value) ~= 2
-        error('trigger_mode must have one number per trigger channel.')
+    if ~(isnumeric(value) || islogical(value)) || numel(value) ~= nChannels
+        error([names{i} ' must have one value per channel.'])
     end
-    params.triggerMode = double(reshape(value, 1, 2));
+    params.(names{i}) = double(value);
 end
-timestamps = customTrainTexts(obj, program, 'custom_train_timestamps');
-voltages = customTrainTexts(obj, program, 'custom_train_voltages');
-end
-
-function texts = customTrainTexts(obj, program, key)
-% The text of each custom train's box, from a .json program: the text as typed, or a list of numbers
-texts = repmat({''}, 1, 4);
-if ~isfield(program, key) || isempty(program.(key))
-    return
-end
-values = program.(key);
-if ~iscell(values)
-    values = num2cell(values, 2); % Lists of numbers of the same length: one row per train
-end
-for i = 1:min(numel(values), obj.info.nCustomPulseTrains)
-    value = values{i};
-    if ischar(value) || isstring(value)
-        texts{i} = char(value);
-    elseif isnumeric(value) && ~isempty(value)
-        texts{i} = char(strjoin(string(value(:)'), ', '));
-    end
+if any(params.triggerMode >= numel(obj.info.triggerModes))
+    error('triggerMode names a mode this device does not have.')
 end
 end
 
@@ -975,14 +938,9 @@ end
 end
 
 function names = guiParamNames(obj)
-% The parameters a program file holds: all but continuousLoop, which the GUI has no control for and the Python GUI
-% does not save
+% The parameters the GUI saves: all but continuousLoop, which the GUI has no control for and the Python GUI does not
+% save
 names = obj.ParamNames(~strcmp(obj.ParamNames, 'continuousLoop'));
-end
-
-function name = snakeCase(name)
-% A name as the Python class spells it: 'phase1Voltage' is 'phase1_voltage', 'customTrainID' is 'custom_train_id'
-name = lower(regexprep(name, '([A-Z]+)', '_$1'));
 end
 
 function resetGUISelections(obj)

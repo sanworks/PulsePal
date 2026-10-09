@@ -71,6 +71,7 @@ from dataclasses import dataclass
 import math
 import numbers
 import struct
+import warnings
 
 import numpy as np
 import serial
@@ -212,11 +213,13 @@ class WavePalDevice:
     """Properties of the connected device. See `DeviceInfo`."""
 
     _CURRENT_FIRMWARE_VERSION = 1
+    _BAUD_RATE = 12000000  # USB serial ignores the baud rate
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _OP_HANDSHAKE = _common.OP_HANDSHAKE
     _OP_DISCONNECT = 81
     _OP_SET_CLIENT_NAME = 89
+    _OP_SET_SCREEN_SAVER = 99
     _OP_HARDWARE_INFO = ord("N")
     _OP_SET_SAMPLING_RATE = ord("S")
     _OP_SET_OUTPUT_RANGE = ord("R")
@@ -238,20 +241,21 @@ class WavePalDevice:
     _UINT32_MAX = 2**32 - 1
     _ALL_CHANNELS = 0x0F
 
-    def __init__(self, port_name, baud_rate=12000000, timeout=10):
+    def __init__(self, port_name, *, timeout=10):
         """Open a connection to a Wave Pal.
 
         Args:
             port_name: USB serial port of the device, such as `COM3` on
                 Windows or `/dev/ttyACM0` on Linux.
-            baud_rate: Serial baud rate. USB serial ignores it.
             timeout: Serial read timeout, in seconds. Loading a long
                 waveform onto a slow microSD card can take a few seconds.
 
+        Firmware newer than this module knows is used with a warning: new
+        firmware only adds commands. Update the package to use what is new.
+
         Raises:
-            PulsePalError: If the device does not reply to the handshake,
-                runs other firmware, or runs Wave Pal firmware newer than
-                this module supports.
+            PulsePalError: If the device does not reply to the handshake, or
+                runs other firmware.
             serial.SerialException: If the serial port cannot be opened.
         """
         self._closed = True
@@ -274,7 +278,7 @@ class WavePalDevice:
 
         self.port = serial.Serial(
             port_name,
-            baud_rate,
+            self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
         )
@@ -291,8 +295,7 @@ class WavePalDevice:
         except BaseException:
             # Op 81 means something else to other devices, so it is sent
             # only once the device has identified itself as a Wave Pal
-            self.close(
-                send_disconnect=self.info.firmware_version is not None)
+            self._close(send_disconnect=self.info.firmware_version is not None)
             raise
 
     @staticmethod
@@ -518,6 +521,60 @@ class WavePalDevice:
     def link_trigger_channel2(self, values):
         self._link_trigger_channel2._assign(values)
 
+    def set_screen_saver(self, enabled, timeout=1800):
+        """Switch the device's screen saver on or off, and set its timeout.
+
+        With the screen saver on, the device dims its screen once it has
+        been left alone for `timeout` seconds: no command from a computer,
+        no rising edge on a trigger channel, and no joystick click or
+        push. The next of these brings the screen back. The device keeps
+        both settings in its EEPROM, shared with Pulse Pal and Synth Pal
+        firmware, and saves them once no channel is playing. A new device
+        starts with the screen saver on and 1800 s.
+
+        Args:
+            enabled: `True` to switch the screen saver on, `False` to
+                switch it off.
+            timeout: Seconds without activity before the screen dims, 1 to
+                65535. It is sent with every call, so leaving it out sets
+                1800 s.
+
+        Raises:
+            PulsePalError: If a value is out of range.
+        """
+        state = to_bool(enabled, "enabled")
+        if isinstance(timeout, (bool, np.bool_)) \
+                or not isinstance(timeout, numbers.Integral) \
+                or not 1 <= timeout <= 65535:
+            raise PulsePalError(
+                "timeout must be a whole number of seconds from 1 to 65535. "
+                f"Received {timeout!r}."
+            )
+        self._write_command(self._OP_SET_SCREEN_SAVER,
+                            struct.pack("<BH", int(state), int(timeout)))
+        self._read_ack("set_screen_saver()")
+
+    def export_params(self):
+        """Return every setting, as a dict of plain values and lists.
+
+        Keyed by setting name: `"sampling_rate"` and `"output_range"`, then
+        the channel settings, each with one value per channel and no
+        unused index 0. It holds only numbers, booleans and names, so it
+        can be saved with `json` and logged with your data. The waveforms
+        are not part of it: `WavePalDevice.waveforms` holds them.
+
+        ```python
+        import json
+        with open("session_settings.json", "w") as f:
+            json.dump(W.export_params(), f)
+        ```
+        """
+        params = {"sampling_rate": self._sampling_rate, "output_range": self._output_range}
+        for name in ("loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
+                     "link_trigger_channel2"):
+            params[name] = list(getattr(self, name))[1:]
+        return params
+
     @property
     def waveforms(self):
         """The waveforms loaded with `WavePalDevice.load_waveform`.
@@ -663,7 +720,7 @@ class WavePalDevice:
     # Connection
     # ------------------------------------------------------------------
 
-    def close(self, send_disconnect=True):
+    def close(self):
         """Close the connection to the device.
 
         The device stops playback on all channels, and shows its own name
@@ -673,11 +730,12 @@ class WavePalDevice:
         block and when the object is garbage collected, so playback also
         stops when the last reference to the object goes.
 
-        Args:
-            send_disconnect: If `True`, tell the device that the client
-                is disconnecting before closing the port. Set to `False`
-                when the device may not be a Wave Pal.
         """
+        self._close(send_disconnect=True)
+
+    def _close(self, send_disconnect):
+        """Close the connection. send_disconnect: tell the device first (op 81). False when the device may not
+        run this firmware: op 81 means something else to other devices."""
         if getattr(self, "_closed", True):
             return
         self._closed = True
@@ -689,10 +747,6 @@ class WavePalDevice:
         finally:
             if self.port and self.port.is_open:
                 self.port.close()
-
-    def bytes_available(self):
-        """Return the number of bytes waiting in the serial read buffer."""
-        return self.port.in_waiting
 
     def __enter__(self):
         """Enter a `with` block, returning the connected device."""
@@ -743,28 +797,26 @@ class WavePalDevice:
     def _handshake(self):
         """Check that the device runs a supported Wave Pal firmware."""
         self._write_command(self._OP_HANDSHAKE)
-        try:
-            reply = self._read_raw(1)[0]
-        except PulsePalError as exc:
+        handshake = _common.read_handshake_reply(self.port)  # Skips a reply to an earlier session's command
+        if handshake is None:
             raise PulsePalError(
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Wave Pal firmware?"
-            ) from exc
+            )
+        reply, version = handshake
         if reply != self._HANDSHAKE_REPLY:
             if reply in _common.FIRMWARE_BY_HANDSHAKE_REPLY:
-                version = struct.unpack("<I", self._read_raw(4))[0]
                 raise _common.other_firmware_error(reply, version, self.port.port, "Wave Pal")
             raise PulsePalError(
                 "Incorrect handshake returned. Expected "
                 f"{self._HANDSHAKE_REPLY}, received {reply}."
             )
-        version = struct.unpack("<I", self._read_raw(4))[0]
         if version > self._CURRENT_FIRMWARE_VERSION:
-            raise PulsePalError(
-                f"Future firmware detected, v{version}. Please update the "
-                "pulsepal package or load Wave Pal firmware "
-                f"v{self._CURRENT_FIRMWARE_VERSION}."
-            )
+            # New firmware only adds commands (see PROTOCOL.md), so this class still works with it
+            warnings.warn(
+                f"Wave Pal firmware v{version} is newer than this pulsepal package knows "
+                f"(v{self._CURRENT_FIRMWARE_VERSION}). It works with it, but update the package to use what is "
+                "new.", stacklevel=3)
         self.info.firmware_version = version
 
     def _read_hardware_info(self):

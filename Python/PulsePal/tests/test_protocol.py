@@ -15,6 +15,7 @@ They also run under pytest, if it is installed:
 """
 import struct
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -30,8 +31,11 @@ class FakePort:
     """Records written bytes and read sizes, and replies to reads.
 
     Bytes placed in `response` are returned first; after that, reads return the
-    acknowledgement byte.
+    acknowledgement byte. They count as sent by the device only when they are
+    read, so `in_waiting` is 0: the handshake reads exactly its 5 bytes.
     """
+
+    in_waiting = 0
 
     def __init__(self, ack=1):
         self.port = "FAKE"
@@ -39,6 +43,11 @@ class FakePort:
         self.reads = []
         self.ack = ack
         self.response = bytearray()
+        self.resets = []  # The number of writes before each reset_input_buffer()
+
+    def reset_input_buffer(self):
+        # `response` holds replies to commands not yet sent, so it is kept
+        self.resets.append(len(self.writes))
 
     def write(self, data):
         self.writes.append(bytes(data))
@@ -85,7 +94,7 @@ def expect_error(function, *args, error=PulsePalError):
         function(*args)
     except error as exc:
         return exc
-    raise AssertionError(f"{function} did not raise {error.__name__}")
+    raise AssertionError(f"{function} did not raise {error}")
 
 
 def test_parameter_names_match_parameter_codes():
@@ -98,10 +107,9 @@ def test_parameter_names_match_parameter_codes():
                 "custom_train_id", "custom_train_target", "custom_train_loop", "resting_voltage",
                 "continuous_loop"]
     assert list(device.info.output_parameter_names) == expected
-    for code, name in enumerate(expected, start=1):
-        assert device._get_output_param_code(name) == code
-        assert device._get_output_param_code(code) == code
-    assert device._get_trigger_param_code("trigger_mode") == 128
+    assert {code: name for code, (name, _) in pulse_pal._OUTPUT_PARAMETERS.items()} == \
+        dict(enumerate(expected, start=1))
+    assert pulse_pal._TRIGGER_MODE_CODE == 128
 
 
 def test_connection_programs_the_defaults():
@@ -122,6 +130,7 @@ def test_connection_programs_the_defaults():
         bytes([OP_MENU_BYTE, 91, 128, 0, 0]),
     ], port.writes
     assert port.writes[4][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 5
+    assert port.resets == [0], "unread input was not discarded before the handshake"
     assert device.info.hardware_version == 3 and device.info.min_pulse_width_us == 100
     assert device.info.trigger_modes == ("Normal", "Toggle", "Gated", "Param Sync")
     assert device.is_biphasic == [None, False, False, False, False]
@@ -130,6 +139,44 @@ def test_connection_programs_the_defaults():
     assert device.trigger_mode == [None, "Normal", "Normal"]
     device.close()
     assert port.writes[-1] == bytes([OP_MENU_BYTE, 81]) and not port.is_open
+
+
+def connect_to(port, *args, **kwargs):
+    """A PulsePalDevice connected to a fake port."""
+    original_serial = pulse_pal.serial.Serial
+    pulse_pal.serial.Serial = lambda *a, **k: port
+    try:
+        return PulsePalDevice("COM9", *args, **kwargs)
+    finally:
+        pulse_pal.serial.Serial = original_serial
+
+
+def test_other_firmware_versions_warn():
+    """Newer firmware only adds commands, so the class uses it, with a warning. Older supported firmware
+    warns that an update is available. Neither prints."""
+    for version, text in ((23, "newer than this pulsepal package knows"), (21, "v22 is available")):
+        port = ClosablePort()
+        hardware = struct.pack("<BIBI", 3, 50, 4, 10000) if version > 21 else b""
+        port.response = bytearray([75]) + struct.pack("<I", version) + hardware
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            device = connect_to(port)
+        assert any(text in str(w.message) for w in caught), [str(w.message) for w in caught]
+        assert device.info.firmware_version == version
+        device.close()
+
+
+def test_the_public_surface_is_trimmed():
+    """No baud rate (USB ignores it), a keyword-only timeout, close() without arguments, and no
+    bytes_available()."""
+    port = ClosablePort()
+    port.response = bytearray([75]) + struct.pack("<I", 22) + struct.pack("<BIBI", 3, 50, 4, 10000)
+    expect_error(connect_to, port, 12000000, error=TypeError)
+    device = connect_to(port, timeout=2)
+    expect_error(device.close, True, error=TypeError)
+    for name in ("bytes_available", "set_output_param", "set_trigger_param"):
+        assert not hasattr(device, name), name
+    device.close()
 
 
 def test_assigning_a_parameter_programs_the_device():
@@ -276,7 +323,7 @@ def test_times_hold_the_value_the_device_plays():
     device = make_device()
     device.phase1_duration[1] = 0.00012     # 2.4 cycles: plays 100 us
     device.pulse_train_delay[2] = 0.000175  # 3.5 cycles: plays 200 us (halfway, to the even cycle)
-    device.set_output_param("burst_duration", 3, 1.00004)
+    device.burst_duration[3] = 1.00004
     assert device.phase1_duration[1] == 0.0001
     assert device.pulse_train_delay[2] == 0.0002
     assert device.burst_duration[3] == 1.00005
@@ -306,57 +353,6 @@ def test_print_shows_every_parameter():
     assert "Pulse Pal 3, firmware v22" in text
     for name in (*device.info.output_parameter_names, "trigger_mode", "auto_sync"):
         assert f"{name}: " in text, name
-
-
-def test_set_output_param_one_channel_uses_op_74():
-    device = make_device()
-    device.set_output_param("phase1_voltage", 2, 5)
-    device.set_output_param("phase1_duration", 3, 0.001)
-    device.set_output_param("is_biphasic", 1, True)
-    assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 74, 2, 2]) + struct.pack("<H", volts_to_bits(5)),
-        bytes([OP_MENU_BYTE, 74, 4, 3]) + struct.pack("<I", 20),
-        bytes([OP_MENU_BYTE, 74, 1, 1, 1]),
-    ]
-    assert device.phase1_voltage[2] == 5
-    assert device.phase1_duration[3] == 0.001
-    assert device.is_biphasic[1] is True
-
-
-def test_set_output_param_all_channels_uses_op_91_even_with_auto_sync_off():
-    device = make_device()
-    device.auto_sync = False
-    device.set_output_param("phase1_voltage", (1, 2, 3, 4), [-10, 0, 5, 10])
-    assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 91, 2])
-        + struct.pack("<4H", 0, volts_to_bits(0), volts_to_bits(5), 65535)
-    ]
-    assert device.phase1_voltage[1:5] == [-10, 0, 5, 10]
-
-
-def test_set_output_param_channel_subset_uses_op_74_per_channel():
-    device = make_device()
-    device.set_output_param("pulse_train_duration", np.array([2, 4]), 1)
-    assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 74, 10, 2]) + struct.pack("<I", 20000),
-        bytes([OP_MENU_BYTE, 74, 10, 4]) + struct.pack("<I", 20000),
-    ]
-
-
-def test_set_output_param_rejects_bad_channels_and_value_counts():
-    for channel, value in [([1, 1], 5), ([1, 5], 5), ([], 5), ([1, 2, 3, 4], [1, 2])]:
-        device = make_device()
-        expect_error(device.set_output_param, "phase1_voltage", channel, value)
-        assert device.port.writes == []
-    expect_error(make_device().set_output_param, "playback_mode", 1, 1)  # Renamed continuous_loop
-
-
-def test_set_trigger_param_uses_op_74_with_code_128():
-    device = make_device()
-    device.set_trigger_param("trigger_mode", 2, "Gated")
-    device.set_trigger_param("trigger_mode", 1, 1)
-    assert device.port.writes == [bytes([OP_MENU_BYTE, 74, 128, 2, 2]), bytes([OP_MENU_BYTE, 74, 128, 1, 1])]
-    assert device.trigger_mode == [None, "Toggle", "Gated"]
 
 
 def test_set_fixed_voltage_uses_op_79_per_channel():
@@ -445,7 +441,7 @@ def test_custom_pulse_times_are_multiples_of_100_us():
 
     device = make_device()
     device.send_custom_pulse_train(1, np.arange(5) * 0.0001 + 0.0003, [1, 2, 3, 4, 5])  # Float error is fine
-    device.send_custom_waveform(2, 0.0002, [1, 2, 3])
+    device.send_custom_waveform(custom_train_id=2, sampling_period=0.0002, voltages=[1, 2, 3])
     assert device.port.writes[0][7:27] == struct.pack("<5I", 6, 8, 10, 12, 14)
     assert device.port.writes[1][7:19] == struct.pack("<3I", 0, 4, 8)
 
@@ -461,7 +457,8 @@ def test_waveform_matches_an_equivalent_pulse_train():
 def test_a_rejected_command_raises():
     """The firmware replies 0 when it rejects a command (see /Firmware/PROTOCOL.md)."""
     device = make_device(ack=0)
-    error = expect_error(device.set_output_param, "phase1_voltage", 1, 5)
+    device.port.response = bytearray(bytes([0]) + parameter_message())
+    error = expect_error(device.phase1_voltage.__setitem__, 1, 5)
     assert "rejected" in str(error)
 
 
@@ -525,21 +522,21 @@ def test_values_the_device_cannot_play_raise_before_sending():
         lambda d: d.set_fixed_voltage(1, 12),
         lambda d: d.set_fixed_voltage(1, float("nan")),
         lambda d: d.set_fixed_voltage(5, 1),
-        lambda d: d.set_output_param("phase1_voltage", 1, 15),
-        lambda d: d.set_output_param("resting_voltage", [1, 2, 3, 4], [0, 0, -10.5, 0]),
-        lambda d: d.set_output_param("phase1_duration", 1, 0),
-        lambda d: d.set_output_param("phase1_duration", 1, 0.00002),   # Rounds to 0 cycles
-        lambda d: d.set_output_param("phase1_duration", 1, 0.00005),   # One cycle
-        lambda d: d.set_output_param("phase2_duration", 1, 0),
-        lambda d: d.set_output_param("pulse_train_duration", 1, 0.00005),
-        lambda d: d.set_output_param("pulse_train_delay", 1, -0.001),
-        lambda d: d.set_output_param("pulse_train_duration", 1, float("nan")),
-        lambda d: d.set_output_param("inter_pulse_interval", 1, 0),
-        lambda d: d.set_output_param("is_biphasic", 1, 2),
-        lambda d: d.set_output_param("custom_train_id", 1, 5),
-        lambda d: d.set_output_param("custom_train_loop", 1, 0.5),
-        lambda d: d.set_trigger_param("trigger_mode", 1, 4),
-        lambda d: d.set_trigger_param("trigger_mode", 3, 0),
+        lambda d: d.phase1_voltage.__setitem__(1, 15),
+        lambda d: setattr(d, "resting_voltage", [0, 0, -10.5, 0]),
+        lambda d: d.phase1_duration.__setitem__(1, 0),
+        lambda d: d.phase1_duration.__setitem__(1, 0.00002),   # Rounds to 0 cycles
+        lambda d: d.phase1_duration.__setitem__(1, 0.00005),   # One cycle
+        lambda d: d.phase2_duration.__setitem__(1, 0),
+        lambda d: d.pulse_train_duration.__setitem__(1, 0.00005),
+        lambda d: d.pulse_train_delay.__setitem__(1, -0.001),
+        lambda d: d.pulse_train_duration.__setitem__(1, float("nan")),
+        lambda d: d.inter_pulse_interval.__setitem__(1, 0),
+        lambda d: d.is_biphasic.__setitem__(1, 2),
+        lambda d: d.custom_train_id.__setitem__(1, 5),
+        lambda d: d.custom_train_loop.__setitem__(1, 0.5),
+        lambda d: d.trigger_mode.__setitem__(1, 4),
+        lambda d: d.trigger_mode.__setitem__(3, 0),
         lambda d: d.send_custom_pulse_train(1, [0, 0.001], [5, 11]),
         lambda d: d.send_custom_waveform(1, 0.001, [0, float("nan")]),
         lambda d: d.phase1_voltage.__setitem__(3, 15),
@@ -548,7 +545,7 @@ def test_values_the_device_cannot_play_raise_before_sending():
     ]
     for call in calls:
         device = make_device()
-        expect_error(call, device)
+        expect_error(call, device, error=(PulsePalError, IndexError))
         assert device.port.writes == []
 
 
@@ -571,10 +568,10 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     device.info.cycle_period_us = 25
     device.info.cycle_frequency = 40000
     device.info.min_pulse_width_us = 50
-    device.set_output_param("phase1_duration", 1, 0.00005)  # 2 cycles of 25 us
+    device.phase1_duration[1] = 0.00005  # 2 cycles of 25 us
     device.send_custom_waveform(1, 0.00005, [1, 2, 3])
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2)
-    error = expect_error(device.set_output_param, "phase1_duration", 1, 0.000025)
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 40, 40, 40)
+    error = expect_error(device.phase1_duration.__setitem__, 1, 0.000025)
     assert "at least 5e-05 s (2 cycles of the device's 25 us timer)" in str(error), error
 
 
@@ -582,11 +579,11 @@ def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
     """All three classes round a value exactly halfway to the even one, so a script gives the
     same train in each: 125 us (2.5 cycles) is 2 cycles, and +4 V (DAC code 45874.5) is 45874."""
     device = make_device()
-    device.set_output_param("phase1_duration", 1, 0.000125)
-    device.set_output_param("phase1_voltage", 1, 4)
+    device.phase1_duration[1] = 0.000125
+    device.phase1_voltage[1] = 4
     assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2),
-        bytes([OP_MENU_BYTE, 74, 2, 1]) + struct.pack("<H", 45874),
+        bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 20, 20, 20),
+        bytes([OP_MENU_BYTE, 91, 2]) + struct.pack("<4H", 45874, *[volts_to_bits(5)] * 3),
     ]
 
 
@@ -603,23 +600,20 @@ def parameter_message(cycles=200, volt_bits=None, byte_value=1):
 
 
 def test_a_refused_value_is_read_back_from_the_device():
-    """The firmware resets a value it refuses, so the class reads that parameter back (op 93)
-    for the channels it sent, and leaves every other local value as it was."""
+    """The firmware resets a value it refuses, so the class reads that parameter back (op 93), and
+    leaves every other parameter as it was."""
     device = make_device(ack=0)
-    device.auto_sync = False
-    device.phase1_voltage[1] = 7   # A local edit, not yet synced
-    device.port.response = bytearray(bytes([0]) + parameter_message(byte_value=1))
-    error = expect_error(device.set_output_param, "custom_train_id", 2, 3)
+    device.port.response = bytearray(bytes([0]) + parameter_message(volt_bits=volts_to_bits(2.5), byte_value=1))
+    error = expect_error(device.custom_train_id.__setitem__, 2, 3)
     assert "rejected" in str(error)
     assert device.port.writes[1] == bytes([OP_MENU_BYTE, 93])
-    assert device.custom_train_id[1:5] == [0, 1, 0, 0]   # Channel 2 from the device
-    assert device.phase1_voltage[1] == 7
+    assert device.custom_train_id[1:5] == [1, 1, 1, 1]   # From the device
+    assert device.phase1_voltage[1:5] == [5] * 4         # Not read back: the device holds 2.5 V in this reply
 
-    # The same for an assignment, which sends all four channels
-    device = make_device(ack=0)
-    device.port.response = bytearray(bytes([0]) + parameter_message(byte_value=1))
+    # On firmware v21, which has no op 93, the local copy is left as it was
+    device = make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000, ack=0)
     expect_error(device.custom_train_loop.__setitem__, 2, True)
-    assert device.custom_train_loop == [None, True, True, True, True]
+    assert device.custom_train_loop == [None, False, False, False, False]
 
 
 def test_a_refused_settings_load_reads_the_parameters_back():
@@ -703,6 +697,7 @@ def test_export_and_import_params():
 
     other = make_device()
     other.import_params(params)
+    assert other.port.writes[0][:2] == bytes([OP_MENU_BYTE, 92])
     assert len(other.port.writes) == 1 and other.port.writes[0][:2] == bytes([OP_MENU_BYTE, 92])
     assert other.export_params() == params
     device.sync_to_device()
@@ -712,9 +707,15 @@ def test_export_and_import_params():
     other.import_params({"phase1_duration": [0.002] * 4})
     assert other.phase1_duration[1:5] == [0.002] * 4 and other.phase1_voltage[2] == 2.5
     n_writes = len(other.port.writes)
-    expect_error(other.import_params, {"phase1_voltage": [1] * 4, "playback_mode": [False] * 4})
     expect_error(other.import_params, {"phase1_voltage": [1] * 4, "phase2_voltage": [11] * 4})
     assert len(other.port.writes) == n_writes and other.phase1_voltage[1:5] == [5, 2.5, 5, 5]
+
+    # A name this version does not have (one a newer version exported, say) is skipped with a warning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        other.import_params({"phase1_voltage": [1] * 4, "a_future_parameter": [0] * 4})
+    assert "a_future_parameter" in str(caught[0].message)
+    assert other.phase1_voltage[1:5] == [1] * 4 and len(other.port.writes) == n_writes + 1
 
 
 class ClosablePort(FakePort):
@@ -731,6 +732,38 @@ class ClosablePort(FakePort):
         if not self.is_open:
             raise OSError("port closed")
         return super().write(data)
+
+
+class LateReplyPort(ClosablePort):
+    """A ClosablePort whose device first answers a command that an earlier session left queued on it:
+    `late_reply` arrives with the handshake's reply, after the input was discarded."""
+
+    def __init__(self, late_reply):
+        super().__init__()
+        self.response = bytearray(late_reply) + bytearray([75]) + struct.pack("<I", 22) \
+            + struct.pack("<BIBI", 3, 50, 4, 10000)
+        self.sent = len(late_reply) + 5  # The late reply and the handshake's: sent before anything is read
+
+    @property
+    def in_waiting(self):
+        return self.sent
+
+    def read(self, n):
+        self.sent = max(0, self.sent - n)
+        return super().read(n)
+
+
+def test_a_late_reply_to_an_earlier_session_is_skipped():
+    """A command an earlier session sent just before it closed can still be waiting on the device, which
+    answers it after the input was discarded, and before the handshake. The handshake's reply is the last
+    5 bytes the device sends, so the late reply is skipped, also one that looks like a handshake."""
+    op_93_reply = bytes([20, 0, 0, 0]) * 8 + bytes(146)  # Starts with 20 cycles: 1 ms
+    for late_reply in (op_93_reply, bytes([75, 99, 0, 0, 0]), bytes([1])):
+        port = LateReplyPort(late_reply)
+        device = connect_to(port)
+        assert device.info.firmware_version == 22 and device.info.hardware_version == 3, late_reply[:5]
+        assert port.writes[1] == bytes([OP_MENU_BYTE, 94]) and port.sent == 0
+        device.close()
 
 
 def test_connecting_to_other_firmware_says_so():
@@ -753,11 +786,10 @@ def test_connecting_to_other_firmware_says_so():
 
 
 def test_a_refused_connection_closes_the_port():
-    """Firmware too old or too new for the class, or an error later in the connection,
-    must not leave the port open: a second attempt could not open it."""
+    """Firmware too old for the class, or an error later in the connection, must not leave the
+    port open: a second attempt could not open it."""
     handshake_then_version = {
         "old firmware": bytearray([75]) + struct.pack("<I", 19),
-        "future firmware": bytearray([75]) + struct.pack("<I", 99),
         # Current firmware, then a reply to op 94 that ends early
         "an error during setup": bytearray([75]) + struct.pack("<I", 22),
     }

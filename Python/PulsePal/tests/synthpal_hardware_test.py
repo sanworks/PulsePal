@@ -243,9 +243,11 @@ class Skipped(Exception):
 def driver_pulse(D, channels, width=0.001):
     """A TTL pulse on the driver's output channels (1, 2 or both, together), 0 V to 4 V: the
     Synth Pal's trigger inputs take 3 to 5 V."""
-    D.set_output_param("phase1_voltage", list(channels), [4.0] * len(channels))
-    D.set_output_param("phase1_duration", list(channels), [width] * len(channels))
-    D.set_output_param("pulse_train_duration", list(channels), [width] * len(channels))
+    with D.batch():
+        for channel in channels:
+            D.phase1_voltage[channel] = 4.0
+            D.phase1_duration[channel] = width
+            D.pulse_train_duration[channel] = width
     D.trigger(list(channels))
     time.sleep(width + 0.02)
 
@@ -253,11 +255,12 @@ def driver_pulse(D, channels, width=0.001):
 def open_driver(port):
     """The driving Pulse Pal, set up for single positive pulses that start nothing else."""
     D = PulsePalDevice(port)
-    channels = [1, 2, 3, 4]
-    for name, value in (("is_biphasic", 0), ("resting_voltage", 0), ("pulse_train_delay", 0),
-                        ("inter_pulse_interval", 0.001), ("burst_duration", 0), ("inter_burst_interval", 0),
-                        ("custom_train_id", 0), ("link_trigger_channel1", 0), ("link_trigger_channel2", 0)):
-        D.set_output_param(name, channels, [value] * 4)
+    with D.batch():
+        for name, value in (("is_biphasic", False), ("resting_voltage", 0), ("pulse_train_delay", 0),
+                            ("inter_pulse_interval", 0.001), ("burst_duration", 0), ("inter_burst_interval", 0),
+                            ("custom_train_id", 0), ("link_trigger_channel1", False),
+                            ("link_trigger_channel2", False)):
+            setattr(D, name, [value] * 4)
     return D
 
 
@@ -610,6 +613,51 @@ def test_sync_to_device_applies_at_once_outside_param_sync(S):
     S.play_duration[1] = 1
 
 
+def test_sync_from_device_reads_what_the_device_plays(S):
+    """sync_from_device() reads every setting back, here after the object's own copy was changed
+    with auto_sync off, so that it differs from what the device holds. Assignments then plan from
+    the levels read back."""
+    S.frequency = 440.5
+    S.configure(1, waveform="Triangle", peak_to_peak=4, mean_voltage=1)
+    S.configure(2, waveform="Fixed Voltage", fixed_voltage=-2.5, mean_voltage=6)
+    S.resting_voltage[3] = -1
+    S.play_duration[4] = 0.25
+    S.on_ramp_duration[1] = 0.01
+    S.off_ramp_duration[2] = 0.02
+    S.link_trigger_channel2[3] = True
+    S.trigger_mode[2] = "Toggle"
+    expected = S.export_params()
+    S.auto_sync = False
+    try:
+        S.frequency = 1000
+        S.configure(1, waveform="Sine", peak_to_peak=2, mean_voltage=0)
+        S.resting_voltage[3] = 0
+        S.play_duration[4] = 1
+        S.link_trigger_channel2[3] = False
+        S.trigger_mode[2] = "Normal"
+    finally:
+        S.auto_sync = True
+    S.sync_from_device()
+    assert S.export_params() == expected, (S.export_params(), expected)
+    # From a fixed voltage of -2.5 V with a mean of 6 V, straight to a sine wave of 20 V peak to peak
+    S.configure(2, waveform="Sine", peak_to_peak=20, mean_voltage=0)
+    S.sync_from_device()
+    assert (S.waveform[2], S.peak_to_peak[2], S.mean_voltage[2]) == ("Sine", 20, 0)
+    S.set_default_params()
+
+
+def test_screen_saver_settings(S):
+    """Op 99 takes the screen saver's state and timeout. Left on, with 1800 s: a new device's settings."""
+    S.set_screen_saver(False)
+    S.set_screen_saver(True, 1800)
+    for enabled, timeout in ((2, 1800), (True, 0), (True, 65536)):
+        try:
+            S.set_screen_saver(enabled, timeout)
+        except PulsePalError:
+            continue
+        raise AssertionError(f"set_screen_saver({enabled!r}, {timeout!r}) was not refused")
+
+
 def store_next_trial(S, trigger_modes=("Normal", "Param Sync")):
     """Put trigger channel 2 in param sync mode, and store a set for its next edge: channels 1-4 at
     3000 Hz (32 samples per cycle), channel 1 a fixed voltage of 2 V, channels 2-4 a square wave of
@@ -784,6 +832,8 @@ def main():
         test_frequency_change_keeps_the_time_left_to_play,
         test_settings_change_during_playback,
         test_sync_to_device_applies_at_once_outside_param_sync,
+        test_sync_from_device_reads_what_the_device_plays,
+        test_screen_saver_settings,
         test_param_sync_holds_the_set_until_an_edge,
         lambda S: test_a_param_sync_edge_loads_the_set(S, D),
         lambda S: test_a_channel_playing_at_the_edge_finishes_on_its_settings(S, D),

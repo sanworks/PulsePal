@@ -40,10 +40,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // MENU_LIST         menuItem  1-4  Output channels 1-4. A click plays the channel's waveform, or stops it while it
 //                                  plays; the second line says which, or "No waveform". The trigger mode does not
 //                                  apply here.
-//                             5    Device info -> MENU_DEVICE_INFO (MENU_ITEM_DEVICE_INFO)
-//                             6    Reboot (MENU_ITEM_REBOOT)
-//                             7    Exit -> MENU_TOP (MENU_ITEM_EXIT)
-// MENU_DEVICE_INFO  Hardware and firmware versions. Click -> MENU_LIST, at item 5
+//                             5    Screen saver on/off: a click switches it (MENU_ITEM_SCREEN_SAVER). Its timeout
+//                                  is set over USB only (op 99).
+//                             6    Device info -> MENU_DEVICE_INFO (MENU_ITEM_DEVICE_INFO)
+//                             7    Reboot (MENU_ITEM_REBOOT)
+//                             8    Exit -> MENU_TOP (MENU_ITEM_EXIT)
+// MENU_DEVICE_INFO  Hardware and firmware versions. Click -> MENU_LIST, at item 6
 //
 // To add an option to MENU_LIST: add it to enum MenuItem in WavePal.ino (the last item must stay MENU_ITEM_EXIT, which
 // the scroll wraps at), then add its click in onMenuClick() and its screen in RefreshMenuList().
@@ -52,6 +54,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 void UpdateMenu() {
   ClickerX = analogRead(ClickerXLine);
   ClickerButtonState = ReadDebouncedButton();
+  // A joystick click or push restarts the screen saver's idle time. While the screen is dimmed, it only wakes the
+  // screen: it is marked as handled here, so the menu acts on the next click or push, not on this one.
+  if (ClickerButtonState || (ClickerX < ClickerMinThreshold) || (ClickerX > ClickerMaxThreshold)) {
+    screenSaverActivity = true;
+    if (screenDimmed) {
+      if (ClickerButtonState) {LastClickerButtonState = 1;}
+      if (ClickerX < ClickerMinThreshold) {LastClickerXState = 1;}
+      if (ClickerX > ClickerMaxThreshold) {LastClickerXState = 2;}
+      return;
+    }
+  }
   if (ClickerButtonState && !LastClickerButtonState) {
     onMenuClick();
   }
@@ -87,6 +100,10 @@ void onMenuClick() {
           startChannels(bit(channel)); // Does nothing if the channel has no waveform
         }
         interrupts();
+        RefreshMenuList();
+      } else if (menuItem == MENU_ITEM_SCREEN_SAVER) {
+        screenSaverEnabled = !screenSaverEnabled;
+        screenSaverSavePending = true; // Saved to the EEPROM by updateScreenSaver(), once no channel is playing
         RefreshMenuList();
       } else if (menuItem == MENU_ITEM_DEVICE_INFO) {
         inMenu = MENU_DEVICE_INFO;
@@ -139,6 +156,7 @@ void RefreshMenuList() {
   static const char* channelActions[3] = {"No waveform", "Click to play", "Click to stop"}; // Indexed by channelMenuState()
   shownChannelState = -1;
   switch (menuItem) {
+    case MENU_ITEM_SCREEN_SAVER: {write2Screen("< Screen Saver >", screenSaverEnabled ? "On" : "Off");} break;
     case MENU_ITEM_DEVICE_INFO: {write2Screen("< Device Info  >", "Click to view");} break;
     case MENU_ITEM_REBOOT: {write2Screen("<    Reboot    >", " ");} break;
     case MENU_ITEM_EXIT: {write2Screen("<     Exit     >", " ");} break;

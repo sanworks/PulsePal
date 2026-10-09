@@ -147,6 +147,15 @@ size_t USBSerialPort::read(uint8_t* data, size_t nBytes, unsigned int timeoutMs)
     return (size_t)result;
 }
 
+size_t USBSerialPort::bytesWaiting()
+{
+    if (!portOpen) {
+        return 0;
+    }
+    int result = sp_input_waiting(port);
+    return (result > 0) ? (size_t)result : 0;
+}
+
 std::string USBSerialPort::lastError() const
 {
     return errorMessage;

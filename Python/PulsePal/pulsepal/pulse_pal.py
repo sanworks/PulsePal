@@ -116,6 +116,7 @@ import math
 import numbers
 import struct
 import time
+import warnings
 
 import numpy as np
 import serial
@@ -211,13 +212,9 @@ class DeviceInfo:
     output_parameter_names: tuple = tuple(name for name, _ in _OUTPUT_PARAMETERS.values())
     """Output parameter names, ordered by parameter code.
 
-    Each is the name of a parameter list on `PulsePalDevice`, and valid
-    as the `param_name` argument of `PulsePalDevice.set_output_param`.
+    Each is the name of a parameter list on `PulsePalDevice`, and a key of
+    the dict `PulsePalDevice.export_params` returns.
     """
-
-    trigger_parameter_names: tuple = ("trigger_mode",)
-    """Trigger parameter names, accepted by
-    `PulsePalDevice.set_trigger_param`."""
 
     trigger_modes: tuple = TRIGGER_MODES
     """Names of the trigger modes the connected device has, accepted by
@@ -468,13 +465,12 @@ class PulsePalDevice:
     until something stops it.
 
     While either trigger channel is in param sync mode, **only
-    `PulsePalDevice.sync_to_device` is held back**: with
-    `PulsePalDevice.auto_sync` on, every assignment still programs the
-    device immediately, as do `PulsePalDevice.set_output_param` and
-    `PulsePalDevice.set_trigger_param`. So leaving param sync mode means
-    assigning `trigger_mode` with `auto_sync` on; a trigger mode sent by
-    `PulsePalDevice.sync_to_device` does not take effect until a sync
-    edge arrives.
+    `PulsePalDevice.sync_to_device` is held back** (and the end of a
+    `PulsePalDevice.batch` block): with `PulsePalDevice.auto_sync` on,
+    every assignment still programs the device immediately. So leaving
+    param sync mode means assigning `trigger_mode` with `auto_sync` on; a
+    trigger mode sent by `PulsePalDevice.sync_to_device` does not take
+    effect until a sync edge arrives.
 
     A param sync channel's links to output channels are ignored. To
     start a pulse train on the same edge, wire the TTL to the other
@@ -497,6 +493,7 @@ class PulsePalDevice:
 
     _CURRENT_FIRMWARE_VERSION = 22
     _OLDEST_FIRMWARE_SUPPORTED = 21
+    _BAUD_RATE = 12000000  # USB serial ignores the baud rate
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _HANDSHAKE_OPCODE = _common.OP_HANDSHAKE
@@ -527,7 +524,7 @@ class PulsePalDevice:
         "int32": (-(2**31), 2**31 - 1),
     }
 
-    def __init__(self, port_name, baud_rate=12000000, timeout=10):
+    def __init__(self, port_name, *, timeout=10):
         """Open a connection to a Pulse Pal device.
 
         Opens the serial port, exchanges the handshake, verifies the
@@ -538,14 +535,16 @@ class PulsePalDevice:
         Args:
             port_name: USB serial port for the Pulse Pal device, such as
                 `COM3` on Windows or `/dev/ttyACM0` on Linux.
-            baud_rate: Serial baud rate. USB serial ignores it.
             timeout: Serial read timeout, in seconds.
+
+        Firmware newer than this module knows (`v22`) is used with a
+        warning: new firmware only adds commands, so everything here still
+        works with it. Update the package to use what is new.
 
         Raises:
             PulsePalError: If the device does not return the expected
                 handshake (for example, it runs Wave Pal or Synth Pal
-                firmware), or its firmware is older than v21, or its
-                firmware is newer than this module supports. The port is
+                firmware), or its firmware is older than v21. The port is
                 closed again before any error is raised.
             serial.SerialException: If the serial port cannot be opened.
         """
@@ -556,7 +555,7 @@ class PulsePalDevice:
         self._create_settings()
         self.port = serial.Serial(
             port_name,
-            baud_rate,
+            self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
         )
@@ -568,7 +567,7 @@ class PulsePalDevice:
             # collected, and a second attempt, or WavePalDevice, cannot open
             # it. The device is in an unknown state, so it is not sent the
             # disconnect op.
-            self.close(send_disconnect=False)
+            self._close(send_disconnect=False)
             raise
 
     def _create_settings(self):
@@ -581,21 +580,28 @@ class PulsePalDevice:
 
     def _start_session(self, port_name):
         """Handshake, check the firmware, and program the defaults."""
+        # Discard anything left unread by an earlier session (one stopped mid-reply, for example):
+        # it would be read as the handshake's reply. A reply the device sends after this, to a
+        # command it had not reached yet, is skipped by read_handshake_reply().
+        self.port.reset_input_buffer()
         self._write_serial(
             (self._OP_MENU_BYTE, self._HANDSHAKE_OPCODE),
             "uint8",
         )
-        handshake = self._read_serial(1, "uint8")
+        reply = _common.read_handshake_reply(self.port)
+        if reply is None:
+            raise PulsePalError(
+                f"No reply to the handshake from the device on {port_name}. Is it a Pulse Pal?"
+            )
+        handshake, firmware_version = reply
         if handshake != self._HANDSHAKE_RESPONSE:
             if handshake in _common.FIRMWARE_BY_HANDSHAKE_REPLY:
-                version = self._read_serial(1, "uint32")
-                raise _common.other_firmware_error(handshake, version, port_name, "Pulse Pal")
+                raise _common.other_firmware_error(handshake, firmware_version, port_name, "Pulse Pal")
             raise PulsePalError(
                 "Incorrect handshake returned. Expected "
                 f"{self._HANDSHAKE_RESPONSE}, received {handshake}."
             )
 
-        firmware_version = self._read_serial(1, "uint32")
         if firmware_version < self._OLDEST_FIRMWARE_SUPPORTED:
             raise PulsePalError(
                 "Old firmware detected, v"
@@ -603,17 +609,15 @@ class PulsePalDevice:
                 "newer is required."
             )
         if firmware_version > self._CURRENT_FIRMWARE_VERSION:
-            raise PulsePalError(
-                "Future firmware detected, v"
-                f"{firmware_version}. Please update the pulsepal package or "
-                f"load firmware v{self._CURRENT_FIRMWARE_VERSION}."
-            )
+            # New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+            warnings.warn(
+                f"Pulse Pal firmware v{firmware_version} is newer than this pulsepal package knows "
+                f"(v{self._CURRENT_FIRMWARE_VERSION}). It works with it, but update the package to use what "
+                "is new.", stacklevel=3)
         if firmware_version < self._CURRENT_FIRMWARE_VERSION:
-            print(
-                "Old firmware detected, v"
-                f"{firmware_version}. This firmware is supported. Update to v"
-                f"{self._CURRENT_FIRMWARE_VERSION} is available."
-            )
+            warnings.warn(
+                f"Pulse Pal firmware v{firmware_version} is supported, but v"
+                f"{self._CURRENT_FIRMWARE_VERSION} is available: see /MATLAB/FirmwareLoader.", stacklevel=3)
         self.info.firmware_version = firmware_version
 
         if self.info.firmware_version > 21:
@@ -811,130 +815,28 @@ class PulsePalDevice:
         All of them are checked first, and then sent in one command, as
         at the end of a `PulsePalDevice.batch` block: in param sync mode,
         the device stores them for the next sync edge. Parameters missing
-        from `params` keep their values.
+        from `params` keep their values. A name that is not a parameter
+        is skipped with a warning, so that parameters exported by a newer
+        version of this package, which may have more, can still be
+        imported.
 
         Args:
             params: A dict of parameter name to one value per channel (a
                 list, tuple or NumPy array), as `export_params` returns.
 
         Raises:
-            PulsePalError: If a name is not a parameter, or a value is
-                invalid. Nothing is sent, and the parameters keep the
-                values they had.
+            PulsePalError: If a value is invalid. Nothing is sent, and the
+                parameters keep the values they had.
         """
         names = {*self.info.output_parameter_names, "trigger_mode"}
         unknown = [name for name in params if name not in names]
         if unknown:
-            raise PulsePalError(
-                f"import_params(): unknown parameter(s) {', '.join(map(repr, unknown))}. Valid names are "
-                f"{', '.join(self.info.output_parameter_names)} and trigger_mode."
-            )
+            warnings.warn(f"import_params(): skipped {', '.join(map(repr, unknown))}, which this version of "
+                          "PulsePalDevice does not have.", stacklevel=2)
         with self.batch():
             for name, values in params.items():
-                setattr(self, name, values)
-
-    def set_output_param(self, param_name, channel, value):
-        """Program an output channel parameter on the device at once.
-
-        This is the same as assigning to the parameter's list with
-        `PulsePalDevice.auto_sync` on, but takes effect at once whether
-        auto_sync is on or not. The local copy is updated to match.
-
-        ```python
-        P.set_output_param("is_biphasic", 1, True)
-        P.set_output_param("phase1_voltage", 1, 10)
-        P.set_output_param("phase1_voltage", [1, 2, 3, 4], [5, 5, 5, 3])
-        P.set_output_param("phase1_duration", [2, 4], 0.002)
-        ```
-
-        Setting all four channels in one call programs them with a single
-        command (firmware v22 or newer). Otherwise, each listed channel is
-        programmed with its own command. Channels that are not listed are
-        not changed.
-
-        Args:
-            param_name: Parameter name, as listed in
-                `DeviceInfo.output_parameter_names`, or its integer
-                parameter code.
-            channel: Output channel number, 1-4, or several as a list,
-                tuple or NumPy array of distinct channel numbers.
-            value: Value to set, as for the parameter's list. If
-                `channel` lists several channels, either one value for
-                all of them, or a list with one value per listed channel,
-                in the same order.
-
-        Raises:
-            PulsePalError: If the parameter name is not recognized, the
-                channels or number of values are invalid, a value is out
-                of range for the parameter (nothing is sent), or the device
-                does not acknowledge the command. When the device refuses a
-                value, the local copy of the parameter is first read back
-                from the device, which resets a value it refuses.
-        """
-        code = self._get_output_param_code(param_name)
-        name = _OUTPUT_PARAMETERS[code][0]
-        channels = _common.channel_numbers(channel)
-        if len(set(channels)) != len(channels):
-            raise PulsePalError(f"set_output_param(): channels must be distinct. Received {channel!r}.")
-        values = list(value) if isinstance(value, (list, tuple, np.ndarray)) else [value]
-        if len(values) == 1:
-            values = values * len(channels)
-        if len(values) != len(channels):
-            raise PulsePalError(
-                f"{len(values)} values were given for {len(channels)} "
-                "channels. Give one value, or one value per channel."
-            )
-        values = [self._normalize_output_value(code, v, ch) for ch, v in zip(channels, values)]
-        settings = getattr(self, name)
-        new_values = list(settings)[1:]
-        for ch, v in zip(channels, values):
-            new_values[ch - 1] = v
-        if sorted(channels) == [1, 2, 3, 4] and self.info.firmware_version > 21:
-            self._send_output_param(code, new_values, "set_output_param()")
-        else:
-            for ch in channels:
-                self._send_output_param_to_channel(code, ch, new_values[ch - 1], "set_output_param()")
-        settings._store(new_values)
-
-    def set_trigger_param(self, param_name, channel, value):
-        """Program a trigger channel parameter on the device at once.
-
-        This is the same as assigning to `PulsePalDevice.trigger_mode`
-        with `PulsePalDevice.auto_sync` on, but takes effect at once
-        whether auto_sync is on or not, also in param sync mode. The local
-        copy is updated to match.
-
-        ```python
-        P.set_trigger_param("trigger_mode", 1, "Gated")
-        ```
-
-        Args:
-            param_name: Parameter name, as listed in
-                `DeviceInfo.trigger_parameter_names`, or its integer
-                parameter code.
-            channel: Trigger channel number, 1-2.
-            value: Value to set. See `PulsePalDevice.trigger_mode` for
-                the trigger modes.
-
-        Raises:
-            PulsePalError: If the parameter name is not recognized, the
-                channel or value is out of range (nothing is sent), or the
-                device does not acknowledge the command.
-        """
-        self._get_trigger_param_code(param_name)
-        channel = _common.channel_numbers(channel, n_channels=2, kind="Trigger")
-        if len(channel) != 1:
-            raise PulsePalError("set_trigger_param() takes one trigger channel, 1 or 2.")
-        channel = channel[0]
-        mode = self._normalize_trigger_mode(value)
-        self._write_serial(
-            (self._OP_MENU_BYTE, 74, _TRIGGER_MODE_CODE, channel, TRIGGER_MODES.index(mode)),
-            "uint8",
-        )
-        self._read_ack("set_trigger_param()", on_refusal=self._refresh_trigger_mode)
-        modes = list(self._trigger_mode)[1:]
-        modes[channel - 1] = mode
-        self._trigger_mode._store(modes)
+                if name in names:
+                    setattr(self, name, values)
 
     def set_fixed_voltage(self, channels, voltage):
         """Set output channels to a fixed voltage.
@@ -1078,7 +980,7 @@ class PulsePalDevice:
         self,
         custom_train_id,
         pulse_times,
-        pulse_voltages,
+        voltages,
     ):
         """Load a custom pulse train onto the device.
 
@@ -1104,12 +1006,12 @@ class PulsePalDevice:
                 start of the train, increasing. Each is a multiple of
                 `DeviceInfo.min_pulse_width_us` (100 us), from 0 to
                 `MAX_TIME`. Accepts a list, tuple or NumPy array.
-            pulse_voltages: Voltage of each pulse, in volts [-10, 10].
-                Must be the same length as `pulse_times`.
+            voltages: Voltage of each pulse, in volts [-10, 10]. Must be
+                the same length as `pulse_times`.
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range,
-                `pulse_times` and `pulse_voltages` differ in length,
+                `pulse_times` and `voltages` differ in length,
                 there are more pulses than
                 `DeviceInfo.max_custom_pulses`, a pulse time is not a
                 multiple of `DeviceInfo.min_pulse_width_us`, is out of
@@ -1117,10 +1019,10 @@ class PulsePalDevice:
                 device does not acknowledge the command.
         """
         pulse_times = self._as_list(pulse_times)
-        pulse_voltages = self._as_list(pulse_voltages)
-        if len(pulse_times) != len(pulse_voltages):
+        voltages = self._as_list(voltages)
+        if len(pulse_times) != len(voltages):
             raise PulsePalError(
-                "pulse_times and pulse_voltages must be the same length."
+                "pulse_times and voltages must be the same length."
             )
 
         pulse_times_cycles = [
@@ -1128,8 +1030,8 @@ class PulsePalDevice:
             for pulse_time in pulse_times
         ]
         pulse_voltage_bits = [
-            self._volts_to_bits(voltage, "pulse_voltages")
-            for voltage in pulse_voltages
+            self._volts_to_bits(voltage, "voltages")
+            for voltage in voltages
         ]
 
         self._send_custom_train(
@@ -1142,18 +1044,18 @@ class PulsePalDevice:
     def send_custom_waveform(
         self,
         custom_train_id,
-        pulse_width,
-        pulse_voltages,
+        sampling_period,
+        voltages,
     ):
         """Load an arbitrary waveform onto the device.
 
         A convenience shorthand for
         `PulsePalDevice.send_custom_pulse_train` with evenly spaced,
-        adjoining pulses, so that `pulse_voltages` is played as a
-        waveform sampled every `pulse_width` seconds.
+        adjoining pulses, so that `voltages` is played as a waveform
+        sampled every `sampling_period` seconds.
 
         Set the channel's `PulsePalDevice.phase1_duration` to
-        `pulse_width` as well, so that each sample is held for the
+        `sampling_period` as well, so that each sample is held for the
         sampling period.
 
         ```python
@@ -1169,26 +1071,26 @@ class PulsePalDevice:
             custom_train_id: Custom train to load, from 1 to
                 `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
                 4 on Pulse Pal 3).
-            pulse_width: Sampling period, in seconds: a multiple of
+            sampling_period: In seconds: a multiple of
                 `DeviceInfo.min_pulse_width_us` (100 us). Each voltage is
                 held for this long.
-            pulse_voltages: Waveform samples, in volts [-10, 10].
+            voltages: Waveform samples, in volts [-10, 10].
                 Accepts a list, tuple or NumPy array.
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
                 are more samples than `DeviceInfo.max_custom_pulses`,
-                `pulse_width` is not a positive multiple of
+                `sampling_period` is not a positive multiple of
                 `DeviceInfo.min_pulse_width_us`, the last sample would
                 start after `MAX_TIME`, or the device does not
                 acknowledge the command.
         """
-        pulse_voltages = self._as_list(pulse_voltages)
-        pulse_width_cycles = self._custom_time_cycles(pulse_width, "pulse_width")
-        pulse_times = [pulse_width_cycles * i for i in range(len(pulse_voltages))]
+        voltages = self._as_list(voltages)
+        period_cycles = self._custom_time_cycles(sampling_period, "sampling_period")
+        pulse_times = [period_cycles * i for i in range(len(voltages))]
         pulse_voltage_bits = [
-            self._volts_to_bits(voltage, "pulse_voltages")
-            for voltage in pulse_voltages
+            self._volts_to_bits(voltage, "voltages")
+            for voltage in voltages
         ]
 
         self._send_custom_train(
@@ -1388,7 +1290,7 @@ class PulsePalDevice:
         line_end = -1
 
         while time.time() - start < timeout:
-            n_waiting = self.bytes_available()
+            n_waiting = self.port.in_waiting
             if n_waiting:
                 message.extend(self.port.read(n_waiting))
                 flag_index = message.find(b"!")
@@ -1465,7 +1367,7 @@ class PulsePalDevice:
     # Connection
     # ------------------------------------------------------------------
 
-    def close(self, send_disconnect=True):
+    def close(self):
         """Close the connection to the device, and the GUI if open.
 
         The device stops all output channels when the client disconnects,
@@ -1474,13 +1376,12 @@ class PulsePalDevice:
         leaving a `with` block and when the object is garbage collected,
         so pulse trains also stop when the last reference to the object
         goes, e.g. when a function that created it returns.
-
-        Args:
-            send_disconnect: If `True`, tell the device that the client
-                is disconnecting before closing the port. Set to `False`
-                when the device is in an unknown state, such as after a
-                failed handshake.
         """
+        self._close(send_disconnect=True)
+
+    def _close(self, send_disconnect):
+        """Close the connection. send_disconnect: tell the device first (op 81). False when the device is in
+        an unknown state, such as after a failed handshake."""
         gui = getattr(self, "_gui", None)
         self._gui = None
         if gui is not None:
@@ -1501,14 +1402,6 @@ class PulsePalDevice:
         finally:
             if self.port and self.port.is_open:
                 self.port.close()
-
-    def bytes_available(self):
-        """Return the number of bytes waiting in the serial read buffer.
-
-        Returns:
-            Count of bytes that can be read without blocking.
-        """
-        return self.port.in_waiting
 
     def __enter__(self):
         """Enter a `with` block, returning the connected device."""
@@ -1552,22 +1445,6 @@ class PulsePalDevice:
     def _has_param_sync(self):
         """Param sync mode is on Pulse Pal 3, with firmware v22 or newer."""
         return (self.info.hardware_version or 2) > 2 and (self.info.firmware_version or 0) > 21
-
-    def _get_output_param_code(self, param_name):
-        """Resolve an output parameter name or code to its code."""
-        if isinstance(param_name, str):
-            if param_name not in _OUTPUT_PARAMETER_CODES:
-                raise PulsePalError(f"Unknown output parameter: {param_name}.")
-            return _OUTPUT_PARAMETER_CODES[param_name]
-        if isinstance(param_name, numbers.Integral) and param_name in _OUTPUT_PARAMETERS:
-            return int(param_name)
-        raise PulsePalError(f"Unknown output parameter: {param_name!r}.")
-
-    def _get_trigger_param_code(self, param_name):
-        """Resolve a trigger parameter name or code to its code."""
-        if param_name in ("trigger_mode", _TRIGGER_MODE_CODE) and not isinstance(param_name, bool):
-            return _TRIGGER_MODE_CODE
-        raise PulsePalError(f"Unknown trigger parameter: {param_name!r}.")
 
     def _normalize_output_value(self, code, value, channel):
         """Check a value for an output parameter, and return it as the parameter's list holds it:

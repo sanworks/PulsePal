@@ -28,6 +28,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   showTopScreen()
 //   trimmedCopy()
 //   trimString()
+//   updateScreenSaver()
+//   startScreenSaver()
+//   endScreenSaver()
+//   loadScreenSaverSettings()
+//   saveScreenSaverSettings()
 //   runSplashScreen()
 
 // Shows two lines of up to 16 characters. Each line is centered, so leading and trailing spaces are removed.
@@ -72,6 +77,62 @@ void trimString(char *str) {
   if (start != str) {
     memmove(str, start, strlen(start) + 1);
   }
+}
+
+// Screen saver, as in Pulse Pal and Synth Pal firmware, called by loop() on every pass, after any reply to the PC has
+// been sent. Activity (screenSaverActivity: a command from the PC, a rising edge on a trigger channel, or a joystick
+// click or push) restarts the idle time and brings the screen back. Once the device has been idle for
+// screenSaverTimeout seconds, the screen dims, if the screen saver is on. Settings changed by op 99 or the joystick menu
+// are saved here, once no channel is playing: on a Teensy 4.1 the EEPROM is emulated in flash, and interrupts are off
+// while it is written (about 20us per byte, and now and then tens of ms to erase a sector), which would stop the sample
+// clock and the trigger inputs.
+void updateScreenSaver() {
+  if (screenSaverActivity) {
+    screenSaverActivity = false;
+    lastActivityTime = millis();
+    if (screenDimmed) {
+      endScreenSaver();
+    }
+  } else if (!screenDimmed && screenSaverEnabled &&
+             ((millis() - lastActivityTime) >= ((uint32_t)screenSaverTimeout * 1000))) {
+    startScreenSaver();
+  }
+  if (screenSaverSavePending && !timerRunning) {
+    screenSaverSavePending = false;
+    saveScreenSaverSettings();
+  }
+}
+
+void startScreenSaver() {
+  u8g2.setContrast(SCREEN_SAVER_DIM_BRIGHTNESS); // One short command: the menu stays on the screen, dimmed
+  screenDimmed = true;
+}
+
+// Returns the screen to the menu as it was left
+void endScreenSaver() {
+  u8g2.setContrast(SCREEN_BRIGHTNESS);
+  screenDimmed = false;
+}
+
+// Reads the screen saver settings from the EEPROM, at setup. Pulse Pal and Synth Pal firmware keep them at the same
+// address, so they carry over. Bytes never written read 0xFF, which is not a valid state, so a new device keeps the
+// defaults: on, with SCREEN_SAVER_DEFAULT_TIMEOUT.
+void loadScreenSaverSettings() {
+  byte enabled = 0;
+  uint16_t timeout = 0;
+  EEPROM.get(EEPROM_SCREEN_SAVER_ADDRESS, enabled);
+  EEPROM.get(EEPROM_SCREEN_SAVER_ADDRESS + sizeof(enabled), timeout);
+  if ((enabled <= 1) && (timeout > 0)) {
+    screenSaverEnabled = enabled;
+    screenSaverTimeout = timeout;
+  }
+}
+
+// Writes the screen saver settings to the EEPROM. Only bytes that changed are written. Call it only while no channel is
+// playing, as updateScreenSaver() does.
+void saveScreenSaverSettings() {
+  EEPROM.put(EEPROM_SCREEN_SAVER_ADDRESS, screenSaverEnabled);
+  EEPROM.put(EEPROM_SCREEN_SAVER_ADDRESS + sizeof(screenSaverEnabled), screenSaverTimeout);
 }
 
 // The Sanworks logo with twinkling stars, then the Wave Pal logo with a loading bar. As in Pulse Pal firmware.

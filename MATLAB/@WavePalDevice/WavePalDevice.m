@@ -78,7 +78,7 @@ classdef WavePalDevice < handle
     end
 
     properties (SetAccess = private)
-        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
+        port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device
         waveforms = cell(1,4) % 1x4 cell array of the waveforms loaded by loadWaveform(), in volts. [] if none.
                               % status() shows what the device itself holds, which can include waveforms loaded
@@ -101,6 +101,7 @@ classdef WavePalDevice < handle
         OpHandshake = 72
         OpDisconnect = 81 % Shows the device's own name on its screen again
         OpSetClientName = 89 % Followed by 6 characters, shown as "NAME Connected"
+        OpSetScreenSaver = 99
         OpHardwareInfo = 'N'
         OpSetSamplingRate = 'S'
         OpSetOutputRange = 'R'
@@ -157,13 +158,13 @@ classdef WavePalDevice < handle
             % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
             % and serialport is used then.
             if pulsepal.DotNetSerialPort.isAvailable()
-                obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
+                obj.port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else
-                obj.Port = serialport(portString, defaultBaudRate);
+                obj.port = serialport(portString, defaultBaudRate);
             end
             try
-                setDTR(obj.Port, true);
-                flush(obj.Port); % Discard anything left in the buffers by an earlier session
+                setDTR(obj.port, true);
+                flush(obj.port); % Discard anything left in the buffers by an earlier session
                 obj.handshake(portString);
                 obj.readHardwareInfo();
                 obj.writeCommand(obj.OpSetClientName, 'MATLAB'); % Shown on the device's screen as "MATLAB Connected"
@@ -180,7 +181,7 @@ classdef WavePalDevice < handle
                         % The port may already be gone, e.g. the cable was unplugged
                     end
                 end
-                obj.Port = []; % Release the port, so that the next attempt can open it
+                obj.port = []; % Release the port, so that the next attempt can open it
                 rethrow(err)
             end
         end
@@ -271,6 +272,44 @@ classdef WavePalDevice < handle
             deviceStatus.samplesLoaded = values(1:4);
             deviceStatus.underruns = values(5:8);
             deviceStatus.longestInterrupt_us = values(9)/1000;
+        end
+
+        function setScreenSaver(obj, enabled, timeout)
+            % Switches the device's screen saver on (enabled = true) or off (enabled = false), and sets its timeout in
+            % seconds (a whole number, 1-65535; 1800 if left out). With the screen saver on, the device dims its
+            % screen once it has been left alone for the timeout: no command from the computer, no rising edge on a
+            % trigger channel, and no joystick click or push. The next of these brings the screen back. Both settings
+            % are kept in the device's EEPROM, shared with Pulse Pal and Synth Pal firmware, and saved once no channel
+            % is playing. The screen saver can also be switched on and off from the device's joystick menu. A new
+            % device has it on, with 1800 s. Example: W.setScreenSaver(true, 300) dims the screen after 5 minutes
+            % without activity.
+            if nargin < 3
+                timeout = 1800;
+            end
+            if ~(isnumeric(enabled) || islogical(enabled)) || ~isscalar(enabled) || ~(enabled == 0 || enabled == 1)
+                error('enabled must be true (on) or false (off)') % NaN too: it fails both comparisons
+            end
+            if ~isnumeric(timeout) || ~isscalar(timeout) || ~(timeout >= 1 && timeout <= 65535) || ...
+                    timeout ~= round(timeout)
+                error('timeout must be a whole number of seconds from 1 to 65535')
+            end
+            obj.writeCommand(obj.OpSetScreenSaver, [uint8(enabled) typecast(uint16(timeout), 'uint8')]);
+            obj.confirmWrite('setScreenSaver()');
+        end
+
+        function params = exportParams(obj)
+            % Returns every setting as a struct, e.g. to save with your data: samplingRate and outputRange, then the
+            % channel settings, each with one value per channel. The waveforms are not part of it: the waveforms
+            % property holds them. Example:
+            %   params = W.exportParams();
+            %   save('Session3.mat', 'params');          % Or jsonencode(params), for a text file
+            % The Python class's export_params() returns the same, with snake_case names.
+            params = struct;
+            names = {'samplingRate', 'outputRange', 'loopMode', 'loopDuration', 'triggerMode', ...
+                     'linkTriggerChannel1', 'linkTriggerChannel2'};
+            for i = 1:numel(names)
+                params.(names{i}) = obj.(names{i});
+            end
         end
 
         function rate = get.actualSamplingRate(obj)
@@ -408,7 +447,7 @@ classdef WavePalDevice < handle
                     % The port may already be gone, e.g. the cable was unplugged
                 end
             end
-            obj.Port = [];
+            obj.port = [];
         end
     end
 
@@ -427,34 +466,63 @@ classdef WavePalDevice < handle
     methods (Access = private)
         function handshake(obj, portString)
             % Checks that the device runs a supported Wave Pal firmware
-            obj.Port.Timeout = 2; % A Wave Pal replies at once, so do not wait long for another kind of device
+            obj.port.Timeout = 2; % A Wave Pal replies at once, so do not wait long for another kind of device
             obj.writeCommand(obj.OpHandshake, []);
-            reply = read(obj.Port, 1, 'uint8');
-            obj.Port.Timeout = 10;
-            if isempty(reply)
+            reply = obj.readHandshakeReply(); % Skips the reply to a command an earlier session left queued
+            obj.port.Timeout = 10;
+            if numel(reply) < 5
                 error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Wave Pal firmware?'])
             end
+            version = double(typecast(uint8(reply(2:5)), 'uint32'));
+            reply = reply(1);
             if reply == obj.PulsePalHandshakeReply
-                version = typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32');
                 error(['The device on ' char(portString) ' runs Pulse Pal firmware (v' num2str(version) ').'...
                        newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with PulsePalDevice.'])
             end
             if reply == obj.SynthPalHandshakeReply
-                version = typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32');
                 error(['The device on ' char(portString) ' runs Synth Pal firmware (v' num2str(version) ').'...
                        newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with SynthPalDevice.'])
             end
             if reply ~= obj.WavePalHandshakeReply
                 error(['The device on ' char(portString) ' returned an unexpected handshake signature.'])
             end
-            firmwareVersion = double(typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32'));
+            firmwareVersion = version;
             if firmwareVersion > obj.CurrentFirmwareVersion
-                error(['Error: Wave Pal with future firmware detected (v' num2str(firmwareVersion) ').'...
-                       newline 'Please update your MATLAB software or load Wave Pal firmware v'...
-                       num2str(obj.CurrentFirmwareVersion) '.'])
+                % New firmware only adds commands (see PROTOCOL.md), so this class still works with it
+                warning('WavePalDevice:newerFirmware', ['Wave Pal firmware v' num2str(firmwareVersion) ...
+                        ' is newer than this class knows (v' num2str(obj.CurrentFirmwareVersion) '). It works '...
+                        'with it, but update the MATLAB software to use what is new.'])
             end
             obj.info = struct;
             obj.info.firmwareVersion = firmwareVersion;
+        end
+
+        function reply = readHandshakeReply(obj)
+            % The reply to op 72, the handshake, once it has been sent: the firmware's letter, then its version (5
+            % bytes), or fewer bytes if the device did not send 5 within the port's Timeout. The reply is the last 5
+            % bytes the device sends before it goes quiet. A command that an earlier session sent just before it closed
+            % can still be waiting on the device when this session connects, e.g. while the device redraws its screen.
+            % The device answers it first: after the constructor discarded the bytes waiting, and before the handshake.
+            % Its reply is skipped. Bytes are read until none has arrived for 50 ms, longer than the device takes to
+            % redraw its screen between two replies, or than serialport takes to deliver bytes on Windows (15.6 ms),
+            % and for at most 1 s, so that a device that never stops sending is refused rather than waited for. The
+            % three classes and the Python and C++ clients read the handshake this way.
+            reply = obj.port.read(5, 'uint8'); % Waits for a whole reply, up to the port's Timeout
+            if numel(reply) < 5
+                return
+            end
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    reply = [reply obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+            reply = reply(end-4:end);
         end
 
         function readHardwareInfo(obj)
@@ -562,12 +630,12 @@ classdef WavePalDevice < handle
 
         function writeCommand(obj, opCode, data)
             % Sends one command, with its framing byte, in a single write
-            write(obj.Port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
+            write(obj.port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
         end
 
         function data = readBytes(obj, nBytes, context)
             % Reads exactly nBytes from the device, as a row of doubles
-            data = read(obj.Port, nBytes, 'uint8');
+            data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Wave Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
                        num2str(nBytes) ' byte(s) arrived.'])
@@ -576,7 +644,7 @@ classdef WavePalDevice < handle
 
         function confirmWrite(obj, context)
             % Reads the device's one byte confirmation: 1 if it executed the command, 0 if it rejected it
-            reply = read(obj.Port, 1, 'uint8');
+            reply = read(obj.port, 1, 'uint8');
             if isempty(reply)
                 error(['Wave Pal did not confirm ' context '.'])
             end

@@ -102,7 +102,9 @@ joystick button line as the DAC's SYNC output. Synth Pal needs no microSD card.
     what playback reads (`pendingOutput[]`, the durations in samples, `TriggerAddress`,
     `TriggerMode`, the sample clock), and `loop()` copies the synced settings into its arrays on
     its next pass (`takeSyncedSettings()`). An op that `loop()` is part way through when the edge
-    comes would otherwise work from half old, half new settings.
+    comes would otherwise work from half old, half new settings. Op 82 (read-back) copies the
+    arrays with interrupts disabled, after `takeSyncedSettings()` has taken any edge that came
+    since the start of the pass, so its reply is never half old, half new either.
 
 ## What runs in the playback interrupts
 
@@ -174,7 +176,7 @@ exactly at the mean voltage, whatever the resting voltage, play durations exact 
 every code of the on and off ramps, a stop at full amplitude, a trigger during the off ramp,
 frequency and setting changes during playback, a channel joining a running clock, the
 firmware's own checks of the levels (with commands sent past the class's checks), op 85
-applied at once and stored in param sync mode, and the timing budget with four channels in their
+applied at once and stored in param sync mode, op 82's read-back, and the timing budget with four channels in their
 ramps. With `--driver`, it also sends param sync edges: a set loaded into channels at rest, a
 channel playing at the edge finishing first, and one TTL on both trigger channels. A change to the synthesis must change the
 model too. `synthesizeCode()`'s multiply-adds are explicit `fmaf()` calls, so that each rounds
@@ -222,6 +224,8 @@ triggers or the menu, check:
   catch a fault in `setup()` (rule 4).
 - Param sync from the menu: the trigger mode editor offers "Param Sync"; "Trigger Now" on a
   param sync channel loads a stored set (and starts nothing).
+- Read-back: change a channel's waveform, levels and durations, the frequency and a trigger mode
+  with the joystick, then `sync_from_device()` (or `syncFromDevice()`) shows the new values.
 - Unplug the USB cable during a transfer: the device shows "COMM. FAILURE!", playback stops, and
   a click loads the default settings.
 

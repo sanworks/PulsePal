@@ -138,7 +138,7 @@ classdef SynthPalDevice < handle
     end
 
     properties (SetAccess = private)
-        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
+        port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device
         samplesPerCycle = 1000 % Samples in one cycle of the waveform at the current frequency. See "Sampling" above.
     end
@@ -178,6 +178,7 @@ classdef SynthPalDevice < handle
         OpSetTriggerLinks = 'I'
         OpSetTriggerMode = 'T'
         OpSetAllSettings = 'U'
+        OpGetAllSettings = 'R' % Every setting, in op 'U''s layout
         OpTrigger = 'P'
         OpStop = 'X'
         OpGetStatus = 'G'
@@ -225,13 +226,13 @@ classdef SynthPalDevice < handle
             % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
             % and serialport is used then.
             if pulsepal.DotNetSerialPort.isAvailable()
-                obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
+                obj.port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else
-                obj.Port = serialport(portString, defaultBaudRate);
+                obj.port = serialport(portString, defaultBaudRate);
             end
             try
-                setDTR(obj.Port, true);
-                flush(obj.Port); % Discard anything left in the buffers by an earlier session
+                setDTR(obj.port, true);
+                flush(obj.port); % Discard anything left in the buffers by an earlier session
                 obj.handshake(portString);
                 obj.readHardwareInfo();
                 obj.writeCommand(obj.OpSetClientName, 'MATLAB'); % Shown on the device's screen as "MATLAB Connected"
@@ -248,7 +249,7 @@ classdef SynthPalDevice < handle
                         % The port may already be gone, e.g. the cable was unplugged
                     end
                 end
-                obj.Port = []; % Release the port, so that the next attempt can open it
+                obj.port = []; % Release the port, so that the next attempt can open it
                 rethrow(err)
             end
         end
@@ -416,23 +417,83 @@ classdef SynthPalDevice < handle
             deviceStatus.lateUpdates = double(typecast(uint8(reply(14:17)), 'uint32'));
         end
 
-        function setScreenSaver(obj, state, timeout)
-            % Switches the device's screen saver on (state = 1 or true) or off (state = 0 or false), and sets its timeout
-            % in seconds (a whole number, 1-65535; 1800 if left out). With the screen saver on, the device dims its
+        function setScreenSaver(obj, enabled, timeout)
+            % Switches the device's screen saver on (enabled = true) or off (enabled = false), and sets its timeout in
+            % seconds (a whole number, 1-65535; 1800 if left out). With the screen saver on, the device dims its
             % screen once it has been left alone for the timeout: no command from the computer, no rising edge on a
             % trigger channel, and no joystick click or push. The next of these brings the screen back. Both settings
-            % are kept in the device's EEPROM, shared with Pulse Pal firmware, and saved once no channel is playing.
+            % are kept in the device's EEPROM, shared with Pulse Pal and Wave Pal firmware, and saved once no channel is
+            % playing. The screen saver can also be switched on and off from the device's joystick menu. A new device
+            % has it on, with 1800 s. Example: S.setScreenSaver(true, 300) dims the screen after 5 minutes without
+            % activity.
             if nargin < 3
                 timeout = 1800;
             end
-            if ~(isnumeric(state) || islogical(state)) || ~isscalar(state) || ~(state == 0 || state == 1) % Also refuses NaN
-                error('state must be 1 (on) or 0 (off)')
+            if ~(isnumeric(enabled) || islogical(enabled)) || ~isscalar(enabled) || ~(enabled == 0 || enabled == 1)
+                error('enabled must be true (on) or false (off)') % NaN too: it fails both comparisons
             end
-            if ~isnumeric(timeout) || ~isscalar(timeout) || ~(timeout >= 1 && timeout <= 65535) || timeout ~= round(timeout)
+            if ~isnumeric(timeout) || ~isscalar(timeout) || ~(timeout >= 1 && timeout <= 65535) || ...
+                    timeout ~= round(timeout)
                 error('timeout must be a whole number of seconds from 1 to 65535')
             end
-            obj.writeCommand(obj.OpSetScreenSaver, [uint8(state) typecast(uint16(timeout), 'uint8')]);
+            obj.writeCommand(obj.OpSetScreenSaver, [uint8(enabled) typecast(uint16(timeout), 'uint8')]);
             obj.confirmWrite('setScreenSaver()');
+        end
+
+        function syncFromDevice(obj)
+            % Reads every setting from the device into the properties: use it after settings were changed with the
+            % device's joystick, for example. The device holds one amplitude per channel: a 'Fixed Voltage' channel's
+            % goes to fixedVoltage, and any other channel's to peakToPeak. This object keeps the other one, reduced if
+            % need be to suit the mean voltage read back. In param sync mode, it reads the settings the device plays
+            % now, not a set waiting for the next edge.
+            obj.writeCommand(obj.OpGetAllSettings, []);
+            reply = uint8(obj.readBytes(114, 'syncFromDevice()'));
+            centiHz = double(typecast(reply(1:4), 'uint32'));
+            waveforms = obj.WaveformNames(double(reply(5:8)) + 1);
+            amplitudes_uV = double(typecast(reply(9:24), 'int32'));
+            means_uV = double(typecast(reply(25:40), 'int32'));
+            rests_uV = double(typecast(reply(41:56), 'int32'));
+            durations_us = double(typecast(reply(57:104), 'uint32')); % Play, on ramp, off ramp: 4 of each
+            links = reply(105:112) > 0;
+            modes = obj.TriggerModeNames(double(reply(113:114)) + 1);
+            isFixed = strcmp(waveforms, 'Fixed Voltage');
+            newPeakToPeak = obj.peakToPeak;
+            newFixedVoltage = obj.fixedVoltage;
+            newPeakToPeak(~isFixed) = amplitudes_uV(~isFixed)/1e6;
+            newFixedVoltage(isFixed) = amplitudes_uV(isFixed)/1e6;
+            % This object's own peak to peak voltage must still suit the mean voltage (see checkLevels())
+            newPeakToPeak(isFixed) = min(newPeakToPeak(isFixed), (2*obj.MaxVoltage_uV - 2*abs(means_uV(isFixed)))/1e6);
+            autoSyncState = obj.autoSync;
+            obj.autoSync = false; % Stored, not sent
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
+            obj.frequency = centiHz/100;
+            obj.storeLevels(waveforms, newPeakToPeak, newFixedVoltage, means_uV/1e6);
+            obj.restingVoltage = rests_uV/1e6;
+            obj.playDuration = durations_us(1:4)/1e6;
+            obj.onRampDuration = durations_us(5:8)/1e6;
+            obj.offRampDuration = durations_us(9:12)/1e6;
+            obj.triggerMode = modes;
+            obj.linkTriggerChannel1 = links(1:4);
+            obj.linkTriggerChannel2 = links(5:8);
+            clear cleanup
+            obj.deviceWaveform = waveforms;
+            obj.deviceAmplitude_uV = amplitudes_uV;
+            obj.deviceMean_uV = means_uV;
+        end
+
+        function params = exportParams(obj)
+            % Returns every setting as a struct, e.g. to save with your data and record exactly what the device
+            % played: frequency, then the channel settings, each with one value per channel. Example:
+            %   params = S.exportParams();
+            %   save('Trial12.mat', 'params');           % Or jsonencode(params), for a text file
+            % The Python class's export_params() returns the same, with snake_case names.
+            params = struct;
+            names = {'frequency', 'waveform', 'peakToPeak', 'fixedVoltage', 'meanVoltage', 'restingVoltage', ...
+                     'playDuration', 'onRampDuration', 'offRampDuration', 'triggerMode', 'linkTriggerChannel1', ...
+                     'linkTriggerChannel2'};
+            for i = 1:numel(names)
+                params.(names{i}) = obj.(names{i});
+            end
         end
 
         function rate = get.samplingRate(obj)
@@ -564,7 +625,7 @@ classdef SynthPalDevice < handle
                     % The port may already be gone, e.g. the cable was unplugged
                 end
             end
-            obj.Port = [];
+            obj.port = [];
         end
     end
 
@@ -583,34 +644,64 @@ classdef SynthPalDevice < handle
     methods (Access = private)
         function handshake(obj, portString)
             % Checks that the device runs a supported Synth Pal firmware
-            obj.Port.Timeout = 2; % A Synth Pal replies at once, so do not wait long for another kind of device
+            obj.port.Timeout = 2; % A Synth Pal replies at once, so do not wait long for another kind of device
             obj.writeCommand(obj.OpHandshake, []);
-            reply = read(obj.Port, 1, 'uint8');
-            obj.Port.Timeout = 10;
-            if isempty(reply)
+            reply = obj.readHandshakeReply(); % Skips the reply to a command an earlier session left queued
+            obj.port.Timeout = 10;
+            if numel(reply) < 5
                 error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Synth Pal firmware?'])
             end
+            version = double(typecast(uint8(reply(2:5)), 'uint32'));
+            reply = reply(1);
             if reply == obj.PulsePalHandshakeReply || reply == obj.WavePalHandshakeReply
                 if reply == obj.PulsePalHandshakeReply
                     names = {'Pulse Pal', 'PulsePalDevice'};
                 else
                     names = {'Wave Pal', 'WavePalDevice'};
                 end
-                version = typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32');
                 error(['The device on ' char(portString) ' runs ' names{1} ' firmware (v' num2str(version) ').'...
                        newline 'Load Synth Pal firmware onto it (/Firmware/SynthPal), or connect with ' names{2} '.'])
             end
             if reply ~= obj.SynthPalHandshakeReply
                 error(['The device on ' char(portString) ' returned an unexpected handshake signature.'])
             end
-            firmwareVersion = double(typecast(uint8(obj.readBytes(4, 'the handshake')), 'uint32'));
+            firmwareVersion = version;
             if firmwareVersion > obj.CurrentFirmwareVersion
-                error(['Error: Synth Pal with future firmware detected (v' num2str(firmwareVersion) ').'...
-                       newline 'Please update your MATLAB software or load Synth Pal firmware v'...
-                       num2str(obj.CurrentFirmwareVersion) '.'])
+                % New firmware only adds commands (see PROTOCOL.md), so this class still works with it
+                warning('SynthPalDevice:newerFirmware', ['Synth Pal firmware v' num2str(firmwareVersion) ...
+                        ' is newer than this class knows (v' num2str(obj.CurrentFirmwareVersion) '). It works '...
+                        'with it, but update the MATLAB software to use what is new.'])
             end
             obj.info = struct;
             obj.info.firmwareVersion = firmwareVersion;
+        end
+
+        function reply = readHandshakeReply(obj)
+            % The reply to op 72, the handshake, once it has been sent: the firmware's letter, then its version (5
+            % bytes), or fewer bytes if the device did not send 5 within the port's Timeout. The reply is the last 5
+            % bytes the device sends before it goes quiet. A command that an earlier session sent just before it closed
+            % can still be waiting on the device when this session connects, e.g. while the device redraws its screen.
+            % The device answers it first: after the constructor discarded the bytes waiting, and before the handshake.
+            % Its reply is skipped. Bytes are read until none has arrived for 50 ms, longer than the device takes to
+            % redraw its screen between two replies, or than serialport takes to deliver bytes on Windows (15.6 ms),
+            % and for at most 1 s, so that a device that never stops sending is refused rather than waited for. The
+            % three classes and the Python and C++ clients read the handshake this way.
+            reply = obj.port.read(5, 'uint8'); % Waits for a whole reply, up to the port's Timeout
+            if numel(reply) < 5
+                return
+            end
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    reply = [reply obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+            reply = reply(end-4:end);
         end
 
         function readHardwareInfo(obj)
@@ -635,7 +726,7 @@ classdef SynthPalDevice < handle
         end
 
         function restoreAutoSync(obj, state)
-            % For setDefaultParams(): puts autoSync back, also if programming the defaults failed
+            % For setDefaultParams() and syncFromDevice(): puts autoSync back, also if they failed
             obj.autoSync = state;
         end
 
@@ -906,12 +997,12 @@ classdef SynthPalDevice < handle
 
         function writeCommand(obj, opCode, data)
             % Sends one command, with its framing byte, in a single write
-            write(obj.Port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
+            write(obj.port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
         end
 
         function data = readBytes(obj, nBytes, context)
             % Reads exactly nBytes from the device, as a row of doubles
-            data = read(obj.Port, nBytes, 'uint8');
+            data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Synth Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
                        num2str(nBytes) ' byte(s) arrived.'])
@@ -921,7 +1012,7 @@ classdef SynthPalDevice < handle
         function confirmWrite(obj, context)
             % Reads the device's one byte confirmation: 1 if it executed the command, 0 if it rejected it (and changed
             % nothing). A rejection has its own identifier, which sendLevels() recovers from.
-            reply = read(obj.Port, 1, 'uint8');
+            reply = read(obj.port, 1, 'uint8');
             if isempty(reply)
                 error(['Synth Pal did not confirm ' context '.'])
             end

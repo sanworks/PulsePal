@@ -21,7 +21,9 @@ starts with an example. Python has example scripts: `/Python/PulsePal/PulsePalEx
 
 A Pulse Pal 3 runs one firmware at a time. To change it, run `LoadPulsePalFirmware` in MATLAB
 (add `/MATLAB/FirmwareLoader` to the path first). Connecting with the wrong class raises an error
-that names the firmware the device runs.
+that names the firmware the device runs. A class connects to firmware newer than it knows, with a
+warning: new firmware only adds commands, so the class works as before. Update the classes to use
+what is new.
 
 ## Before an experiment
 
@@ -174,6 +176,7 @@ inter_pulse_interval` seconds.
 | `P.sync_from_device()` | `P.syncFromDevice();` | Reads the device's parameters into the object, e.g. after using the joystick |
 | `P.set_default_params()` | `P.setDefaultParams();` | Programs the defaults |
 | `P.save_settings_file("A.pps")` | `P.saveSettingsFile('A.pps');` | Saves the parameters to the microSD card; also `load_settings_file`, `delete_settings_file` |
+| `P.set_screen_saver(True, 300)` | `P.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity (Pulse Pal 3). Kept on the device |
 | `P.gui()` | `P.gui();` | Opens the parameter editor window |
 | `P.close()` | `clear P` | Disconnects, and stops all outputs |
 
@@ -296,7 +299,25 @@ with open("session_params.json", "w") as f:
     json.dump(P.export_params(), f)
 ```
 
-In MATLAB, `params = P.exportParams(); save('session.mat', 'params')`.
+In MATLAB, `P.saveParameters('session.json')` saves them as a program file (below), or
+`params = P.exportParams(); save('session.mat', 'params')`.
+
+**Program files.** The Python and MATLAB GUIs save and open the same `.json` program files, and
+MATLAB's `saveParameters()` and `loadParameters()` write and read them too. A program file holds
+`format_version` (1), `params` (what `export_params()` returns: Python's snake_case names, mode
+names, `true` and `false`), the text of each custom train as typed in a GUI, and `device_info`.
+To program a device from one in Python:
+
+```python
+import json
+with open("MyProgram.json") as f:
+    P.import_params(json.load(f)["params"])
+```
+
+In MATLAB, `P.loadParameters('MyProgram.json')`. A GUI's custom trains are loaded only by
+opening the file in a GUI. `import_params()`, `importParams()` and `loadParameters()` skip names
+they do not know, with a warning, and the GUIs ignore them, so a file saved by a newer version
+still loads.
 
 **Run without a computer.** Save a program to the device's microSD card, then load it from the
 joystick menu (or with `load_settings_file()`):
@@ -321,9 +342,8 @@ P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
 - **Connecting replaces the device's program** with the defaults, and a program set with the
   joystick afterwards is not in the object until `sync_from_device()` reads it.
 - **In param sync mode, only `sync_to_device()` waits for the TTL** (including the end of a
-  `batch()` block). An assignment with `auto_sync` on, `set_output_param()` and
-  `set_trigger_param()` program the device at once. The param sync channel itself starts
-  nothing.
+  `batch()` block). An assignment with `auto_sync` on programs the device at once. The param
+  sync channel itself starts nothing.
 - **Custom trains.** A custom train that does not loop plays all its pulses and ends, whatever
   the train duration; one that loops stops at the train duration. Custom pulse times must be
   multiples of 100 µs: a time in between raises an error rather than being rounded. A train
@@ -360,6 +380,8 @@ Wave Pal plays one sampled waveform per output channel, stored on the device's m
 | `W.trigger([1, 2])`, `W.stop()` | `W.trigger([1 2]);`, `W.stop();` | Starts, or stops, playback |
 | `W.set_fixed_voltage(3, 1.5)` | `W.setFixedVoltage(3, 1.5);` | Holds channels at a voltage |
 | `W.status()` | `W.status()` | Which channels are playing, and any underruns |
+| `W.export_params()` | `W.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data. Not the waveforms |
+| `W.set_screen_saver(True, 300)` | `W.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity. Kept on the device, shared with the other firmwares |
 
 ### Recipe: a waveform on each trial's TTL
 
@@ -418,6 +440,9 @@ wave around a mean voltage, or a step to a fixed voltage, with optional on and o
 | `S.trigger([1, 2])`, `S.stop()` | `S.trigger([1 2]);`, `S.stop();` | Starts, or stops (over the off ramp), playback |
 | `with S.batch(): ...` | `S.autoSync = false; ... S.syncToDevice();` | Sends several changes in one command |
 | `S.status()` | `S.status()` | Which channels are playing, and their output ranges |
+| `S.export_params()` | `S.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data |
+| `S.sync_from_device()` | `S.syncFromDevice();` | Reads the device's settings into the object, e.g. after using the joystick |
+| `S.set_screen_saver(True, 300)` | `S.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity. Kept on the device, shared with the other firmwares |
 
 ### Recipes
 
@@ -446,7 +471,10 @@ resting voltage.
 - **Levels are checked together.** Raising `peak_to_peak` beyond what the mean voltage allows
   raises an error: change the mean voltage first, or set both in one `configure()` call.
 - **`peak_to_peak` or `fixed_voltage`:** the waveform decides which one plays. A channel keeps
-  both.
+  both. The device holds only the one that plays, so `sync_from_device()` reads that one, and
+  the object keeps its own value of the other.
+- **Settings changed with the joystick** are not in the object until `sync_from_device()` reads
+  them.
 - **The ramps lengthen playback:** a trigger plays `on_ramp_duration + play_duration +
   off_ramp_duration`, and a stop (including closing the connection) fades out over the off
   ramp. A trigger during the off ramp fades the channel back in without restarting its cycle.

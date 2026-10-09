@@ -27,11 +27,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
 function testPulsePalDeviceOffline()
-tests = {@testConnectionProgramsTheDefaults, @testDefaultParametersMessage, @testSingleValuesAreRefused, ...
+tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testALateReplyIsSkipped, ...
+    @testOtherFirmwareVersionsWarn, ...
+    @testDefaultParametersMessage, @testSingleValuesAreRefused, ...
     @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testCustomPulseTimesAreMultiplesOf100us, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
-    @testExportAndImportParams, @testSyncFromDeviceStoresWhatTheDeviceHolds, @testPortAndInfoAreReadOnly, ...
-    @testMethodsReturnNothing, @testPulsePal2AndFirmwareV21};
+    @testExportAndImportParams, @testProgramFiles, @testSyncFromDeviceStoresWhatTheDeviceHolds, ...
+    @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testPulsePal2AndFirmwareV21};
 nFailed = 0;
 for i = 1:numel(tests)
     try
@@ -59,13 +61,48 @@ assert(isequal(w(1:4), {uint8([213 72]), uint8([213 94]), uint8([213 89 double('
 assert(numel(w) == 5 && w{5}(2) == 92, 'the defaults are not one op 92');
 assert(port.NumBytesAvailable == 0, 'a reply was left unread');
 % The fields of the Python class's DeviceInfo, in the same order
-assert(isequal(fieldnames(P.info)', {'outputParameterNames', 'triggerParameterNames', 'triggerModes', ...
+assert(isequal(fieldnames(P.info)', {'outputParameterNames', 'triggerModes', ...
     'customTrainTargets', 'firmwareVersion', 'hardwareVersion', 'maxCustomPulses', 'nCustomPulseTrains', ...
     'cycleFrequency', 'cyclePeriod_us', 'minPulseWidth_us', 'maxTime'}), 'info fields');
 assert(P.info.maxTime == 9999.9999 && P.info.minPulseWidth_us == 100, 'info limits');
 assert(isequal(P.phase1Voltage, [5 5 5 5]) && isequal(P.triggerMode, {'Normal', 'Normal'}), 'default values');
 delete(P);
 assert(isequal(port.writes{end}, uint8([213 81])), 'disconnecting did not send op 81');
+end
+
+function testStaleBytesAreDiscarded()
+% Bytes left unread by an earlier session would otherwise be read as the reply to the handshake
+port = SimulatedPulsePalPort();
+port.leaveUnread([1 1 0 0 0]);
+P = PulsePalDevice(port);
+assert(P.info.firmwareVersion == 22, 'stale bytes were read as the handshake');
+end
+
+function testALateReplyIsSkipped()
+% A command an earlier session sent just before it closed can still be waiting on the device, which answers it after
+% the constructor discarded the bytes waiting, and before the handshake. The handshake's reply is the last 5 bytes the
+% device sends, so the late reply is skipped, also one that looks like a handshake.
+op93Reply = [repmat([20 0 0 0], 1, 8) zeros(1, 146)]; % Starts with 20 cycles: 1 ms
+for lateReply = {op93Reply, [75 99 0 0 0], 1}
+    port = SimulatedPulsePalPort();
+    port.lateReply = uint8(lateReply{1});
+    P = PulsePalDevice(port);
+    assert(P.info.firmwareVersion == 22 && P.info.hardwareVersion == 3, 'late reply %s', ...
+           mat2str(lateReply{1}(1:min(5, end))));
+    assert(isequal(port.writes{2}, uint8([213 94])) && port.NumBytesAvailable == 0, 'replies after the handshake');
+    delete(P);
+end
+end
+
+function testOtherFirmwareVersionsWarn()
+% New firmware only adds commands, so a newer version connects, with a warning, as does v21, which is supported
+port = SimulatedPulsePalPort(3, 23);
+[id, message] = expectWarning(@() PulsePalDevice(port));
+assert(strcmp(id, 'PulsePalDevice:newerFirmware') && contains(message, 'v23'), message);
+assert(port.writes{end}(2) == 81, 'the class did not connect to firmware v23');
+id = expectWarning(@() PulsePalDevice(SimulatedPulsePalPort(3, 21)));
+assert(strcmp(id, 'PulsePalDevice:olderFirmware'), id);
+expectError(@() PulsePalDevice(SimulatedPulsePalPort(3, 20)));
 end
 
 function testDefaultParametersMessage()
@@ -189,17 +226,64 @@ P2.importParams(jsondecode(jsonencode(params))); % A struct saved as text, with 
 P.syncToDevice();
 assert(isscalar(port2.writes) && isequal(port2.writes{1}, port.writes{end}), 'import is not one op 92');
 assert(isequal(P2.exportParams(), params), 'imported values');
-% A partial struct keeps the other parameters; a bad name or value changes and sends nothing
+% A partial struct keeps the other parameters; a bad value changes and sends nothing
 P2.importParams(struct('phase1Duration', [0.002 0.002 0.002 0.002]));
 assert(isequal(P2.phase1Duration, [0.002 0.002 0.002 0.002]) && P2.phase1Voltage(2) == 2.5, 'partial import');
 nWrites = numel(port2.writes);
-expectError(@() P2.importParams(struct('phase1Voltage', [1 1 1 1], 'playbackModes', [0 0 0 0])));
 expectError(@() P2.importParams(struct('phase1Voltage', [1 1 1 1], 'phase2Voltage', [11 0 0 0])));
 assert(numel(port2.writes) == nWrites && isequal(P2.phase1Voltage, [5 2.5 5 5]), 'a refused import changed something');
+% A field this class does not have, e.g. from a newer version, is skipped with a warning
+id = expectWarning(@() P2.importParams(struct('phase1Voltage', [1 1 1 1], 'playbackModes', [0 0 0 0])));
+assert(strcmp(id, 'PulsePalDevice:unknownParams') && isequal(P2.phase1Voltage, [1 1 1 1]), 'unknown field');
+nWrites = numel(port2.writes);
 % Sent whatever autoSync is, and autoSync is left as it is
 P2.autoSync = false;
 P2.importParams(struct('phase1Voltage', [1 1 1 1]));
 assert(~P2.autoSync && numel(port2.writes) == nWrites + 1, 'autoSync');
+end
+
+function testProgramFiles()
+% saveParameters() writes the program file both GUIs open, in the Python GUI's format; loadParameters() reads it, and
+% the .mat files saveParameters() wrote before
+P = connect();
+P.phase1Voltage(2) = 2.5;
+P.burstDuration(3) = 0.1;
+P.customTrainTarget{3} = 'Bursts';
+P.isBiphasic(4) = true;
+P.triggerMode{1} = 'Toggle';
+fileName = [tempname '.json'];
+matName = [tempname '.mat'];
+cleanup = onCleanup(@() delete(fileName));
+P.saveParameters(fileName);
+program = jsondecode(fileread(fileName));
+assert(program.format_version == 1, 'format_version');
+assert(isequal(program.params.phase1_voltage', [5 2.5 5 5]) && ...
+       isequal(program.params.is_biphasic', [false false false true]) && ...
+       isequal(program.params.custom_train_target', {'Pulses' 'Pulses' 'Bursts' 'Pulses'}) && ...
+       isequal(program.params.trigger_mode', {'Toggle' 'Normal'}), 'saved params');
+assert(numel(fieldnames(program.params)) == 19, 'every parameter is saved');
+assert(strcmp(program.device_info.output_parameter_names{1}, 'is_biphasic') && ...
+       program.device_info.n_custom_pulse_trains == 4, 'device_info');
+[P2, port2] = connect();
+P2.loadParameters(fileName);
+assert(isequal(P2.exportParams(), P.exportParams()), 'loaded params');
+assert(isscalar(port2.writes) && port2.writes{1}(2) == 92, 'loading is not one op 92');
+% A key this version does not know is skipped with a warning
+text = regexprep(fileread(fileName), '"phase1_voltage"\s*:', '"future_param": [1, 1, 1, 1], "phase1_voltage":');
+fileID = fopen(fileName, 'w');
+fwrite(fileID, text, 'char');
+fclose(fileID);
+P2.setDefaultParams();
+id = expectWarning(@() P2.loadParameters(fileName));
+assert(strcmp(id, 'PulsePalDevice:unknownParams') && isequal(P2.exportParams(), P.exportParams()), 'unknown key');
+% A .mat file saved by saveParameters() before it saved .json files
+params = P.exportParams();
+save(matName, 'params');
+matCleanup = onCleanup(@() delete(matName));
+P2.setDefaultParams();
+P2.loadParameters(matName);
+assert(isequal(P2.exportParams(), P.exportParams()), '.mat file');
+expectError(@() P.saveParameters('Program.mat'));
 end
 
 function testSyncFromDeviceStoresWhatTheDeviceHolds()
@@ -215,12 +299,16 @@ assert(isequal(P.phase1Voltage, [5 5 5 5]), 'DAC code 49151 (4.99992 V) is not r
 assert(islogical(P.isBiphasic) && iscell(P.customTrainTarget) && isequal(P.triggerMode, {'Normal', 'Normal'}), ...
     'types read back');
 expectError(@() setProperty(P, 'phase1Duration', [0.00005 0.001 0.001 0.001])); % Assignments are checked again
+% A refused import puts them back as they were, without the checks that would refuse them
+message = expectError(@() P.importParams(struct('phase2Voltage', [11 0 0 0])));
+assert(contains(message, 'phase2Voltage'), message);
+assert(P.phase1Duration(1) == 0.00005 && P.burstDuration(1) == 15000, 'the values read back were not restored');
 end
 
 function testPortAndInfoAreReadOnly()
 P = connect();
 expectError(@() setProperty(P, 'info', struct));
-expectError(@() setProperty(P, 'Port', []));
+expectError(@() setProperty(P, 'port', []));
 end
 
 function testMethodsReturnNothing()
@@ -238,7 +326,8 @@ P = PulsePalDevice(port);
 assert(numel(port.writes) == 4 && port.writes{4}(2) == 92, 'Pulse Pal 2 has no param sync mode to leave');
 assert(isequal(P.info.triggerModes, {'Normal', 'Toggle', 'Gated'}), 'Pulse Pal 2 trigger modes');
 port = SimulatedPulsePalPort(2, 21);
-P = PulsePalDevice(port);
+P = []; % Assigned in evalc, which hides the warning that v22 is available
+evalc('P = PulsePalDevice(port);');
 assert(isequal(port.writes{end}(1:2), uint8([213 73])) && numel(port.writes{end}) == 2+128+24+16+8+2, ...
     'firmware v21 takes op 73');
 port.clearWrites();
@@ -253,6 +342,16 @@ function [P, port] = connect(varargin)
 port = SimulatedPulsePalPort(varargin{:});
 P = PulsePalDevice(port);
 port.clearWrites();
+end
+
+function [id, message] = expectWarning(func)
+% Runs func, and returns the identifier and message of the last warning it raised, without showing it
+lastwarn('', '');
+evalc('func();');
+[message, id] = lastwarn();
+if isempty(id)
+    error('no warning was raised by %s', func2str(func));
+end
 end
 
 function message = expectError(func)

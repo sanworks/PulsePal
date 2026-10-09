@@ -41,7 +41,11 @@ The Python and MATLAB classes connect in this order:
 
 1. Op 72 (handshake). A Synth Pal replies `83` ('S'). A Pulse Pal replies `75` ('K') and a Wave
    Pal `87` ('W') to the same op, so each client can tell which firmware a device runs, and say
-   so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal.
+   so. The Pulse Pal and Wave Pal clients do the same for a Synth Pal. A firmware version newer
+   than the client knows is used, with a warning: new firmware only adds ops. As for Pulse Pal
+   (see its [connection steps](../PROTOCOL.md#connecting)), the clients discard the bytes waiting
+   before op 72, then read its reply until the device has been quiet for 50 ms and take the last
+   5 bytes, which skips a reply to a command an earlier session left queued on the device.
 2. Op 78 ('N'): hardware properties and limits.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
 4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 65, 87, 86,
@@ -77,6 +81,7 @@ so that it is not taken for the next command.
 | 69 | `E` | Set off ramp durations (at the End) | 4 uint32, one per output channel: in µs, 0 to 3600000000. 0 for no ramp. See [Ramps](#ramps) | 1 / 0 |
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
 | 85 | `U` | Set all settings: applied at once, or stored for a param sync edge (see [Param sync](#param-sync-trigger-mode-3)) | 114 bytes: frequency in centiHz (uint32), then for channels 1-4: waveforms (4 bytes), amplitudes, mean voltages and resting voltages (4 int32 each), play durations, on ramp durations and off ramp durations (4 uint32 each); then trigger links (8 bytes, as op 73) and trigger modes (2 bytes, as op 84). Each value as in the op that sets it alone | 1 / 0 |
+| 82 | `R` | Get all settings: those the device plays now | none | 114 bytes, in op 85's layout. See [Reading the settings back](#reading-the-settings-back) |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
 | 80 | `P` | Soft trigger: starts idle channels | Channel bits (uint8) | none |
 | 88 | `X` | Stop | Channel bits (uint8) | none |
@@ -92,6 +97,20 @@ its outputs on all three firmwares. The settings stay: TTL triggers still play t
 the client closes. Op 99 works as in Pulse Pal firmware (see its
 [screen saver](../PROTOCOL.md#screen-saver) notes), with the settings at the same EEPROM
 addresses, so they carry over when a device changes firmware.
+
+### Reading the settings back
+
+Op 82 returns every setting in op 85's layout: the settings the device plays now, including
+changes made with the joystick menu. The Python and MATLAB classes read it in
+`sync_from_device()` / `syncFromDevice()`. A set that op 85 stored for a param sync edge is not
+part of it until the edge loads it. After the edge, an output channel still finishing on its old
+settings (see [Param sync](#param-sync-trigger-mode-3)) is reported with them until it takes the
+new ones; the frequency and the trigger modes are the new ones at once.
+
+The device holds one amplitude per channel (see [Levels](#levels)). The classes keep a channel's
+peak to peak voltage and its fixed voltage apart, so they put a Fixed Voltage channel's amplitude
+in its fixed voltage, and any other channel's in its peak to peak voltage. They keep their own
+value of the other one, reduced if need be to suit the mean voltage read back.
 
 Op 90 is for testing, like Wave Pal's op 90: `/Python/PulsePal/tests/synthpal_hardware_test.py`
 and `/MATLAB/tests/testSynthPalDevice.m` use it to check the samples a device played. While a

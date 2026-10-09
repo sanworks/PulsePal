@@ -305,6 +305,7 @@ void processTriggerEdge(byte triggerChannel, boolean isRisingEdge) {
     }
     return;
   }
+  screenSaverActivity = true; // loop() wakes the screen, after this interrupt (see updateScreenSaver())
   byte toStart = 0;
   byte toStop = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {

@@ -334,6 +334,26 @@ def test_fixed_voltage_and_stop(W):
     W.stop()
 
 
+def test_screen_saver_and_export_params(W):
+    """Op 99 takes the screen saver's state and timeout, as on Pulse Pal and Synth Pal. Left on,
+    with 1800 s: a new device's settings. export_params() holds every setting."""
+    W.set_screen_saver(False)
+    W.set_screen_saver(True, 1800)
+    for enabled, timeout in ((2, 1800), (True, 0), (True, 65536)):
+        try:
+            W.set_screen_saver(enabled, timeout)
+        except PulsePalError:
+            continue
+        raise AssertionError(f"set_screen_saver({enabled!r}, {timeout!r}) was not refused")
+    W.loop_mode[2] = True
+    W.loop_duration[2] = 0.5
+    params = W.export_params()
+    assert params["loop_mode"] == [False, True, False, False] and params["loop_duration"][1] == 0.5, params
+    assert params["sampling_rate"] == W.sampling_rate and params["output_range"] == W.output_range, params
+    W.loop_mode[2] = False
+    W.loop_duration[2] = 0
+
+
 def test_output_range_change_reloads_waveforms(W):
     W.sampling_rate = 100000
     lengths = [None, 5000, 40000, 1, 20000]
@@ -402,6 +422,7 @@ def main():
         test_sampling_rate_change_during_playback,
         test_channel_joining_a_running_clock_plays_exactly,
         test_fixed_voltage_and_stop,
+        test_screen_saver_and_export_params,
         test_output_range_change_reloads_waveforms,
         test_every_output_range_plays,
     ]

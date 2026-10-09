@@ -54,6 +54,11 @@ public:
     // than nBytes if the timeout was reached.
     virtual size_t read(uint8_t* data, size_t nBytes, unsigned int timeoutMs) = 0;
 
+    // The number of bytes received but not yet read. The default, 0, suits a port that cannot tell: the handshake
+    // then reads only its own 5 bytes, and cannot skip a reply to an earlier session's command (see initialize() in
+    // PulsePal.cpp).
+    virtual size_t bytesWaiting() { return 0; }
+
     // Describes why the last open(), write() or read() failed
     virtual std::string lastError() const = 0;
 };
@@ -73,6 +78,7 @@ public:
     void discardInput() override;
     bool write(const uint8_t* data, size_t nBytes) override;
     size_t read(uint8_t* data, size_t nBytes, unsigned int timeoutMs) override;
+    size_t bytesWaiting() override;
     std::string lastError() const override;
 
 private:

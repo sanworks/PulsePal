@@ -87,18 +87,19 @@
 %   trigger(channels)                    Starts the pulse trains of output channels, e.g. P.trigger([1 3])
 %   stop(channels)                       Stops pulse trains: P.stop() stops all of them, P.stop([1 3]) some
 %   setFixedVoltage(channels, voltage)   Holds output channels at a fixed voltage until they are triggered
-%   sendCustomPulseTrain(trainID, pulseTimes, voltages)    Loads a custom pulse train
-%   sendCustomWaveform(trainID, samplingPeriod, voltages)  Loads a sampled waveform, as a custom pulse train
+%   sendCustomPulseTrain(customTrainID, pulseTimes, voltages)    Loads a custom pulse train
+%   sendCustomWaveform(customTrainID, samplingPeriod, voltages)  Loads a sampled waveform, as a custom pulse train
 %   syncToDevice()                       Sends every parameter to the device in one command
 %   syncFromDevice()                     Reads every parameter from the device into the properties
 %   setDefaultParams()                   Programs the default parameters
 %   exportParams()                       Returns every parameter as a struct, e.g. to save with your data;
 %                                        importParams(params) programs the device with one
-%   saveParameters(fileName)             Saves the parameters to a .mat file; loadParameters(fileName) loads them
+%   saveParameters(fileName)             Saves the parameters to a .json program file, which both GUIs open;
+%                                        loadParameters(fileName) programs the device with one
 %   saveSettingsFile(fileName)           Saves the parameters to a settings file on the device's microSD card;
 %                                        loadSettingsFile(fileName) and deleteSettingsFile(fileName)
 %   gui()                                Opens the parameter editor window
-%   setScreenSaver(state, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
+%   setScreenSaver(enabled, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
 % info holds the connected device's hardware and firmware versions, and its limits.
 %
 % The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
@@ -129,7 +130,7 @@ classdef PulsePalDevice < handle
     % a file, and a license block there would hide it.
 
     properties (SetAccess = private)
-        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
+        port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device: hardware and firmware versions, and its limits
     end
 
@@ -164,7 +165,7 @@ classdef PulsePalDevice < handle
         nCustomPulseTrains % Number of custom pulse trains supported
         maxCustomPulses % Maximum number of custom pulses per pulse train supported
         ui % Struct with user interface handles
-        storing = false % True while values read from the device are stored, unchecked (see syncFromDevice())
+        storing = false % True while values are stored unchecked: read from the device, or restored by importParams()
     end
 
     properties (Constant, Access = private)
@@ -173,6 +174,7 @@ classdef PulsePalDevice < handle
         MaxTime = 9999.9999 % Longest time parameter or custom pulse time, in seconds: the most the device's joystick
                             % menu shows and edits (four digits before the point), as in the Python and C++ classes
         MaxSettingsFileNameLength = 15 % Characters, including '.pps'
+        ProgramFormatVersion = 1 % Version of the program file format (see saveParameters()), as in the Python GUI
         % Output parameter names in order of their parameter code, and the kind of value each takes. The codes are
         % fixed: see "Parameter codes" in /Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
         ParamNames = {...
@@ -230,47 +232,61 @@ classdef PulsePalDevice < handle
             % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
             % and serialport is used then.
             if ~(ischar(portString) || isstring(portString))
-                obj.Port = portString; % An open port object (see above)
-                portString = char(obj.Port.Port);
+                obj.port = portString; % An open port object (see above)
+                portString = char(obj.port.Port);
             elseif pulsepal.DotNetSerialPort.isAvailable()
-                obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
+                obj.port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else
-                obj.Port = serialport(portString, defaultBaudRate);
+                obj.port = serialport(portString, defaultBaudRate);
             end
             portString = char(portString);
-            setDTR(obj.Port, true);
-            obj.Port.write([obj.OpMenuByte 72], 'uint8');
-            HandShakeOkByte = obj.Port.read(1, 'uint8'); % read() waits for the reply, up to the port's Timeout
+            setDTR(obj.port, true);
+            % Bytes already waiting, e.g. the end of a reply to a session that was cut short, would be read as the reply
+            % to the handshake. A reply the device sends after this, to a command it had not reached yet, is skipped by
+            % readHandshakeReply().
+            flush(obj.port);
+            obj.port.write([obj.OpMenuByte 72], 'uint8');
+            reply = obj.readHandshakeReply(); % 'K' (75), then the firmware version (uint32)
+            HandShakeOkByte = [];
+            replyVersion = 0;
+            if numel(reply) == 5
+                HandShakeOkByte = reply(1);
+                replyVersion = double(typecast(uint8(reply(2:5)), 'uint32'));
+            end
             if HandShakeOkByte == 75
                 % Check firmware version
-                obj.firmwareVersion = obj.Port.read(1, 'uint32');
+                obj.firmwareVersion = replyVersion;
                 if obj.firmwareVersion < 20
-                    obj.Port = [];
+                    obj.port = [];
                     error(['Error: Pulse Pal 1 detected. You must use the legacy interface.'...
                            newline 'Add /PulsePal/MATLAB to the MATLAB path, and at the command prompt,'...
                            newline 'type PulsePal(''Port'') where ''Port'' is your serial port string.']);
                 else
                     if obj.firmwareVersion < 21
-                        obj.Port = [];
+                        obj.port = [];
                         error(['Error: Pulse Pal with old firmware detected. Please update your firmware.' ...
                                newline 'Update instructions are online at: '...
                                'https://sites.google.com/site/pulsepalwiki/updating-firmware']);
                     end
                     if obj.firmwareVersion > obj.CurrentFirmwareVersion
-                        obj.Port = [];
-                        error(['Error: Pulse Pal with future firmware detected.'...
-                               newline 'Please update your MATLAB software or downgrade the firmware to v'...
-                               num2str(obj.CurrentFirmwareVersion) '.']);
+                        % New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+                        warning('PulsePalDevice:newerFirmware', ['Pulse Pal firmware v' num2str(obj.firmwareVersion) ...
+                                ' is newer than this class knows (v' num2str(obj.CurrentFirmwareVersion) '). It '...
+                                'works with it, but update the MATLAB software to use what is new.'])
+                    elseif obj.firmwareVersion < obj.CurrentFirmwareVersion
+                        warning('PulsePalDevice:olderFirmware', ['Pulse Pal firmware v' num2str(obj.firmwareVersion) ...
+                                ' is supported, but v' num2str(obj.CurrentFirmwareVersion) ' is available: see '...
+                                '/MATLAB/FirmwareLoader.'])
                     end
                 end
                 % Get hardware info if supported
                 if obj.firmwareVersion > 21
-                    obj.Port.write([obj.OpMenuByte 94], 'uint8'); % Request hardware info
-                    obj.hardwareVersion = obj.Port.read(1, 'uint8');
-                    obj.cyclePeriod = obj.Port.read(1, 'uint32');
+                    obj.port.write([obj.OpMenuByte 94], 'uint8'); % Request hardware info
+                    obj.hardwareVersion = obj.port.read(1, 'uint8');
+                    obj.cyclePeriod = obj.port.read(1, 'uint32');
                     obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
-                    obj.nCustomPulseTrains = obj.Port.read(1, 'uint8');
-                    obj.maxCustomPulses = obj.Port.read(1, 'uint32');
+                    obj.nCustomPulseTrains = obj.port.read(1, 'uint8');
+                    obj.maxCustomPulses = obj.port.read(1, 'uint32');
                 else
                     obj.hardwareVersion = 2;
                     obj.cyclePeriod = 50;
@@ -282,7 +298,6 @@ classdef PulsePalDevice < handle
                 % Create local copy of hardware description, with the fields of the Python class's DeviceInfo
                 obj.info = struct;
                 obj.info.outputParameterNames = obj.ParamNames;
-                obj.info.triggerParameterNames = {'triggerMode'};
                 obj.info.triggerModes = obj.availableTriggerModes();
                 obj.info.customTrainTargets = obj.CustomTrainTargetNames;
                 obj.info.firmwareVersion = obj.firmwareVersion;
@@ -294,26 +309,26 @@ classdef PulsePalDevice < handle
                 obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
                 obj.info.maxTime = obj.MaxTime;
             elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
-                wavePalVersion = obj.Port.read(1, 'uint32');
-                obj.Port = [];
+                wavePalVersion = replyVersion;
+                obj.port = [];
                 error(['The device at port ' portString ' runs Wave Pal firmware (v' num2str(wavePalVersion) ...
                        '), not Pulse Pal firmware.' newline 'To use it as a Pulse Pal, load Pulse Pal firmware '...
                        'onto it with LoadPulsePalFirmware (in /MATLAB/FirmwareLoader).' newline ...
                        'To use it as a Wave Pal, connect with WavePalDevice.'])
             elseif HandShakeOkByte == 83 % 'S': the device runs Synth Pal firmware (/Firmware/SynthPal)
-                synthPalVersion = obj.Port.read(1, 'uint32');
-                obj.Port = [];
+                synthPalVersion = replyVersion;
+                obj.port = [];
                 error(['The device at port ' portString ' runs Synth Pal firmware (v' num2str(synthPalVersion) ...
                        '), not Pulse Pal firmware.' newline 'To use it as a Pulse Pal, load Pulse Pal firmware '...
                        'onto it with LoadPulsePalFirmware (in /MATLAB/FirmwareLoader).' newline ...
                        'To use it as a Synth Pal, connect with SynthPalDevice.'])
             else
-                obj.Port = [];
+                obj.port = [];
                 error(['The device at port ' portString ' returned an unexpected handshake signature.'])
             end
 
             % Set name of connected software
-            obj.Port.write([obj.OpMenuByte 89 'MATLAB'], 'uint8');
+            obj.port.write([obj.OpMenuByte 89 'MATLAB'], 'uint8');
 
             % Set default parameters
             obj.setDefaultParams;
@@ -323,7 +338,7 @@ classdef PulsePalDevice < handle
             % Starts the pulse trains of output channels: one channel number, e.g. P.trigger(1), or several as an
             % array, e.g. P.trigger([1 3 4]). The channels start in the same timer cycle. A channel that is already
             % playing a pulse train ignores the trigger.
-            obj.Port.write([obj.OpMenuByte 77 obj.channelBits(channels)], 'uint8');
+            obj.port.write([obj.OpMenuByte 77 obj.channelBits(channels)], 'uint8');
         end
 
         function stop(obj, channels)
@@ -339,9 +354,9 @@ classdef PulsePalDevice < handle
                 end
             end
             if obj.firmwareVersion < 22
-                obj.Port.write([obj.OpMenuByte 80], 'uint8');
+                obj.port.write([obj.OpMenuByte 80], 'uint8');
             else
-                obj.Port.write([obj.OpMenuByte 98 bitCode], 'uint8');
+                obj.port.write([obj.OpMenuByte 98 bitCode], 'uint8');
             end
         end
 
@@ -372,7 +387,7 @@ classdef PulsePalDevice < handle
             end
             voltageBits = obj.volts2Bits(voltage);
             for channel = channelList
-                obj.Port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
+                obj.port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
                 obj.confirmWrite;
             end
         end
@@ -392,14 +407,14 @@ classdef PulsePalDevice < handle
                 error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
             end
             voltageBits = obj.roundHalfEven(voltageOffset*(1/(20/65536)));
-            obj.Port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
+            obj.port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
             obj.confirmWrite;
             disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
         end
 
-        function setScreenSaver(obj, state, timeout)
-            % Switches the device's screen saver on (state = 1 or true) or off (state = 0 or false), and sets its timeout
-            % in seconds (a whole number, 1-65535). With the screen saver on, the device dims its screen once it has been
+        function setScreenSaver(obj, enabled, timeout)
+            % Switches the device's screen saver on (enabled = true) or off (enabled = false), and sets its timeout in
+            % seconds (a whole number, 1-65535). With the screen saver on, the device dims its screen once it has been
             % left alone for the timeout: no command from the computer, no rising edge on a trigger channel, and no
             % joystick click or push. The next of these brings the screen back. Both settings are stored in the device's
             % EEPROM and kept through power cycles; the screen saver can also be switched on and off from the device's
@@ -408,45 +423,47 @@ classdef PulsePalDevice < handle
             % The device saves the settings once no channel is playing. Saving pauses its timer, usually for about
             % 20 us but, once in about 2000 changes, for tens of milliseconds, which would delay a trigger. Change the
             % settings before an experiment rather than during one.
-            % Requires firmware v22 or newer. Only Pulse Pal 3 has a screen saver: Pulse Pal 2 accepts state = 0 only.
-            % Example: setScreenSaver(P, 1, 300) dims the screen after 5 minutes without activity.
+            % Requires firmware v22 or newer. Only Pulse Pal 3 has a screen saver: Pulse Pal 2 accepts enabled = false
+            % only.
+            % Example: P.setScreenSaver(true, 300) dims the screen after 5 minutes without activity.
             if nargin < 3
                 timeout = 1800;
             end
             if obj.firmwareVersion < 22
                 error(['setScreenSaver() requires firmware v22 or newer. Detected firmware is: v' num2str(obj.firmwareVersion)])
             end
-            if ~(isnumeric(state) || islogical(state)) || ~isscalar(state) || ~(state == 0 || state == 1) % Also refuses NaN
-                error('state must be 1 (on) or 0 (off)')
+            if ~(isnumeric(enabled) || islogical(enabled)) || ~isscalar(enabled) || ~(enabled == 0 || enabled == 1)
+                error('enabled must be true (on) or false (off)') % NaN too: it fails both comparisons
             end
             if ~isnumeric(timeout) || ~isscalar(timeout) || ~(timeout >= 1 && timeout <= 65535) || timeout ~= round(timeout)
                 error('timeout must be a whole number of seconds from 1 to 65535')
             end
-            if state == 1 && obj.hardwareVersion < 3
-                error('The screen saver requires hardware v3 or newer: Pulse Pal 2 accepts state = 0 only.')
+            if enabled == 1 && obj.hardwareVersion < 3
+                error('The screen saver requires hardware v3 or newer: Pulse Pal 2 accepts enabled = false only.')
             end
-            obj.Port.write([obj.OpMenuByte 99 double(state) typecast(uint16(timeout), 'uint8')], 'uint8');
+            obj.port.write([obj.OpMenuByte 99 double(enabled) typecast(uint16(timeout), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
 
-        function sendCustomPulseTrain(obj, trainID, pulseTimes, voltages)
+        function sendCustomPulseTrain(obj, customTrainID, pulseTimes, voltages)
             % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
-            % trainID: 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
+            % customTrainID: the train's number, 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
             % pulseTimes: in seconds from the start of the train, increasing, in multiples of 100 us
             %             (info.minPulseWidth_us), up to 9999.9999 s (info.maxTime).
             % voltages: one per pulse, in volts, -10 to 10.
-            % An output channel plays the train when its customTrainID is trainID. Each pulse takes the channel's own
-            % phase durations; a biphasic pulse's second phase is its voltage with the sign reversed. Example:
+            % An output channel plays the train when its customTrainID property is set to the train's number. Each
+            % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
+            % sign reversed. Example:
             %   P.sendCustomPulseTrain(1, [0 0.1 0.25 0.5], [5 2.5 -2.5 -5]);
             %   P.customTrainID(2) = 1;
-            sendCustomTrain(obj, trainID, pulseTimes, voltages);
+            sendCustomTrain(obj, customTrainID, pulseTimes, voltages);
         end
 
-        function sendCustomWaveform(obj, trainID, samplingPeriod, voltages)
+        function sendCustomWaveform(obj, customTrainID, samplingPeriod, voltages)
             % Loads a sampled waveform onto the device, as a custom pulse train of adjoining pulses: one per sample,
             % samplingPeriod seconds apart (a multiple of 100 us). Set phase1Duration to samplingPeriod on the output
-            % channel that plays it, so that each sample lasts until the next. trainID: 1-4 on Pulse Pal 3, 1-2 on
-            % Pulse Pal 2. voltages: in volts, -10 to 10.
+            % channel that plays it, so that each sample lasts until the next. customTrainID: the train's number, 1-4
+            % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10.
             nVoltages = length(voltages);
             if ~isnumeric(samplingPeriod) || ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
@@ -455,7 +472,7 @@ classdef PulsePalDevice < handle
                 error(['Error: sampling period must be a multiple of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
             pulseTimes = (0:nVoltages-1)*double(samplingPeriod); % One per sample
-            sendCustomTrain(obj, trainID, pulseTimes, voltages);
+            sendCustomTrain(obj, customTrainID, pulseTimes, voltages);
         end
 
         function setDefaultParams(obj)
@@ -481,7 +498,7 @@ classdef PulsePalDevice < handle
             % triggerMode) holding one value per channel, e.g. to save with your data and record exactly what the
             % device played. importParams() programs the device with it again. Example:
             %   params = P.exportParams();
-            %   save('Trial12.mat', 'params');           % Or jsonencode(params), for a text file
+            %   save('Trial12.mat', 'params');           % Or P.saveParameters('Trial12.json'), for a text file
             % The Python class's export_params() returns the same, with snake_case names.
             params = struct;
             for i = 1:numel(obj.ParamNames)
@@ -494,8 +511,9 @@ classdef PulsePalDevice < handle
             % Programs the device with parameters exported by exportParams(): a struct with one field per parameter,
             % each holding one value per channel. All of them are checked first, and then sent in one command, as
             % syncToDevice() sends them: in param sync mode, the device stores them for the next sync edge. Parameters
-            % missing from params keep their values, and autoSync is left as it is. Raises an error, and changes and
-            % sends nothing, if a field is not a parameter or a value is invalid.
+            % missing from params keep their values, and autoSync is left as it is. Fields that are not parameters of
+            % this class, e.g. from a newer version's exportParams(), are skipped with a warning. Raises an error, and
+            % changes and sends nothing, if a value is invalid.
             if ~isstruct(params) || ~isscalar(params)
                 error('importParams() takes a struct of parameters, as exportParams() returns.')
             end
@@ -504,10 +522,11 @@ classdef PulsePalDevice < handle
             end
             % Files saved by earlier versions of saveParameters() also hold autoSync, which is not a parameter
             names = setdiff(fieldnames(params), {'playbackMode', 'autoSync'}, 'stable');
-            unknown = setdiff(names, [obj.ParamNames {'triggerMode'}]);
+            unknown = setdiff(names, [obj.ParamNames {'triggerMode'}], 'stable');
             if ~isempty(unknown)
-                error(['importParams(): unknown parameter(s) ' strjoin(unknown, ', ') '. Valid names are '...
-                       strjoin(obj.ParamNames, ', ') ' and triggerMode.'])
+                warning('PulsePalDevice:unknownParams', ['importParams(): skipped ' strjoin(unknown, ', ') ...
+                        ', which this version of PulsePalDevice does not have.'])
+                names = setdiff(names, unknown, 'stable');
             end
             snapshot = obj.exportParams();
             autoSyncState = obj.autoSync;
@@ -519,32 +538,55 @@ classdef PulsePalDevice < handle
                 end
                 obj.checkSyncParams();
             catch err
-                % Nothing has been sent, so the properties go back to what the device holds
+                % Nothing has been sent, so the properties go back to what the device holds. They are stored as they
+                % were, unchecked: values read from the device can be ones an assignment refuses (see syncFromDevice())
+                obj.storing = true;
+                restoring = onCleanup(@() obj.endStoring());
                 snapshotNames = fieldnames(snapshot);
                 for i = 1:numel(snapshotNames)
                     obj.(snapshotNames{i}) = snapshot.(snapshotNames{i});
                 end
+                clear restoring
                 rethrow(err)
             end
             obj.syncAllParams;
             clear cleanup
         end
 
-        function saveParameters(obj, filename)
-            % Saves the parameters to a .mat file on this computer, as the variable params (see exportParams), e.g.
-            % P.saveParameters('MyProgram.mat'). loadParameters() programs the device with them again.
-            if ~(ischar(filename) || (isstring(filename) && isscalar(filename))) || ~endsWith(lower(filename), '.mat')
-                error('The file to save must be a .mat file')
+        function saveParameters(obj, fileName)
+            % Saves the parameters to a program file on this computer, e.g. P.saveParameters('MyProgram.json'): the
+            % .json file both GUIs save and open (see "Program files" in /USING.md). Its params are exportParams()
+            % with the Python class's snake_case names, which its import_params() takes as they are.
+            % loadParameters() programs the device with them again.
+            if ~(ischar(fileName) || (isstring(fileName) && isscalar(fileName))) || ~endsWith(lower(fileName), '.json')
+                error('The file to save must be a .json file, e.g. P.saveParameters(''MyProgram.json'')')
             end
-            params = obj.exportParams;
-            save(filename, 'params');
+            obj.writeProgramFile(char(fileName), obj.exportParams(), {}, {});
         end
 
-        function loadParameters(obj, filename)
-            % Loads parameters from a .mat file saved by saveParameters(), and programs the device with them (see
-            % importParams). autoSync is left as it is.
-            S = load(filename);
-            obj.importParams(S.params);
+        function loadParameters(obj, fileName)
+            % Programs the device with the parameters in a program file (see importParams): a .json file saved by
+            % saveParameters() or by either GUI, or a .mat file saved by saveParameters() before it saved .json files.
+            % Parameters the file leaves out keep their values, and autoSync is left as it is. The custom trains in a
+            % GUI's program are not loaded: open it with gui() for those.
+            if ~(ischar(fileName) || (isstring(fileName) && isscalar(fileName)))
+                error('loadParameters() takes the name of a .json file, e.g. P.loadParameters(''MyProgram.json'')')
+            end
+            fileName = char(fileName);
+            if endsWith(lower(fileName), '.mat')
+                S = load(fileName);
+                if ~isfield(S, 'params')
+                    error([fileName ' holds no parameters: saveParameters() saved them as the variable params.'])
+                end
+                obj.importParams(S.params);
+                return
+            end
+            [params, timestamps, voltages] = obj.readProgramFile(fileName);
+            if any(~cellfun(@isempty, [timestamps voltages]))
+                warning('PulsePalDevice:customTrainsNotLoaded', ['loadParameters() loads the parameters only: ' ...
+                        'open ' fileName ' with gui() to load its custom trains too.'])
+            end
+            obj.importParams(params);
         end
 
         function saveSettingsFile(obj, fileName)
@@ -600,7 +642,7 @@ classdef PulsePalDevice < handle
                     return
                 end
             end
-            obj.Port.write([obj.OpMenuByte 97], 'uint8');
+            obj.port.write([obj.OpMenuByte 97], 'uint8');
             % The device replies with lines of status text, the last of which contains '!', and then a confirm byte (1
             % if the card was formatted, 0 if not). The confirm byte is sent after the device has reloaded its default
             % parameters, so it can arrive well after the text. It must be read here: left in the buffer, it would be
@@ -611,8 +653,8 @@ classdef PulsePalDevice < handle
             lineEnd = [];
             replyComplete = false;
             while toc(startTime) < 30 && ~replyComplete
-                if obj.Port.NumBytesAvailable > 0
-                    msg = [msg obj.Port.read(obj.Port.NumBytesAvailable, 'uint8')]; %#ok<AGROW>
+                if obj.port.NumBytesAvailable > 0
+                    msg = [msg obj.port.read(obj.port.NumBytesAvailable, 'uint8')]; %#ok<AGROW>
                     flagIndex = find(msg == '!', 1);
                     if ~isempty(flagIndex)
                         lineEnd = flagIndex - 1 + find(msg(flagIndex:end) == 10, 1); % 10 = newline
@@ -721,7 +763,7 @@ classdef PulsePalDevice < handle
             % channels and puts the device's own name back on its screen, closes the GUI, and releases the serial
             % port. Errors are ignored: the device may already be unplugged.
             try
-                obj.Port.write([obj.OpMenuByte 81], 'uint8');
+                obj.port.write([obj.OpMenuByte 81], 'uint8');
             catch
                 % Fail silently
             end
@@ -730,11 +772,39 @@ classdef PulsePalDevice < handle
             catch
                 % Fail silently
             end
-            obj.Port = [];
+            obj.port = [];
         end
     end
 
     methods (Access = private)
+        function reply = readHandshakeReply(obj)
+            % The reply to op 72, the handshake, once it has been sent: the firmware's letter, then its version (5
+            % bytes), or fewer bytes if the device did not send 5 within the port's Timeout. The reply is the last 5
+            % bytes the device sends before it goes quiet. A command that an earlier session sent just before it closed
+            % can still be waiting on the device when this session connects, e.g. while the device redraws its screen.
+            % The device answers it first: after the constructor discarded the bytes waiting, and before the handshake.
+            % Its reply is skipped. Bytes are read until none has arrived for 50 ms, longer than the device takes to
+            % redraw its screen between two replies, or than serialport takes to deliver bytes on Windows (15.6 ms),
+            % and for at most 1 s, so that a device that never stops sending is refused rather than waited for. The
+            % three classes and the Python and C++ clients read the handshake this way.
+            reply = obj.port.read(5, 'uint8'); % Waits for a whole reply, up to the port's Timeout
+            if numel(reply) < 5
+                return
+            end
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    reply = [reply obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+            reply = reply(end-4:end);
+        end
+
         function portStrings = findSerialPorts(obj)
             % Return likely serial-port candidates.
             portStrings = {}; % Initialize empty cell array
@@ -852,11 +922,11 @@ classdef PulsePalDevice < handle
                     bytes = @(v) uint8(v);
             end
             if obj.firmwareVersion > 21
-                obj.Port.write([obj.OpMenuByte 91 paramCode bytes(deviceValues)], 'uint8'); % All channels at once
+                obj.port.write([obj.OpMenuByte 91 paramCode bytes(deviceValues)], 'uint8'); % All channels at once
                 obj.confirmWrite;
             elseif paramCode ~= 18 % Firmware v21 has no parameter 18, and checkOutputParam() lets only false through
                 for i = 1:numel(deviceValues)
-                    obj.Port.write([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))], 'uint8');
+                    obj.port.write([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))], 'uint8');
                     obj.confirmWrite; % Firmware v21 confirms each op 74
                 end
             end
@@ -971,7 +1041,7 @@ classdef PulsePalDevice < handle
 
         function confirmed = confirmWrite(obj)
             % Verify that the device acknowledged a write command.
-            confirmed = obj.Port.read(1, 'uint8');
+            confirmed = obj.port.read(1, 'uint8');
             % read() returns nothing (with a warning) if the byte does not arrive, and "if [] ~= 1" is false, so a
             % missing confirm byte has to be checked for: left unchecked, it arrives late and is read as the next reply
             if isempty(confirmed) || confirmed ~= 1
@@ -1017,7 +1087,7 @@ classdef PulsePalDevice < handle
             end
             SingleByteParams = [SingleByteOutputParams(1:end) double(obj.linkTriggerChannel1)...
                 double(obj.linkTriggerChannel2) modes - 1];
-            obj.Port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
+            obj.port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
                 typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
             obj.confirmWrite;
         end
@@ -1072,7 +1142,7 @@ classdef PulsePalDevice < handle
                 end
                 trainCode = [];
             end
-            obj.Port.write([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses CandidateTimes]), 'uint8') ...
+            obj.port.write([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses CandidateTimes]), 'uint8') ...
                 typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
@@ -1088,10 +1158,10 @@ classdef PulsePalDevice < handle
                 error([context ': the file name must be 1 to 11 ASCII characters followed by .pps, e.g. '...
                        '''Protocol1.pps''.'])
             end
-            obj.Port.write([obj.OpMenuByte 90 opByte numel(fileName) double(fileName)], 'uint8');
+            obj.port.write([obj.OpMenuByte 90 opByte numel(fileName) double(fileName)], 'uint8');
             confirmed = 1;
             if obj.firmwareVersion > 21
-                confirmed = obj.Port.read(1, 'uint8'); % Sent after the file operation has finished
+                confirmed = obj.port.read(1, 'uint8'); % Sent after the file operation has finished
             elseif opByte == 2
                 pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
             end
@@ -1119,8 +1189,8 @@ classdef PulsePalDevice < handle
                 error(['syncFromDevice() requires firmware v22 or newer.'...
                       newline 'Detected firmware is v' num2str(obj.firmwareVersion)])
             end
-            obj.Port.write([obj.OpMenuByte 93], 'uint8');
-            Msg = obj.Port.read(178, 'uint8');
+            obj.port.write([obj.OpMenuByte 93], 'uint8');
+            Msg = obj.port.read(178, 'uint8');
             if length(Msg) ~= 178
                 error(['Pulse Pal sent ' num2str(length(Msg)) ' of the 178 bytes of its parameters.'])
             end
@@ -1149,8 +1219,131 @@ classdef PulsePalDevice < handle
         end
 
         function endStoring(obj)
-            % For importCurrentParamsFromPulsePal(): assignments are checked again, also if reading back failed
+            % For importCurrentParamsFromPulsePal() and importParams(): assignments are checked again, also if storing
+            % failed
             obj.storing = false;
+        end
+
+        function writeProgramFile(obj, fileName, params, timestamps, voltages)
+            % Writes a program file (see saveParameters()), in the Python GUI's format: format_version, then params,
+            % the custom trains' text and the device's info. params: parameters by their MATLAB names, in any form an
+            % assignment takes (names or codes, logicals or 0 and 1), written as exportParams() holds them, with the
+            % Python class's snake_case names. timestamps and voltages: the text of each custom train, as the GUI's
+            % boxes hold it, or {} for none.
+            program = struct;
+            program.format_version = obj.ProgramFormatVersion;
+            program.params = struct;
+            names = fieldnames(params);
+            for i = 1:numel(names)
+                value = params.(names{i});
+                kind = 'TriggerMode';
+                if ~strcmp(names{i}, 'triggerMode')
+                    kind = obj.ParamKinds{strcmp(obj.ParamNames, names{i})};
+                end
+                switch kind
+                    case 'TriggerMode'
+                        value = obj.modeNames(value, obj.TriggerModeNames);
+                    case 'Target'
+                        value = obj.modeNames(value, obj.CustomTrainTargetNames);
+                    case 'Logical'
+                        value = logical(value);
+                    otherwise
+                        value = double(value);
+                end
+                program.params.(obj.snakeCase(names{i})) = value;
+            end
+            if ~isempty(timestamps)
+                program.custom_train_timestamps = timestamps;
+                program.custom_train_voltages = voltages;
+            end
+            program.device_info = struct;
+            infoNames = fieldnames(obj.info);
+            for i = 1:numel(infoNames)
+                value = obj.info.(infoNames{i});
+                if strcmp(infoNames{i}, 'outputParameterNames')
+                    value = cellfun(@PulsePalDevice.snakeCase, value, 'UniformOutput', false); % As Python names them
+                end
+                program.device_info.(obj.snakeCase(infoNames{i})) = value;
+            end
+            if verLessThan('matlab', '9.10') %#ok<VERLESSMATLAB> jsonencode's PrettyPrint is in R2021a and newer
+                text = jsonencode(program);
+            else
+                text = jsonencode(program, 'PrettyPrint', true);
+            end
+            fileID = fopen(fileName, 'w', 'n', 'UTF-8');
+            if fileID < 0
+                error([fileName ' could not be opened for writing.'])
+            end
+            fwrite(fileID, text, 'char');
+            fclose(fileID);
+        end
+
+        function [params, timestamps, voltages] = readProgramFile(obj, fileName)
+            % Reads a program file (see saveParameters()). params: the parameters it holds, by their MATLAB names, as
+            % the file holds them (names and logicals, or the GUIs' numbers in files from before format_version), each
+            % as a row. timestamps and voltages: the text of each custom train, 1x4, '' for none. Keys that are not
+            % parameters of this class are skipped with a warning.
+            try
+                program = jsondecode(fileread(fileName));
+            catch err
+                error(['Could not read ' fileName ': ' err.message])
+            end
+            if ~isstruct(program) || ~isscalar(program) || ~isfield(program, 'params') || ~isstruct(program.params)
+                error([fileName ' is not a Pulse Pal program file: it has no params.'])
+            end
+            if isfield(program, 'format_version') && isnumeric(program.format_version) && ...
+                    any(program.format_version > obj.ProgramFormatVersion)
+                warning('PulsePalDevice:newerProgramFile', [fileName ' was saved in a newer format (format_version ' ...
+                        num2str(program.format_version) '): what this version does not know is skipped.'])
+            end
+            fileParams = program.params;
+            if ~isfield(fileParams, 'trigger_mode') && isfield(program, 'trigger_mode')
+                fileParams.trigger_mode = program.trigger_mode; % Files from before format_version held it here
+            end
+            names = [obj.ParamNames {'triggerMode'}];
+            keys = cellfun(@PulsePalDevice.snakeCase, names, 'UniformOutput', false);
+            unknown = setdiff(fieldnames(fileParams), keys, 'stable');
+            if ~isempty(unknown)
+                warning('PulsePalDevice:unknownParams', [fileName ': skipped ' strjoin(unknown, ', ') ...
+                        ', which this version of PulsePalDevice does not have.'])
+            end
+            params = struct;
+            for i = 1:numel(names)
+                if isfield(fileParams, keys{i})
+                    params.(names{i}) = reshape(fileParams.(keys{i}), 1, []); % jsondecode returns columns
+                end
+            end
+            timestamps = obj.customTrainTexts(program, 'custom_train_timestamps');
+            voltages = obj.customTrainTexts(program, 'custom_train_voltages');
+        end
+
+        function texts = customTrainTexts(obj, program, key)
+            % The text of each custom train in a program file: the text as typed in a GUI, or a list of numbers
+            texts = repmat({''}, 1, 4);
+            if ~isfield(program, key) || isempty(program.(key))
+                return
+            end
+            values = program.(key);
+            if ~iscell(values)
+                values = num2cell(values, 2); % Lists of numbers of the same length: one row per train
+            end
+            for i = 1:min(numel(values), obj.info.nCustomPulseTrains)
+                value = values{i};
+                if ischar(value) || isstring(value)
+                    texts{i} = char(value);
+                elseif isnumeric(value) && ~isempty(value)
+                    texts{i} = char(strjoin(string(value(:)'), ', '));
+                end
+            end
+        end
+
+        function names = modeNames(~, values, validNames)
+            % A mode parameter's values as names, for a program file: the GUI keeps them as codes
+            names = values;
+            if isnumeric(values)
+                names = validNames(double(values) + 1);
+            end
+            names = reshape(names, 1, []);
         end
 
         function fh = makeCallback(obj, fun, varargin)
@@ -1165,6 +1358,12 @@ classdef PulsePalDevice < handle
     end
 
     methods (Static, Access = private)
+        function name = snakeCase(name)
+            % A name as the Python class spells it: 'phase1Voltage' is 'phase1_voltage', 'customTrainID' is
+            % 'custom_train_id'
+            name = lower(regexprep(name, '([A-Z]+)', '_$1'));
+        end
+
         function params = defaultParams
             % The default parameters, as the GUI keeps them: numbers, with each mode as its code (0 = 'Normal',
             % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them.

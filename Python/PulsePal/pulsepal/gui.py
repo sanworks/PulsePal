@@ -32,6 +32,11 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .pulse_pal import CUSTOM_TRAIN_TARGETS, MAX_TIME, TRIGGER_MODES
 
+PROGRAM_FORMAT_VERSION = 1
+"""Version of the program file format, written to each file as
+`format_version`. The MATLAB GUI reads and writes the same format: see
+"Program files" in /USING.md."""
+
 # Widget colors for each theme. The light palette matches the platform's
 # native widget colors, so light mode can keep the native ttk theme.
 _PALETTES = {
@@ -1715,10 +1720,12 @@ class PulsePalGUI:
                 return
 
         try:
-            # Captured before the assignment below overwrites the client's
-            # record of the modes the device was last told
+            # The modes the device was last told, before this upload
+            # changes the client's record of them
             device_modes = [TRIGGER_MODES.index(mode)
                             for mode in device.trigger_mode[1:3]]
+            buffered = self._program_trigger_modes(device_modes,
+                                                   leaving=True)
             # The batch sends the whole program in one command when it ends
             with device.batch():
                 for name, values in self._params.items():
@@ -1728,8 +1735,6 @@ class PulsePalGUI:
                 device.trigger_mode[1:3] = [
                     TRIGGER_MODES[int(mode)] for mode in self._trigger_mode
                 ]
-                buffered = self._program_trigger_modes(device_modes,
-                                                       leaving=True)
             self._program_trigger_modes(device_modes, leaving=False)
             for train_id, times, voltages in custom_trains:
                 device.send_custom_pulse_train(train_id, times, voltages)
@@ -1752,16 +1757,29 @@ class PulsePalGUI:
             return int(value)
         return float(value)
 
+    @staticmethod
+    def _gui_value(name, value):
+        """Convert a parameter value from a program file to the GUI's
+        form: a name to its code, true or false to 1 or 0."""
+        if isinstance(value, str):
+            names = (CUSTOM_TRAIN_TARGETS if name == "custom_train_target"
+                     else TRIGGER_MODES)
+            for code, known in enumerate(names):
+                if known.lower() == value.lower():
+                    return float(code)
+            raise ValueError(f"{name}: unknown name {value!r}.")
+        return float(value)
+
     def _program_trigger_modes(self, device_modes, leaving):
         """Program the trigger modes that sync_to_device cannot carry.
 
-        set_trigger_param takes effect at once, while sync_to_device does
-        not once a channel is in param sync mode. So a channel leaving
-        param sync mode is programmed before the sync, which lets the sync
-        reach the device, and a channel entering it is programmed after, so
-        that this program is the one that loads and the next one is the one
-        that waits for a TTL. Every other mode change rides along in the
-        sync, as it always has.
+        A trigger mode assigned with auto_sync on takes effect at once,
+        while sync_to_device does not once a channel is in param sync mode.
+        So a channel leaving param sync mode is programmed before the sync,
+        which lets the sync reach the device, and a channel entering it is
+        programmed after, so that this program is the one that loads and
+        the next one is the one that waits for a TTL. Every other mode
+        change rides along in the sync, as it always has.
 
         device_modes is what the device was last told, as indices into
         TRIGGER_MODES, and is updated in place. Returns whether a channel
@@ -1777,8 +1795,12 @@ class PulsePalGUI:
             else:
                 send = new_mode == self._PARAM_SYNC_MODE and not was_param_sync
             if send:
-                device.set_trigger_param("trigger_mode", channel,
-                                         TRIGGER_MODES[new_mode])
+                auto_sync = device.auto_sync
+                device.auto_sync = True  # Sent at once, whatever the user set
+                try:
+                    device.trigger_mode[channel] = TRIGGER_MODES[new_mode]
+                finally:
+                    device.auto_sync = auto_sync
                 device_modes[channel - 1] = new_mode
         return self._PARAM_SYNC_MODE in device_modes
 
@@ -1846,11 +1868,17 @@ class PulsePalGUI:
         if not path:
             return
 
+        # The parameters as export_params() gives them: names, and true or
+        # false, so that import_params() takes them as they are
+        params = {
+            name: [self._device_value(name, value) for value in values]
+            for name, values in self._params.items()
+        }
+        params["trigger_mode"] = [TRIGGER_MODES[int(mode)]
+                                  for mode in self._trigger_mode]
         program = {
-            "params": {
-                name: list(values) for name, values in self._params.items()
-            },
-            "trigger_mode": list(self._trigger_mode),
+            "format_version": PROGRAM_FORMAT_VERSION,
+            "params": params,
             "custom_train_timestamps": list(self._custom_timestamps),
             "custom_train_voltages": list(self._custom_voltages),
             "device_info": dataclasses.asdict(device.info),
@@ -1879,6 +1907,8 @@ class PulsePalGUI:
         try:
             with open(path, encoding="utf-8") as program_file:
                 program = json.load(program_file)
+            # Files from before format_version held the GUI's own numbers,
+            # with the trigger modes outside "params": both are read
             params = program["params"]
             new_params = {}
             for name, default in self._DEFAULT_OUTPUT_PARAMS.items():
@@ -1887,9 +1917,12 @@ class PulsePalGUI:
                     raise ValueError(
                         f"{name} must have one value per output channel."
                     )
-                new_params[name] = [float(value) for value in values]
+                new_params[name] = [self._gui_value(name, value)
+                                    for value in values]
             trigger_mode = [
-                int(value) for value in program.get("trigger_mode", [0, 0])
+                int(self._gui_value("trigger_mode", value))
+                for value in params.get("trigger_mode",
+                                        program.get("trigger_mode", [0, 0]))
             ]
             if len(trigger_mode) != 2:
                 raise ValueError(

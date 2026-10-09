@@ -38,7 +38,8 @@ tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAre
     @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
     @testWaveformChangesFindAnAcceptedOrder, @testConfigureSetsLevelsTogether, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
-    @testSettingsChangeDuringPlayback, @testSyncToDevice, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused};
+    @testSettingsChangeDuringPlayback, @testSyncToDevice, @testSyncFromDeviceReadsWhatTheDevicePlays, ...
+    @testScreenSaverSettings, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused};
 S = SynthPalDevice(portString);
 nFailed = 0;
 for i = 1:numel(tests)
@@ -302,6 +303,47 @@ setChannel(S, 1, 'Sine', 5, 0);
 S.playDuration(1) = 1;
 end
 
+function testSyncFromDeviceReadsWhatTheDevicePlays(S)
+% syncFromDevice() reads every setting back, here after the object's own copy was changed with autoSync off, so that it
+% differs from what the device holds. Assignments then plan from the levels read back.
+S.frequency = 440.5;
+S.configure(1, 'waveform', 'Triangle', 'peakToPeak', 4, 'meanVoltage', 1);
+S.configure(2, 'waveform', 'Fixed Voltage', 'fixedVoltage', -2.5, 'meanVoltage', 6);
+S.restingVoltage(3) = -1;
+S.playDuration(4) = 0.25;
+S.onRampDuration(1) = 0.01;
+S.offRampDuration(2) = 0.02;
+S.linkTriggerChannel2(3) = true;
+S.triggerMode{2} = 'Toggle';
+expected = S.exportParams();
+S.autoSync = false;
+cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); % Also if the test fails
+S.frequency = 1000;
+S.configure(1, 'waveform', 'Sine', 'peakToPeak', 2, 'meanVoltage', 0);
+S.restingVoltage(3) = 0;
+S.playDuration(4) = 1;
+S.linkTriggerChannel2(3) = false;
+S.triggerMode{2} = 'Normal';
+S.autoSync = true;
+S.syncFromDevice();
+assert(isequal(S.exportParams(), expected), 'the settings read back differ from those programmed');
+% From a fixed voltage of -2.5 V with a mean of 6 V, straight to a sine wave of 20 V peak to peak
+S.configure(2, 'waveform', 'Sine', 'peakToPeak', 20, 'meanVoltage', 0);
+S.syncFromDevice();
+assert(strcmp(S.waveform{2}, 'Sine') && S.peakToPeak(2) == 20 && S.meanVoltage(2) == 0, 'levels after read-back');
+clear cleanup
+S.setDefaultParams();
+end
+
+function testScreenSaverSettings(S)
+% Op 99 takes the screen saver's state and timeout. Left on, with 1800 s: a new device's settings.
+S.setScreenSaver(false);
+S.setScreenSaver(true, 1800);
+expectError(@() S.setScreenSaver(2));
+expectError(@() S.setScreenSaver(true, 0));
+expectError(@() S.setScreenSaver(true, 65536));
+end
+
 function testParamSyncStoresTheSet(S)
 % While a trigger channel is in param sync mode, syncToDevice() stores the set for its next rising edge: the device
 % plays on with its settings. Leaving the mode discards the set.
@@ -355,7 +397,6 @@ expectError(@() setProperty(S, 'triggerMode', {'Normal', 'Normal', 'Normal', 'No
 expectError(@() setProperty(S, 'linkTriggerChannel1', [1 0 2 0]));
 expectError(@() S.trigger([1 7]));
 expectError(@() S.trigger([]));
-expectError(@() S.setScreenSaver(2));
 expectError(@() setProperty(S, 'autoSync', 2));
 expectError(@() setProperty(S, 'triggerMode', {'Sync', 'Normal'}));
 S.autoSync = false;

@@ -27,10 +27,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "PulsePal.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 static const uint8_t OpMenuByte = 213; // First byte of every command
@@ -43,6 +46,11 @@ static const uint32_t CurrentFirmwareVersion = 22;
 // How long to wait for a reply. The device replies as soon as it has read and executed a command, which takes
 // milliseconds. A missing reply usually means that the device is showing COMM. FAILURE! (see readConfirm()).
 static const unsigned int ReplyTimeoutMs = 2000;
+
+// The handshake's reply is the last 5 bytes the device sends before it has been quiet this long (see
+// readHandshakeReply()), and the device gets at most HandshakeMaxTime after the first 5 bytes to go quiet
+static const std::chrono::milliseconds HandshakeQuietTime(50);
+static const std::chrono::milliseconds HandshakeMaxTime(1000);
 
 // Parameter ranges, as in the MATLAB and Python classes
 static const double MaxVoltage = 10;         // Volts. Voltages are -MaxVoltage to +MaxVoltage
@@ -127,6 +135,40 @@ static float outputParamValue(const PulsePal::OutputParams& params, uint8_t para
         case 17: return params.restingVoltage;
     }
     return 0;
+}
+
+// Reads the reply to op 72, the handshake, once it has been written: 'K', then the firmware version. Returns false if
+// fewer than 5 bytes arrive within ReplyTimeoutMs. The reply is the last 5 bytes the device sends before it goes quiet.
+// A command that an earlier session sent just before it closed can still be waiting on the device when this session
+// connects, e.g. while the device redraws its screen. The device answers it first: after initialize() discarded the
+// input, and before the handshake. Its reply is skipped. Bytes are read until none has arrived for HandshakeQuietTime,
+// longer than the device takes to redraw its screen between two replies, and for at most HandshakeMaxTime, so that a
+// device that never stops sending is refused rather than waited for. The Python and MATLAB classes do the same.
+static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5])
+{
+    std::vector<uint8_t> received(5);
+    if (serial->read(received.data(), 5, ReplyTimeoutMs) < 5) { // Waits for a whole reply
+        return false;
+    }
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastArrival = started;
+    while (true) {
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        if ((now - lastArrival >= HandshakeQuietTime) || (now - started >= HandshakeMaxTime)) {
+            break;
+        }
+        size_t waiting = serial->bytesWaiting();
+        if (waiting > 0) {
+            size_t previous = received.size();
+            received.resize(previous + waiting);
+            received.resize(previous + serial->read(received.data() + previous, waiting, ReplyTimeoutMs));
+            lastArrival = std::chrono::steady_clock::now();
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    std::copy(received.end() - 5, received.end(), reply);
+    return true;
 }
 
 // Multi-byte values are little-endian
@@ -223,12 +265,14 @@ bool PulsePal::initialize(std::string portString)
         reportError(serial->lastError() + ". Check the port name, and that no other program is using the port.");
         return false;
     }
-    serial->discardInput(); // Anything left from an earlier session would be read as the handshake reply
+    serial->discardInput(); // Anything left from an earlier session would be read as the handshake reply. A reply
+                            // the device sends after this, to a command it had not reached yet, is skipped by
+                            // readHandshakeReply().
 
     // Op 72: handshake. The reply is 'K', then the firmware version (uint32)
     const uint8_t handshake[2] = {OpMenuByte, OP_HANDSHAKE};
     uint8_t reply[5] = {0};
-    if (!serial->write(handshake, 2) || (serial->read(reply, 5, ReplyTimeoutMs) < 5) || (reply[0] != HandshakeReply)) {
+    if (!serial->write(handshake, 2) || !readHandshakeReply(serial, reply) || (reply[0] != HandshakeReply)) {
         if ((reply[0] == WavePalHandshakeReply) || (reply[0] == SynthPalHandshakeReply)) {
             const char* name = (reply[0] == WavePalHandshakeReply) ? "Wave Pal" : "Synth Pal";
             std::ostringstream otherFirmwareError;
@@ -250,19 +294,20 @@ bool PulsePal::initialize(std::string portString)
     } else if (version < OldestFirmwareSupported) {
         versionError << "Pulse Pal firmware v" << version << " was found on port " << portString << ". Please update "
                      << "the firmware: https://sites.google.com/site/pulsepalwiki/updating-firmware";
-    } else if (version > CurrentFirmwareVersion) {
-        versionError << "Pulse Pal firmware v" << version << " was found on port " << portString << ". This C++ class "
-                     << "supports firmware up to v" << CurrentFirmwareVersion << ". Please update it, or downgrade "
-                     << "the firmware to v" << CurrentFirmwareVersion << ".";
     }
     if (!versionError.str().empty()) {
         reportError(versionError.str());
         serial->close();
         return false;
     }
-    if (version < CurrentFirmwareVersion) {
-        std::cout << "PulsePal: Firmware v" << version << " detected. This firmware is supported. Update to v"
-                  << CurrentFirmwareVersion << " is available." << std::endl;
+    if (version > CurrentFirmwareVersion) {
+        // New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+        std::cerr << "PulsePal: Pulse Pal firmware v" << version << " is newer than this C++ class knows (v"
+                  << CurrentFirmwareVersion << "). It works with it, but update the class to use what is new."
+                  << std::endl;
+    } else if (version < CurrentFirmwareVersion) {
+        std::cerr << "PulsePal: Pulse Pal firmware v" << version << " is supported, but v" << CurrentFirmwareVersion
+                  << " is available: see /MATLAB/FirmwareLoader." << std::endl;
     }
 
     // Op 94: hardware version, timer period (us, uint32), number of custom trains, maximum pulses per train (uint32).

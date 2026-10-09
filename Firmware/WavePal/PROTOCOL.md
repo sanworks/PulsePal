@@ -41,7 +41,11 @@ The Python and MATLAB classes connect in this order:
 1. Op 72 (handshake). A Wave Pal replies `87` ('W'). A Pulse Pal replies `75` ('K') to the
    same op, and a Synth Pal (`/Firmware/SynthPal`) `83` ('S'), so each client can tell which
    firmware a device runs, and say so. The Pulse Pal and Synth Pal clients do the same the
-   other way round.
+   other way round. A firmware version newer than the client knows is used, with a warning:
+   new firmware only adds ops. As for Pulse Pal (see its
+   [connection steps](../PROTOCOL.md#connecting)), the clients discard the bytes waiting before
+   op 72, then read its reply until the device has been quiet for 50 ms and take the last 5
+   bytes, which skips a reply to a command an earlier session left queued on the device.
 2. Op 78 ('N'): hardware properties.
 3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
 4. Op 88 ('X') with all four channel bits, then the default settings: ops 83, 82, 79, 68,
@@ -78,12 +82,16 @@ the waveform could not be written to the microSD card; that channel is then left
 | 71 | `G` | Get status | none | Playing channel bits (uint8), samples loaded on channels 1-4 (4 uint32, 0 = empty), underruns on channels 1-4 (4 uint32, counted since startup), longest playback interrupt since the previous op 71, in nanoseconds (uint32) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
 | 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
+| 99 | `c` | Set the screen saver | State (uint8: 0 off, 1 on), timeout in seconds (uint16, 1-65535) | 1 / 0 |
 | 90 | `Z` | Playback checksums (testing) | none | For channels 1-4: samples played since the channel last started (4 uint32), then the sum of their DAC codes, modulo 2^32 (4 uint32) |
 
-Ops 72, 81 and 89 are Pulse Pal's ops of the same numbers, so that a client shows its name on the
-screen in the same way. Like Pulse Pal's op 81, Wave Pal's stops every channel, as op 88 does, so
-that closing a client stops its outputs on all three firmwares. The settings and waveforms stay:
-TTL triggers still play them after the client closes.
+Ops 72, 81, 89 and 99 are Pulse Pal's ops of the same numbers, so that a client shows its name on
+the screen in the same way. Like Pulse Pal's op 81, Wave Pal's stops every channel, as op 88 does,
+so that closing a client stops its outputs on all three firmwares. The settings and waveforms
+stay: TTL triggers still play them after the client closes. Op 99 works as in Pulse Pal firmware
+(see its [screen saver](../PROTOCOL.md#screen-saver) notes), with the settings at the same EEPROM
+addresses, so they carry over when a device changes firmware. The device saves them only while no
+channel is playing, so a change made during playback is saved when it stops.
 
 Op 90 is for testing, like Pulse Pal's debugging ops 86 and 87: `/Python/PulsePal/tests/wavepal_hardware_test.py`
 and `/MATLAB/tests/testWavePalDevice.m` use it to check every sample a device played against the waveform

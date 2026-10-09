@@ -109,6 +109,7 @@ enum OpCode {
   OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each trigger channel. See enum TriggerModeValue
   OP_SET_ALL_SETTINGS = 'U',          // 85. Every setting at once. While a trigger channel is in param sync mode, stored
                                       // for its next rising edge instead (see "Param sync" in Playback.ino)
+  OP_GET_ALL_SETTINGS = 'R',          // 82. Returns every setting the device plays, in op 85's layout
   OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel)
   OP_STOP = 'X',                      // 88. Stop output channels (1 bit per channel)
   OP_GET_STATUS = 'G',                // 71. Returns the playback state

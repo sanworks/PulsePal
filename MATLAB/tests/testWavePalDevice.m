@@ -34,7 +34,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 function testWavePalDevice(portString)
 tests = {@testConnectionAndDefaults, @testWaveformsPlayExactly, @testLoopDurationIsExactInSamples, ...
     @testSamplingRateResendsLoopDurations, @testTriggerModes, @testOutputRangeChangeReloadsWaveforms, ...
-    @testEveryOutputRangePlays, @testFixedVoltageAndStop, @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
+    @testEveryOutputRangePlays, @testFixedVoltageAndStop, @testScreenSaverAndExportParams, ...
+    @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
 rng(1);
 W = WavePalDevice(portString);
 nFailed = 0;
@@ -188,6 +189,25 @@ function testFixedVoltageAndStop(W)
 W.setFixedVoltage([1 3], 2.5);
 assert(isempty(W.status().playing), 'a fixed voltage started playback');
 W.stop();
+end
+
+function testScreenSaverAndExportParams(W)
+% Op 99 takes the screen saver's state and timeout, as on Pulse Pal and Synth Pal. Left on, with 1800 s: a new device's
+% settings. exportParams() holds every setting.
+W.setScreenSaver(false);
+W.setScreenSaver(true, 1800);
+expectError(@() W.setScreenSaver(2));
+expectError(@() W.setScreenSaver(true, 0));
+expectError(@() W.setScreenSaver(true, 65536));
+W.loopMode(2) = true;
+W.loopDuration(2) = 0.5;
+params = W.exportParams();
+assert(isequal(params.loopMode, [false true false false]) && params.loopDuration(2) == 0.5, 'exported loop settings');
+assert(params.samplingRate == W.samplingRate && strcmp(params.outputRange, W.outputRange), 'exported device settings');
+assert(isequal(fieldnames(params)', {'samplingRate', 'outputRange', 'loopMode', 'loopDuration', 'triggerMode', ...
+    'linkTriggerChannel1', 'linkTriggerChannel2'}), 'exported fields');
+W.loopMode(2) = false;
+W.loopDuration(2) = 0;
 end
 
 function testInvalidArgumentsAreRefused(W)

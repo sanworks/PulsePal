@@ -121,6 +121,7 @@ from dataclasses import dataclass
 import math
 import numbers
 import struct
+import warnings
 
 import numpy as np
 import serial
@@ -156,6 +157,11 @@ _MAX_VOLTAGE_UV = 10_000_000  # Every output voltage stays within +/-10 V
 _CHANNEL_SETTINGS = ("waveform", "peak_to_peak", "fixed_voltage", "mean_voltage", "resting_voltage",
                      "play_duration", "on_ramp_duration", "off_ramp_duration", "trigger_mode",
                      "link_trigger_channel1", "link_trigger_channel2")
+
+
+def _samples_per_cycle(centihz):
+    """Samples in one cycle at a frequency, as the device works it out (see SynthPalDevice.samples_per_cycle)."""
+    return 4 * (2_500_000 // centihz)
 
 
 class _Rejected(PulsePalError):
@@ -291,6 +297,7 @@ class SynthPalDevice:
     """Properties of the connected device. See `DeviceInfo`."""
 
     _CURRENT_FIRMWARE_VERSION = 1
+    _BAUD_RATE = 12000000  # USB serial ignores the baud rate
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _OP_HANDSHAKE = _common.OP_HANDSHAKE
@@ -309,6 +316,10 @@ class SynthPalDevice:
     _OP_SET_TRIGGER_LINKS = ord("I")
     _OP_SET_TRIGGER_MODE = ord("T")
     _OP_SET_ALL_SETTINGS = ord("U")
+    _OP_GET_ALL_SETTINGS = ord("R")
+    # Every setting, as ops 85 ('U') and 82 ('R') carry them: frequency (centiHz), waveform codes, amplitudes,
+    # mean and resting voltages (uV), play, on ramp and off ramp durations (us), links, trigger modes
+    _SETTINGS_FORMAT = "<I4B4i4i4i4I4I4I8B2B"
     _OP_TRIGGER = ord("P")
     _OP_STOP = ord("X")
     _OP_GET_STATUS = ord("G")
@@ -319,19 +330,20 @@ class SynthPalDevice:
     _STATUS_FORMAT = "<BI4BII"
     _ALL_CHANNELS = 0x0F
 
-    def __init__(self, port_name, baud_rate=12000000, timeout=10):
+    def __init__(self, port_name, *, timeout=10):
         """Open a connection to a Synth Pal.
 
         Args:
             port_name: USB serial port of the device, such as `COM3` on
                 Windows or `/dev/ttyACM0` on Linux.
-            baud_rate: Serial baud rate. USB serial ignores it.
             timeout: Serial read timeout, in seconds.
 
+        Firmware newer than this module knows is used with a warning: new
+        firmware only adds commands. Update the package to use what is new.
+
         Raises:
-            PulsePalError: If the device does not reply to the handshake,
-                runs other firmware, or runs Synth Pal firmware newer than
-                this module supports.
+            PulsePalError: If the device does not reply to the handshake, or
+                runs other firmware.
             serial.SerialException: If the serial port cannot be opened.
         """
         self._closed = True
@@ -372,7 +384,7 @@ class SynthPalDevice:
 
         self.port = serial.Serial(
             port_name,
-            baud_rate,
+            self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
         )
@@ -389,8 +401,7 @@ class SynthPalDevice:
         except BaseException:
             # Op 81 means something else to other devices, so it is sent
             # only once the device has identified itself as a Synth Pal
-            self.close(
-                send_disconnect=self.info.firmware_version is not None)
+            self._close(send_disconnect=self.info.firmware_version is not None)
             raise
 
     @staticmethod
@@ -484,8 +495,7 @@ class SynthPalDevice:
                 raise PulsePalError(
                     f"Synth Pal rejected the frequency {value!r} Hz.")
         else:
-            # As the device works it out (see samples_per_cycle)
-            samples_per_cycle = 4 * (2_500_000 // centihz)
+            samples_per_cycle = _samples_per_cycle(centihz)
         self._frequency = centihz / 100
         self._samples_per_cycle = samples_per_cycle
 
@@ -535,6 +545,67 @@ class SynthPalDevice:
         `SynthPalDevice.trigger_mode`).
         """
         return _common.batch(self)
+
+    def sync_from_device(self):
+        """Read every setting from the device into this object.
+
+        Use it after settings were changed with the device's joystick, for
+        example. The device holds one amplitude per channel: a Fixed
+        Voltage channel's goes to `SynthPalDevice.fixed_voltage`, and any
+        other channel's to `SynthPalDevice.peak_to_peak`. This object keeps
+        the other one, reduced if need be to suit the mean voltage read
+        back. In param sync mode, it reads the settings the device plays
+        now, not a set waiting for the next edge.
+
+        Raises:
+            PulsePalError: If the device does not reply.
+        """
+        self._write_command(self._OP_GET_ALL_SETTINGS)
+        values = struct.unpack(self._SETTINGS_FORMAT, self._read_raw(struct.calcsize(self._SETTINGS_FORMAT)))
+        centihz = values[0]
+        waveforms = [WAVEFORMS[code] for code in values[1:5]]
+        amplitudes, means = list(values[5:9]), list(values[9:13])
+        peak_to_peak, fixed_voltage = list(self._peak_to_peak)[1:], list(self._fixed_voltage)[1:]
+        for i, (name, amplitude, mean) in enumerate(zip(waveforms, amplitudes, means)):
+            if name == FIXED_VOLTAGE:
+                fixed_voltage[i] = amplitude / 1e6
+                # This object's own peak to peak voltage must still suit the mean voltage (see _check_levels())
+                peak_to_peak[i] = min(peak_to_peak[i], (2 * _MAX_VOLTAGE_UV - 2 * abs(mean)) / 1e6)
+            else:
+                peak_to_peak[i] = amplitude / 1e6
+        self._frequency = centihz / 100
+        self._samples_per_cycle = _samples_per_cycle(centihz)
+        self._waveform._store(waveforms)
+        self._peak_to_peak._store(peak_to_peak)
+        self._fixed_voltage._store(fixed_voltage)
+        self._mean_voltage._store([mean / 1e6 for mean in means])
+        self._resting_voltage._store([rest / 1e6 for rest in values[13:17]])
+        self._play_duration._store([d / 1e6 for d in values[17:21]])
+        self._on_ramp_duration._store([d / 1e6 for d in values[21:25]])
+        self._off_ramp_duration._store([d / 1e6 for d in values[25:29]])
+        self._link_trigger_channel1._store([bool(link) for link in values[29:33]])
+        self._link_trigger_channel2._store([bool(link) for link in values[33:37]])
+        self._trigger_mode._store([TRIGGER_MODES[code] for code in values[37:39]])
+        self._device_waveform, self._device_amplitude_uv, self._device_mean_uv = waveforms, amplitudes, means
+
+    def export_params(self):
+        """Return every setting, as a dict of plain values and lists.
+
+        Keyed by setting name: `"frequency"`, then the channel settings,
+        each with one value per channel and no unused index 0. It holds
+        only numbers, booleans and names, so it can be saved with `json`
+        and logged with your data, to record exactly what the device
+        played.
+
+        ```python
+        import json
+        with open("trial_settings.json", "w") as f:
+            json.dump(S.export_params(), f)
+        ```
+        """
+        params = {"frequency": self._frequency}
+        params.update({name: list(getattr(self, name))[1:] for name in _CHANNEL_SETTINGS})
+        return params
 
     def sync_to_device(self):
         """Send every setting to the device in one command.
@@ -991,7 +1062,7 @@ class SynthPalDevice:
     # Connection
     # ------------------------------------------------------------------
 
-    def close(self, send_disconnect=True):
+    def close(self):
         """Close the connection to the device.
 
         The device stops playback on all channels, each over its off ramp,
@@ -1002,11 +1073,12 @@ class SynthPalDevice:
         so playback also stops when the last reference to the object
         goes.
 
-        Args:
-            send_disconnect: If `True`, tell the device that the client
-                is disconnecting before closing the port. Set to `False`
-                when the device may not be a Synth Pal.
         """
+        self._close(send_disconnect=True)
+
+    def _close(self, send_disconnect):
+        """Close the connection. send_disconnect: tell the device first (op 81). False when the device may not
+        run this firmware: op 81 means something else to other devices."""
         if getattr(self, "_closed", True):
             return
         self._closed = True
@@ -1018,10 +1090,6 @@ class SynthPalDevice:
         finally:
             if self.port and self.port.is_open:
                 self.port.close()
-
-    def bytes_available(self):
-        """Return the number of bytes waiting in the serial read buffer."""
-        return self.port.in_waiting
 
     def __enter__(self):
         """Enter a `with` block, returning the connected device."""
@@ -1063,28 +1131,26 @@ class SynthPalDevice:
     def _handshake(self):
         """Check that the device runs a supported Synth Pal firmware."""
         self._write_command(self._OP_HANDSHAKE)
-        try:
-            reply = self._read_raw(1)[0]
-        except PulsePalError as exc:
+        handshake = _common.read_handshake_reply(self.port)  # Skips a reply to an earlier session's command
+        if handshake is None:
             raise PulsePalError(
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Synth Pal firmware?"
-            ) from exc
+            )
+        reply, version = handshake
         if reply != self._HANDSHAKE_REPLY:
             if reply in _common.FIRMWARE_BY_HANDSHAKE_REPLY:
-                version = struct.unpack("<I", self._read_raw(4))[0]
                 raise _common.other_firmware_error(reply, version, self.port.port, "Synth Pal")
             raise PulsePalError(
                 "Incorrect handshake returned. Expected "
                 f"{self._HANDSHAKE_REPLY}, received {reply}."
             )
-        version = struct.unpack("<I", self._read_raw(4))[0]
         if version > self._CURRENT_FIRMWARE_VERSION:
-            raise PulsePalError(
-                f"Future firmware detected, v{version}. Please update the "
-                "pulsepal package or load Synth Pal firmware "
-                f"v{self._CURRENT_FIRMWARE_VERSION}."
-            )
+            # New firmware only adds commands (see PROTOCOL.md), so this class still works with it
+            warnings.warn(
+                f"Synth Pal firmware v{version} is newer than this pulsepal package knows "
+                f"(v{self._CURRENT_FIRMWARE_VERSION}). It works with it, but update the package to use what is "
+                "new.", stacklevel=3)
         self.info.firmware_version = version
 
     def _read_hardware_info(self):
@@ -1305,7 +1371,7 @@ class SynthPalDevice:
         links = [int(link) for link in (*self._link_trigger_channel1[1:],
                                         *self._link_trigger_channel2[1:])]
         payload = struct.pack(
-            "<I4B4i4i4i4I4I4I8B2B",
+            self._SETTINGS_FORMAT,
             round(self._frequency * 100),
             *(WAVEFORMS.index(name) for name in waveforms),
             *amplitudes, *means, *(_microvolts(v) for v in self._resting_voltage[1:]),

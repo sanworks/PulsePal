@@ -17,6 +17,7 @@ import copy
 import gc
 import struct
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,8 @@ class FakeSynthPal:
     Each write must be one whole command. It is checked against the protocol,
     recorded in `writes`, and the reply the firmware would send is queued for
     reading. Set `ack` to 0 to have the device reject confirmable commands.
+    Bytes in `late_reply` are sent before the reply to the next command, as
+    the reply to a command an earlier session left queued on the device.
     """
 
     def __init__(self, handshake_reply=83, firmware_version=1, ack=1):
@@ -46,6 +49,7 @@ class FakeSynthPal:
         self.is_open = True
         self.writes = []
         self.replies = bytearray()
+        self.late_reply = b""
         self.handshake_reply = handshake_reply
         self.firmware_version = firmware_version
         self.ack = ack
@@ -57,12 +61,16 @@ class FakeSynthPal:
         self.on_ramp = [0] * 4
         self.off_ramp = [0] * 4
         self.trigger_mode = [0, 0]
+        self.play_duration = [1_000_000] * 4
+        self.links = [1, 1, 1, 1, 0, 0, 0, 0]
         self.stored = None  # A set op 85 stored for a param sync edge
         self.status_reply = bytes(17)
 
     def write(self, data):
         data = bytes(data)
         self.writes.append(data)
+        self.replies += self.late_reply
+        self.late_reply = b""
         self.replies += self._execute(data)
         return len(data)
 
@@ -72,8 +80,8 @@ class FakeSynthPal:
         payload = data[2:]
         expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, ord("N"): 0, ord("F"): 4, ord("W"): 4,
                             ord("A"): 16, ord("V"): 16, ord("M"): 16, ord("D"): 16, ord("B"): 16,
-                            ord("E"): 16, ord("I"): 8, ord("T"): 2, ord("U"): 114, ord("P"): 1,
-                            ord("X"): 1, ord("G"): 0, ord("Z"): 0}
+                            ord("E"): 16, ord("I"): 8, ord("T"): 2, ord("U"): 114, ord("R"): 0,
+                            ord("P"): 1, ord("X"): 1, ord("G"): 0, ord("Z"): 0}
         assert op in expected_lengths, f"unknown op {op}"
         assert len(payload) == expected_lengths[op], f"op {chr(op)!r} data length"
         if op == 72:
@@ -84,6 +92,15 @@ class FakeSynthPal:
             return b""
         if op == ord("G"):
             return self.status_reply
+        if op == ord("R"):
+            # As op 82 in /Firmware/SynthPal/USBOps.ino: every setting, in op 85's layout
+            return struct.pack("<I4B4i4i4i4I4I4I8B2B", self.centihz, *self.waveform, *self.amplitude, *self.mean,
+                               *self.resting, *self.play_duration, *self.on_ramp, *self.off_ramp, *self.links,
+                               *self.trigger_mode)
+        if op == ord("D") and self.ack:
+            self.play_duration = list(struct.unpack("<4I", payload))
+        if op == ord("I") and self.ack:
+            self.links = list(payload)
         if op == ord("F"):
             centihz = struct.unpack("<I", payload)[0]
             ok = self.ack and 100 <= centihz <= 2_000_000
@@ -270,11 +287,80 @@ def test_connecting_to_other_firmware_names_it_and_closes_the_port():
         assert fake.writes == [command(72)]  # No op 81, which means something else to them
 
 
-def test_newer_firmware_is_refused():
-    fake = FakeSynthPal(firmware_version=2)
-    error = expect_error(connect, fake)
-    assert "Future firmware" in str(error)
-    assert not fake.is_open
+def test_a_late_reply_to_an_earlier_session_is_skipped():
+    """A command an earlier session sent just before it closed can still be waiting on the device,
+    which answers it after the input was discarded, and before the handshake. The handshake's reply is
+    the last 5 bytes the device sends, so the late reply is skipped, also one that looks like a
+    handshake."""
+    for late_reply in (bytes(range(1, 40)), bytes([83, 99, 0, 0, 0]), bytes([1])):
+        fake = FakeSynthPal()
+        fake.late_reply = late_reply
+        device, fake = connect(fake)
+        assert device.info.firmware_version == 1, late_reply[:5]
+        assert fake.in_waiting == 0
+        device.close()
+
+
+def test_newer_firmware_warns():
+    """Newer firmware only adds commands, so the class uses it, with a warning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device, fake = connect(FakeSynthPal(firmware_version=2))
+    assert any("newer than this pulsepal package knows" in str(w.message) for w in caught)
+    assert device.info.firmware_version == 2
+
+
+def test_export_params_holds_every_setting():
+    import json
+    device, fake = connect()
+    device.frequency = 440
+    device.configure(2, waveform="Fixed Voltage", fixed_voltage=-2.5)
+    params = json.loads(json.dumps(device.export_params()))
+    assert list(params) == ["frequency", "waveform", "peak_to_peak", "fixed_voltage", "mean_voltage",
+                            "resting_voltage", "play_duration", "on_ramp_duration", "off_ramp_duration",
+                            "trigger_mode", "link_trigger_channel1", "link_trigger_channel2"]
+    assert params["frequency"] == 440 and params["waveform"][1] == "Fixed Voltage"
+    assert params["fixed_voltage"] == [5, -2.5, 5, 5]
+
+
+def test_sync_from_device_reads_every_setting():
+    """As after the joystick changed them: op 82 ('R') returns op 85's layout."""
+    device, fake = connect()
+    device.peak_to_peak[1] = 8
+    fake.centihz = 44_000
+    fake.waveform = [4, 1, 2, 0]                       # Fixed Voltage, Triangle, Square, Sine
+    fake.amplitude = [-2_500_000, 4_000_000, 6_000_000, 2_000_000]
+    fake.mean = [9_000_000, 1_000_000, 0, -1_000_000]
+    fake.resting = [0, -1_000_000, 0, 500_000]
+    fake.play_duration = [0, 2_000_000, 500_000, 1_000_000]
+    fake.on_ramp = [0, 0, 100_000, 0]
+    fake.off_ramp = [0, 250_000, 0, 0]
+    fake.links = [1, 0, 1, 0, 0, 1, 1, 0]
+    fake.trigger_mode = [1, 3]
+    fake.writes.clear()
+    device.sync_from_device()
+    assert fake.ops() == ["R"]
+    assert device.frequency == 440 and device.samples_per_cycle == samples_per_cycle(44_000)
+    assert device.waveform == [None, "Fixed Voltage", "Triangle", "Square", "Sine"]
+    assert device.fixed_voltage == [None, -2.5, 5, 5, 5]   # The other channels keep theirs
+    # Channel 1 plays its fixed voltage: its own peak to peak voltage is kept, reduced to suit the 9 V mean
+    assert device.peak_to_peak == [None, 2, 4, 6, 2]
+    assert device.mean_voltage == [None, 9, 1, 0, -1] and device.resting_voltage == [None, 0, -1, 0, 0.5]
+    assert device.play_duration == [None, 0, 2, 0.5, 1] and device.on_ramp_duration == [None, 0, 0, 0.1, 0]
+    assert device.off_ramp_duration == [None, 0, 0.25, 0, 0]
+    assert device.link_trigger_channel1 == [None, True, False, True, False]
+    assert device.link_trigger_channel2 == [None, False, True, True, False]
+    assert device.trigger_mode == [None, "Toggle", "Param Sync"]
+    # The record of what the device holds is up to date, so a change sends only what changed
+    fake.writes.clear()
+    device.peak_to_peak[2] = 3
+    assert fake.ops() == ["A"] and fake.amplitude[1] == 3_000_000
+
+
+def test_the_public_surface_is_trimmed():
+    device, fake = connect()
+    expect_error(device.close, True, error=TypeError)
+    assert not hasattr(device, "bytes_available")
 
 
 def test_frequency_is_sent_in_hundredths_of_a_hz():

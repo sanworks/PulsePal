@@ -19,7 +19,7 @@ The sketch is split into tabs. Arduino joins them into one file before compiling
 | `Storage.ino` | The waveform data file, and `refillPlaybackBuffers()` |
 | `USBOps.ino` | Commands from the PC (`processUSBCommands()`), `loadWaveform()`, comm failure handling |
 | `Menu.ino` | Thumb joystick menu, with its map |
-| `Display.ino` | Screen output and the splash screen |
+| `Display.ino` | Screen output, the screen saver and the splash screen |
 | `HardwareIO.ino` | DAC writes, the output range, software reset |
 
 `ArCOM.h` and `LiquidCrystal_U8G2` are copies of the files in `/Firmware/PulsePal3`. Keep them
@@ -59,7 +59,9 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
    chunk it wants.** `refillPlaybackBuffers()` sets `CHUNK_NONE` before a read and the chunk
    after it, and only ever reads into the buffer that `handler()` is not playing. The
    hardware test (below) checks every sample against this.
-5. **Do not write to the screen, wait, or use the microSD card in an interrupt.**
+5. **Do not write to the screen, wait, or use the microSD card or the EEPROM in an interrupt.**
+   EEPROM writes stop all interrupts (about 20 µs per byte, and now and then tens of ms), so
+   `updateScreenSaver()` saves the screen saver settings only while the sample clock is stopped.
 6. **Validate input from USB before it indexes an array.** Reply 0 if a value is out of range,
    and read the rest of the command's data so that it is not taken for the next command.
 7. **The op codes, trigger mode values and range indices in `PROTOCOL.md` are fixed** once a
@@ -143,9 +145,13 @@ menu, check:
   gated mode with both trigger channels linked to one output. Gated mode with loop mode on plays
   for as long as the TTL is high. The trigger LEDs follow the TTL, and the output LEDs light while
   a channel plays.
-- The joystick menu: scroll through the channels, device info, reboot and exit; play and stop
-  a channel from its item, and see the item change back when the waveform ends. The splash
-  screen shows the Wave Pal logo.
+- The joystick menu: scroll through the channels, screen saver, device info, reboot and exit;
+  play and stop a channel from its item, and see the item change back when the waveform ends.
+  The splash screen shows the Wave Pal logo.
+- The screen saver: with a short timeout (`set_screen_saver(True, 10)`), the screen dims after
+  10 s without activity, and a command, a TTL rising edge, or a joystick click or push brings it
+  back; the click or push that wakes it does nothing else. Switch it off from the menu, power
+  cycle, and see that it stays off. Set it back with `set_screen_saver(True)` (1800 s).
 - After a power cycle (unplug the USB cable, plug it back in), all four outputs play (rule 9).
 - Unplug the USB cable during a waveform load: the device shows "COMM. FAILURE!", and a click
   loads the default settings.
