@@ -40,6 +40,9 @@ SINE_TABLE = np.sin(np.pi / 2 * np.arange(SINE_TABLE_SIZE + 1) / SINE_TABLE_SIZE
     np.float32)
 RANGE_LIMITS_UV = [(0, 5_000_000), (0, 10_000_000), (-5_000_000, 5_000_000),
                    (-10_000_000, 10_000_000)]
+NOISE = "White Noise"
+# The waveforms whose every sample the model works out. White noise is random: its statistics are checked instead.
+MODELLED_WAVEFORMS = tuple(name for name in SynthPal.WAVEFORMS if name != NOISE)
 
 
 def samples_per_cycle(centihz):
@@ -288,7 +291,7 @@ def test_every_waveform_plays_the_modelled_samples(S):
     for hz in (20000, 3000, 7.77):
         S.frequency = hz
         n = S.samples_per_cycle
-        for waveform in SynthPal.WAVEFORMS:
+        for waveform in MODELLED_WAVEFORMS:
             configure(S, 1, waveform, 7.3, -1.2)
             duration = (3.37 * n) / S.sampling_rate
             S.play_duration[1] = duration
@@ -358,7 +361,7 @@ def test_levels_must_suit_the_waveform(S):
     assert send(S._OP_SET_AMPLITUDE, amplitudes(10.000001, 20, 5, 5)) == 0  # Beyond 10 V fixed
     assert send(S._OP_SET_WAVEFORM, bytes([0, 0, 0, 0])) == 0  # A sine wave of -5 V
     assert send(S._OP_SET_WAVEFORM, bytes([4, 4, 0, 0])) == 0  # A fixed voltage of 20 V
-    assert send(S._OP_SET_WAVEFORM, bytes([4, 0, 0, 5])) == 0  # No waveform 5
+    assert send(S._OP_SET_WAVEFORM, bytes([4, 0, 0, 6])) == 0  # No waveform 6 (5 is White Noise)
     assert send(S._OP_SET_RESTING_VOLTAGE, amplitudes(10, -10, 0, 0)) == 1  # Any rest
     assert send(S._OP_SET_RESTING_VOLTAGE, amplitudes(10.000001, 0, 0, 0)) == 0
     assert send(S._OP_SET_MEAN_VOLTAGE, amplitudes(0, 0.000001, 0, 0)) == 0  # 20 Vpp at 1 uV
@@ -505,6 +508,66 @@ def test_a_trigger_during_the_off_ramp_fades_back_in(S):
     S.on_ramp_duration[3] = 0
     S.off_ramp_duration[3] = 0
     S.play_duration[3] = 1
+
+
+def noise_statistics(envelopes, mean_exact, rest_exact, rest_code, half_codes):
+    """The expected sum of the codes of white noise played at these envelopes, and its standard
+    deviation. At envelope e, a sample is uniform over e times the peak to peak voltage, around a
+    mean that moves from the resting voltage (e = 0: exactly its code) to the mean voltage (e = 1):
+    synthesizeCode() with a uniform value from -1 to 1 in place of the waveform's."""
+    envelopes = np.asarray(envelopes, dtype=np.float64)
+    means = np.where(envelopes <= 0, rest_code, rest_exact + envelopes * (mean_exact - rest_exact))
+    variances = np.where(envelopes <= 0, 0, (envelopes * half_codes) ** 2 / 3)
+    return float(means.sum()), float(np.sqrt(variances.sum()))
+
+
+def test_white_noise_is_uniform_around_the_mean_voltage(S):
+    """White noise has no model of its samples, so its statistics are checked, through the sums of
+    the codes played. Their mean must be the mean voltage's exact code, within 5 standard errors of
+    noise uniform over the peak to peak voltage, also through ramps, which scale the noise and move
+    its mean. Noise of 0 V peak to peak plays the mean voltage's code exactly. Every playback, and
+    every channel, plays new noise. Four channels of noise at 100 kHz keep the sample clock
+    interrupt within its period."""
+    S.frequency = 100  # 1000 samples per cycle: 100 kHz
+    for channel in (1, 2):
+        configure(S, channel, NOISE, 4, 0, mean=1)  # -1 V to 3 V: the -5 V to 5 V range
+    configure(S, 3, NOISE, 0, 0, mean=1)  # The 0 V to 5 V range
+    configure(S, 4, NOISE, 6, -1, mean=-2)  # -5 V to 1 V: the -5 V to 5 V range
+    S.play_duration[1:4] = [0.5] * 3
+    S.on_ramp_duration[4], S.play_duration[4], S.off_ramp_duration[4] = 0.1, 0.3, 0.1
+    assert S.status().output_ranges[1:] == ["-5V:5V", "-5V:5V", "0V:5V", "-5V:5V"]
+    S.trigger([1, 2, 3, 4])
+    longest_us = wait_until_stopped(S, [1, 2, 3, 4], timeout=3)
+    assert longest_us < 1e6 / S.sampling_rate, f"longest interrupt {longest_us} us"
+    played, sums = S._playback_checksums()
+    rate = centihz(S)
+    n = expected_samples(0.5, rate)
+    codes_per_uv = 65536 / 10_000_000  # The -5 V to 5 V range
+    mean_exact = (1_000_000 + 5_000_000) * codes_per_uv
+    for channel in (1, 2):
+        assert played[channel] == n, (channel, played[channel], n)
+        expected, sigma = noise_statistics(np.ones(n), mean_exact, 0, 0, 2_000_000 * codes_per_uv)
+        total = sums[channel] + round((expected - sums[channel]) / 2**32) * 2**32  # The sums wrap at 2**32
+        assert abs(total - expected) <= 5 * sigma, (
+            f"channel {channel}: mean code {total / n:.2f}, mean voltage's code {mean_exact:.2f} "
+            f"(5 standard errors: {5 * sigma / n:.2f})")
+    assert sums[1] != sums[2], "channels 1 and 2 played the same noise"
+    check_played(S, 3, n, expected_cycle("Sine", 0, 0, 1000, mean_uv=1_000_000))
+    on, hold, off = (expected_samples(t, rate) for t in (0.1, 0.3, 0.1))
+    envelopes = playback_envelopes(on, hold, off)
+    assert played[4] == envelopes.size, (played[4], envelopes.size)
+    rest_exact = (-1_000_000 + 5_000_000) * codes_per_uv
+    expected, sigma = noise_statistics(envelopes, (-2_000_000 + 5_000_000) * codes_per_uv, rest_exact,
+                                       np.floor(rest_exact + 0.5), 3_000_000 * codes_per_uv)
+    total = sums[4] + round((expected - sums[4]) / 2**32) * 2**32
+    assert abs(total - expected) <= 5 * sigma, (
+        f"channel 4, with ramps: sum {total}, expected {expected:.0f} +/- {5 * sigma:.0f}")
+    first = sums[1]
+    S.trigger(1)
+    wait_until_stopped(S, [1], timeout=2)
+    _, sums = S._playback_checksums()
+    assert sums[1] != first, "channel 1 played the same noise twice"
+    S.set_default_params()
 
 
 def test_play_durations_are_exact_in_samples(S):
@@ -828,6 +891,7 @@ def main():
         test_play_durations_are_exact_in_samples,
         test_infinite_duration_plays_until_stopped,
         test_soft_trigger_is_ignored_while_playing,
+        test_white_noise_is_uniform_around_the_mean_voltage,
         test_a_channel_joining_a_running_clock_plays_exactly,
         test_frequency_change_keeps_the_time_left_to_play,
         test_settings_change_during_playback,

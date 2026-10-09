@@ -50,13 +50,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   LoadDefaultSettings()
 //
 // OUTPUT RANGES
-// Each channel's periodic waveform spans its mean voltage plus and minus half its amplitude, which must stay within
-// +/-10V (isValidOutputLevel()). A fixed voltage (WAVEFORM_FIXED_VOLTAGE) is its amplitude, which is a voltage in its
-// own right, -10V to 10V, and ignores the mean voltage. The resting voltage, which the channel outputs while idle, may be
-// anywhere within +/-10V, and the ramps lead in straight lines from it to the waveform and back. So the channel's output
-// stays within the span of its resting voltage and its waveform, and its output range is the one with the finest steps
-// that holds that span (outputRangeFor()): 0-5V (76uV steps), then 0-10V or +/-5V (153uV), then +/-10V (305uV). The DAC
-// has one output range register per channel, so the channels' ranges are independent.
+// Each channel's periodic waveform (or white noise) spans its mean voltage plus and minus half its amplitude, which
+// must stay within +/-10V (isValidOutputLevel()). A fixed voltage (WAVEFORM_FIXED_VOLTAGE) is its amplitude, which is a
+// voltage in its own right, -10V to 10V, and ignores the mean voltage. The resting voltage, which the channel outputs
+// while idle, may be anywhere within +/-10V, and the ramps lead in straight lines from it to the waveform and back. So
+// the channel's output stays within the span of its resting voltage and its waveform, and its output range is the one
+// with the finest steps that holds that span (outputRangeFor()): 0-5V (76uV steps), then 0-10V or +/-5V (153uV), then
+// +/-10V (305uV). The DAC has one output range register per channel, so the channels' ranges are independent.
 // A new waveform, amplitude, mean or resting voltage is worked out into a ChannelOutput (updateChannelOutput()) and handed to
 // handler(), which takes it on a tick, after that tick's DAC update (takePendingOutput() in Playback.ino). While the
 // sample clock is stopped, loop() takes it at once. If the range changes, the DAC needs a range write as well as a
@@ -195,9 +195,10 @@ void setRampDurations(const uint32_t *newOnMicros, const uint32_t *newOffMicros)
 }
 
 // True if a waveform (enum WaveformValue) can be played with a resting voltage, mean voltage and amplitude: every
-// voltage on the output must stay within +/-10V. A periodic waveform's amplitude is peak to peak, 0 or more, and the
-// waveform swings half of it either side of the mean voltage. A fixed voltage's amplitude is the voltage itself, and may
-// be negative; the mean voltage does not apply to it. The resting voltage may be anywhere within +/-10V.
+// voltage on the output must stay within +/-10V. A periodic waveform's amplitude (and white noise's) is peak to peak, 0
+// or more, and the waveform swings half of it either side of the mean voltage. A fixed voltage's amplitude is the
+// voltage itself, and may be negative; the mean voltage does not apply to it. The resting voltage may be anywhere
+// within +/-10V.
 bool isValidOutputLevel(byte shape, int32_t restingMicrovolts, int32_t meanMicrovolts, int32_t amplitudeMicrovolts) {
   if ((restingMicrovolts > MAX_VOLTAGE_MICROVOLTS) || (restingMicrovolts < -MAX_VOLTAGE_MICROVOLTS) ||
       (meanMicrovolts > MAX_VOLTAGE_MICROVOLTS) || (meanMicrovolts < -MAX_VOLTAGE_MICROVOLTS)) {

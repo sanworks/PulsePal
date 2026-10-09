@@ -160,7 +160,7 @@ class FakeSynthPal:
     @staticmethod
     def is_valid_output_level(waveform, resting, mean, amplitude):
         """As isValidOutputLevel() in /Firmware/SynthPal/Settings.ino."""
-        if waveform > 4 or abs(resting) > 10_000_000 or abs(mean) > 10_000_000:
+        if waveform > 5 or abs(resting) > 10_000_000 or abs(mean) > 10_000_000:  # 5: White Noise, the last
             return False
         if waveform == 4:  # Fixed Voltage: the amplitude is the voltage
             return abs(amplitude) <= 10_000_000
@@ -419,6 +419,27 @@ def test_waveforms_by_name():
     for bad in ("Ramp", "Fixed", 1, None):
         expect_error(device.waveform.__setitem__, 1, bad)
     assert len(fake.writes) == 3
+
+
+def test_white_noise_is_code_5_and_swings_around_the_mean_voltage():
+    """White noise is waveform code 5. Like a periodic waveform, it plays its peak to peak voltage around the mean
+    voltage, within -10 V to 10 V, and the device reads it back by its code."""
+    device, fake = connect()
+    device.waveform[2] = "white noise"
+    assert fake.writes == [command("W", bytes([0, 5, 0, 0]))]
+    assert device.waveform[2] == "White Noise"
+    device.configure(2, waveform="White Noise", peak_to_peak=20, mean_voltage=0)
+    assert fake.amplitude[1] == 20_000_000 and fake.waveform[1] == 5
+    error = expect_error(device.mean_voltage.__setitem__, 2, 1)  # 1 + 20 / 2 = 11 V
+    assert "channel 2" in str(error), error
+    device.configure(3, waveform="White Noise", peak_to_peak=4, mean_voltage=-8)
+    device.waveform[3] = "Fixed Voltage"  # Plays its fixed voltage of 5 V; the mean voltage does not apply
+    device.waveform[3] = "White Noise"
+    assert fake.waveform == [0, 5, 5, 0] and fake.amplitude[2] == 4_000_000 and fake.mean[2] == -8_000_000
+    fake.writes.clear()
+    device.sync_from_device()
+    assert device.waveform == [None, "Sine", "White Noise", "White Noise", "Sine"]
+    assert device.peak_to_peak == [None, 5, 20, 4, 5] and device.mean_voltage == [None, 0, 0, -8, 0]
 
 
 def test_voltages_are_sent_in_microvolts():

@@ -118,16 +118,19 @@ enum OpCode {
 #define HANDSHAKE_REPLY 'S' // 83. Pulse Pal firmware replies 'K' (75) to op 72 and Wave Pal 'W' (87), so clients can tell
                             // the three apart
 
-// Values of waveform[]. The shape of one cycle, as it starts at a trigger: see unitWaveform() in Playback.ino.
+// Values of waveform[]. The shape of one cycle, as it starts at a trigger: see unitWaveform() in Playback.ino. The
+// codes are fixed (see PROTOCOL.md): add new waveforms at the end.
 enum WaveformValue {
   WAVEFORM_SINE = 0,                  // Starts at the resting voltage, rising
   WAVEFORM_TRIANGLE = 1,              // Starts at the resting voltage, rising
   WAVEFORM_SQUARE = 2,                // High for the first half of each cycle, low for the second
   WAVEFORM_SAWTOOTH = 3,              // Rises from its lowest voltage to its highest, then falls back at the cycle's end
-  WAVEFORM_FIXED_VOLTAGE = 4          // Not periodic: the output steps to the amplitude, a voltage (-10V to 10V), for the
+  WAVEFORM_FIXED_VOLTAGE = 4,         // Not periodic: the output steps to the amplitude, a voltage (-10V to 10V), for the
                                       // play duration. See isValidOutputLevel() in Settings.ino.
+  WAVEFORM_WHITE_NOISE = 5            // Not periodic: a new random voltage on every sample, uniform over the peak to
+                                      // peak amplitude around the mean voltage. See noiseSample() in Playback.ino.
 };
-#define MAX_WAVEFORM WAVEFORM_FIXED_VOLTAGE
+#define MAX_WAVEFORM WAVEFORM_WHITE_NOISE
 
 // Values of TriggerMode[], one per trigger channel. These are Pulse Pal's trigger modes, with the same values.
 enum TriggerModeValue {
@@ -403,6 +406,8 @@ volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the 
                                                    // stopChannels() takes out the one it fetched but did not play.
 volatile uint32_t sampleSum[N_CHANNELS] = {0}; // Sum of the DAC codes counted in samplesPlayed, wrapping.
                                                // Op 90 reports it, so that a test can check every sample played.
+uint32_t noiseState[N_CHANNELS][4]; // Each channel's white noise generator (noiseSample()), seeded by seedNoise(). Used
+                                    // only by synthesizeCode().
 volatile uint32_t longestHandlerCycles = 0; // Longest run of handler(), in CPU cycles, since the last status request (op 71)
 volatile uint32_t lateUpdates = 0; // DAC updates that may have come later than DAC_LATCH_US after their tick, since the
                                    // last status request (op 71). See dacLoadTimed().
@@ -476,6 +481,7 @@ void setup() {
     dacWriteNow(i, 32768); // 0V. The playback interrupts are not attached yet, so this cannot be interrupted.
   }
   fillSineTable();
+  seedNoise();
 
   // The screen
   u8g2.begin();

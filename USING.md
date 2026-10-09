@@ -17,7 +17,7 @@ starts with an example. Python has example scripts: `/Python/PulsePal/PulsePalEx
 |---|---|---|---|
 | Pulse Pal | Pulse trains: monophasic or biphasic pulses, bursts, and custom trains of up to 10000 pulses | Pulse Pal 2 and 3 | `PulsePalDevice` |
 | Wave Pal | One sampled waveform per channel, up to 1 million samples at up to 100 kHz | Pulse Pal 3 | `WavePalDevice` |
-| Synth Pal | Sine, triangle, square and sawtooth waves, and fixed voltages, 1 Hz to 20 kHz, with on and off ramps | Pulse Pal 3 | `SynthPalDevice` |
+| Synth Pal | Sine, triangle, square and sawtooth waves, white noise, and fixed voltages, 1 Hz to 20 kHz, with on and off ramps | Pulse Pal 3 | `SynthPalDevice` |
 
 A Pulse Pal 3 runs one firmware at a time. To change it, run `LoadPulsePalFirmware` in MATLAB
 (add `/MATLAB/FirmwareLoader` to the path first). Connecting with the wrong class raises an error
@@ -416,14 +416,16 @@ W.link_trigger_channel1[1] = True                     # the default: trigger cha
 ## Synth Pal
 
 Synth Pal computes each channel's waveform as it plays: a sine, triangle, square or sawtooth
-wave around a mean voltage, or a step to a fixed voltage, with optional on and off ramps.
+wave or white noise around a mean voltage, or a step to a fixed voltage, with optional on and off
+ramps.
 
 ### Limits
 
 | | |
 |---|---|
 | Frequency | 1 Hz to 20 kHz in steps of 0.01 Hz, **one frequency for all four channels**. It is played exactly: the sampling rate is a whole multiple of it, up to 100 kHz |
-| Levels | A periodic waveform swings `peak_to_peak / 2` above and below its `mean_voltage`, within -10 V to 10 V: `abs(mean_voltage) + peak_to_peak / 2 <= 10`. A `"Fixed Voltage"` channel steps to its `fixed_voltage`, -10 V to 10 V |
+| Levels | A periodic waveform, or white noise, swings `peak_to_peak / 2` above and below its `mean_voltage`, within -10 V to 10 V: `abs(mean_voltage) + peak_to_peak / 2 <= 10`. A `"Fixed Voltage"` channel steps to its `fixed_voltage`, -10 V to 10 V |
+| White noise | `"White Noise"`: a new random voltage on every sample, uniform over `peak_to_peak` around `mean_voltage`. It is rendered at the sampling rate the frequency sets (`sampling_rate`, 50 to 100 kHz), so no claim is made about its spectrum. Each channel has its own random sequence, new on every playback; the sequences start from the same point when the device powers up |
 | Durations | `play_duration` and the ramps: up to 3600 s. A play duration of 0 plays until stopped |
 | Trigger modes | `"Normal"`, `"Toggle"`, `"Gated"` and `"Param Sync"`, as in Pulse Pal |
 
@@ -482,6 +484,8 @@ resting voltage.
   play duration of 0.
 - **Waveforms start at the trigger:** sine and triangle at the mean voltage, rising; square
   high for the first half of each cycle; sawtooth rising from its lowest voltage.
+- **For white noise, the frequency sets only the sampling rate,** not a band: every sample is
+  a new value. To shape its spectrum, filter the output.
 
 ## More
 

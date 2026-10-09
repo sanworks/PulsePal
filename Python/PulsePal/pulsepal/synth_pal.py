@@ -2,9 +2,9 @@
 Python interface for Synth Pal, a waveform synthesizer for Pulse Pal 3.
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output
-channel plays a sine, triangle, square or sawtooth wave, or steps to a
-fixed voltage, when it is triggered: by a TTL pulse on a trigger channel,
-from software, or from the thumb joystick. Each channel has its own
+channel plays a sine, triangle, square or sawtooth wave or white noise, or
+steps to a fixed voltage, when it is triggered: by a TTL pulse on a trigger
+channel, from software, or from the thumb joystick. Each channel has its own
 waveform, peak to peak voltage, mean voltage, resting voltage, play
 duration, and on and off ramps, and one frequency, 1 Hz to 20 kHz in steps
 of 0.01 Hz, applies to all four.
@@ -56,14 +56,14 @@ S.configure(2, waveform="Triangle", peak_to_peak=20, mean_voltage=0)
 
 ## Units and levels
 
-Voltages are in volts, times in seconds, and frequencies in Hz. A
-periodic waveform swings `peak_to_peak / 2` above and below its
+Voltages are in volts, times in seconds, and frequencies in Hz. A periodic
+waveform, or white noise, swings `peak_to_peak / 2` above and below its
 `mean_voltage`, and must stay within -10 V to 10 V:
-`abs(mean_voltage) + peak_to_peak / 2 <= 10`. A `"Fixed Voltage"`
-channel steps to its `fixed_voltage`, -10 V to 10 V, for its play
-duration. Between playbacks, a channel outputs its `resting_voltage`,
-and its `on_ramp_duration` and `off_ramp_duration` fade it in from there
-and back to it (see "Ramps" below).
+`abs(mean_voltage) + peak_to_peak / 2 <= 10`. A `"Fixed Voltage"` channel
+steps to its `fixed_voltage`, -10 V to 10 V, for its play duration. Between
+playbacks, a channel outputs its `resting_voltage`, and its
+`on_ramp_duration` and `off_ramp_duration` fade it in from there and back to
+it (see "Ramps" below).
 
 ## Ramps
 
@@ -132,7 +132,7 @@ from ._common import ChannelSettings, PulsePalError, to_bool, to_name
 __all__ = ["SynthPalDevice", "DeviceInfo", "DeviceStatus", "WAVEFORMS", "TRIGGER_MODES"]
 __docformat__ = "google"
 
-WAVEFORMS = ("Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage")
+WAVEFORMS = ("Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage", "White Noise")
 """Names of the waveforms, in order of their code on the device."""
 
 FIXED_VOLTAGE = "Fixed Voltage"
@@ -467,8 +467,9 @@ class SynthPalDevice:
         1 to 20000 Hz, rounded to 0.01 Hz. It can be changed during
         playback: playing channels carry on from the same point in their
         cycle, at the new frequency, and keep the time they have left to
-        play. The frequency played is exact: the device's sample clock is
-        a whole multiple of it (see `SynthPalDevice.sampling_rate`).
+        play. The frequency played is exact: the device's sample clock is a
+        whole multiple of it (see `SynthPalDevice.sampling_rate`). For
+        `"White Noise"` it sets only the sampling rate.
         """
         return self._frequency
 
@@ -737,10 +738,19 @@ class SynthPalDevice:
           `SynthPalDevice.fixed_voltage` for the play duration, and
           returns to the resting voltage. It is not periodic, so the
           frequency does not change it.
+        - `"White Noise"`: a new random voltage on every sample, uniform
+          over the peak to peak voltage around the mean voltage. It is
+          rendered at the sampling rate the frequency sets
+          (`SynthPalDevice.sampling_rate`), so no claim is made about its
+          spectrum. Each channel has its own random sequence, which carries
+          on from one playback to the next: every playback is new noise.
+          The sequences start from the same point when the device powers
+          up.
 
-        The periodic waveforms swing `SynthPalDevice.peak_to_peak` around
-        `SynthPalDevice.mean_voltage`. Names are not case sensitive. A
-        change applies to playback in progress.
+        The periodic waveforms and white noise swing
+        `SynthPalDevice.peak_to_peak` around `SynthPalDevice.mean_voltage`.
+        Names are not case sensitive. A change applies to playback in
+        progress.
         """
         return self._waveform
 
@@ -760,9 +770,10 @@ class SynthPalDevice:
         voltage first, or set both with `SynthPalDevice.configure`.
 
         A sine wave of 4 V peak to peak swings from -2 V to 2 V around a
-        mean voltage of 0 V: it is 2 sin(2 pi f t). A `"Fixed Voltage"`
-        channel keeps its peak to peak voltage for when it plays a
-        periodic waveform again.
+        mean voltage of 0 V: it is 2 sin(2 pi f t). White noise of 4 V peak
+        to peak is uniform from -2 V to 2 V. A `"Fixed Voltage"` channel
+        keeps its peak to peak voltage for when it plays a periodic waveform
+        again.
 
         Set to the nearest microvolt. A change applies to playback in
         progress.
@@ -797,13 +808,13 @@ class SynthPalDevice:
         """The mean voltage of each output channel's waveform, in volts.
 
         Indexed by channel number (see "Channel settings" above). -10 to
-        10 V. A periodic waveform swings around it at full amplitude,
-        and must stay within -10 V to 10 V with the `peak_to_peak`
-        voltage: `abs(mean_voltage) + peak_to_peak / 2 <= 10`. It may
-        differ from the `resting_voltage`, which the channel outputs
-        between playbacks: the ramps move the mean between the two (see
-        "Ramps" above). A `"Fixed Voltage"` ignores it. Set to the nearest
-        microvolt. A change applies to playback in progress.
+        10 V. A periodic waveform, or white noise, swings around it at full
+        amplitude, and must stay within -10 V to 10 V with the
+        `peak_to_peak` voltage: `abs(mean_voltage) + peak_to_peak / 2 <= 10`.
+        It may differ from the `resting_voltage`, which the channel
+        outputs between playbacks: the ramps move the mean between the two
+        (see "Ramps" above). A `"Fixed Voltage"` ignores it. Set to the
+        nearest microvolt. A change applies to playback in progress.
         """
         return self._mean_voltage
 

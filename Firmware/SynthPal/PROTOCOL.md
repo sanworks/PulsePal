@@ -1,7 +1,8 @@
 # Synth Pal serial protocol
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware. Each output channel plays a sine,
-triangle, square or sawtooth wave, or steps to a fixed voltage, when it is triggered, with its own
+triangle, square or sawtooth wave or white noise, or steps to a fixed voltage, when it is
+triggered, with its own
 amplitude, mean voltage, resting voltage, play duration, and on and off ramps, at one frequency
 shared by all four channels. This page is the reference for its USB serial protocol, as of Synth
 Pal firmware v1.
@@ -160,6 +161,9 @@ sampling rate in use, and a nonzero duration lasts at least one sample.
 | 2 | Square | High for the first half cycle, low for the second |
 | 3 | Sawtooth | Rises in equal steps from its lowest voltage, at the first sample, to its highest, at the last, then falls back |
 | 4 | Fixed Voltage | Not periodic: steps to the amplitude, a voltage, and holds it for the play duration |
+| 5 | White Noise | Not periodic: a new random voltage on every sample, uniform over the amplitude (peak to peak) around the mean voltage |
+
+The codes are fixed: a new waveform takes the next code.
 
 A channel without an off ramp that stops, at the end of its play duration or otherwise, returns
 to its resting voltage on the next sample, part way through a cycle if need be.
@@ -170,10 +174,21 @@ responds to the trigger modes in the same way. Its output is written to the DAC 
 starts, and once more as it stops. The frequency does not change it, except through the sampling
 rate that its play duration is counted in.
 
+White noise is rendered at the sampling rate the frequency sets (see
+[Frequency and sampling](#frequency-and-sampling)): each sample is a new random value, uniform
+from the mean voltage minus half the amplitude to the mean voltage plus half of it, so the frequency
+sets only how often it changes, and no claim is made about its spectrum. Otherwise it plays as the
+periodic waveforms do: its amplitude is peak to peak, it follows the same [levels](#levels) rule
+and output ranges, and the ramps scale it and move its mean in the same way. Each channel has its
+own random sequence (xoshiro128+), which carries on from one playback to the next, so every
+playback is new noise and the channels are unrelated. The sequences start from the same point
+when the device powers up. The playback checksums of op 90 cannot be predicted for noise: the
+hardware tests check their statistics instead.
+
 ## Levels
 
-A channel's waveform swings half its amplitude above and below its mean voltage, which is the
-waveform's mean. The whole waveform must stay within -10 V to 10 V:
+A channel's waveform (or white noise) swings half its amplitude above and below its mean
+voltage, which is the waveform's mean. The whole waveform must stay within -10 V to 10 V:
 
 ```
 2 * |mean voltage| + amplitude <= 20 V

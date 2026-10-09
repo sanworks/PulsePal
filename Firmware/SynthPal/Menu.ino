@@ -75,8 +75,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define EDIT_REPEAT_MS 200 // While the joystick is held, a value being edited changes this often
 #define CURSOR_BLINK_MS 300 // The cursor under the digit being edited blinks at this rate
 
-const char* const waveformNames[] = {"Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage"}; // Indexed by enum
-                                                                                                 // WaveformValue
+const char* const waveformNames[] = {"Sine", "Triangle", "Square", "Sawtooth", "Fixed Voltage", // Indexed by enum
+                                     "White Noise"};                                             // WaveformValue
 const char* const triggerModeNames[] = {"Normal", "Toggle", "Pulse Gated", "Param Sync"}; // Indexed by enum
                                                                                          // TriggerModeValue
 const char* const offOnNames[] = {"Off", "On"};

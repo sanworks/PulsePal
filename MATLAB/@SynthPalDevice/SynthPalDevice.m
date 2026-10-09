@@ -1,8 +1,8 @@
-% SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four
-% channel waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
-% fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(), or from the
-% thumb joystick. Each channel has its own waveform, peak to peak voltage, mean voltage, resting voltage, play
-% duration, and on and off ramps, and one frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four.
+% SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four channel
+% waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave or white noise, or steps to
+% a fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(), or from the
+% thumb joystick. Each channel has its own waveform, peak to peak voltage, mean voltage, resting voltage, play duration,
+% and on and off ramps, and one frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four.
 %
 % Example:
 %   S = SynthPalDevice('COM3');        % Replace COM3 with the device's port. serialportlist lists them.
@@ -26,12 +26,13 @@
 %   S.configure(2, 'waveform', 'Triangle', 'peakToPeak', 20, 'meanVoltage', 0);
 % Voltages are in volts, times in seconds, and the frequency in Hz.
 %
-% Levels. A channel's periodic waveform swings peakToPeak/2 above and below its meanVoltage. It must stay within
-% -10 V to 10 V: abs(meanVoltage) + peakToPeak/2 <= 10. To raise peakToPeak beyond what the mean voltage allows, change
-% the mean voltage first, or set both with configure(). A sine wave of 4 V peak to peak around 0 V swings from -2 V to
-% 2 V: it is 2*sin(2*pi*f*t). A 'Fixed Voltage' channel steps to its fixedVoltage instead, -10 V to 10 V, and the mean
-% voltage does not apply to it. Between playbacks, a channel outputs its restingVoltage, which may be anywhere within
-% -10 V to 10 V. The device picks each channel's output range for the finest voltage steps: see status().
+% Levels. A channel's periodic waveform, or white noise, swings peakToPeak/2 above and below its meanVoltage. It must
+% stay within -10 V to 10 V: abs(meanVoltage) + peakToPeak/2 <= 10. To raise peakToPeak beyond what the mean voltage
+% allows, change the mean voltage first, or set both with configure(). A sine wave of 4 V peak to peak around 0 V swings
+% from -2 V to 2 V: it is 2*sin(2*pi*f*t). A 'Fixed Voltage' channel steps to its fixedVoltage instead, -10 V to 10 V,
+% and the mean voltage does not apply to it. Between playbacks, a channel outputs its restingVoltage, which may be
+% anywhere within -10 V to 10 V. The device picks each channel's output range for the finest voltage steps: see
+% status().
 %
 % Ramps. After each trigger, a channel's on ramp (onRampDuration) fades its waveform in from the resting voltage: its
 % peak to peak voltage rises linearly from 0 to its full value, and its mean from the resting voltage to the mean
@@ -42,10 +43,14 @@
 % in again from where it is, without restarting its waveform's cycle, and plays its play duration again. A channel
 % stopped during its on ramp fades out from where it is, at the off ramp's rate. The output never jumps.
 %
-% Waveforms start at the trigger: 'Sine' and 'Triangle' at the mean voltage, rising; 'Square' high for the first half
-% of each cycle; 'Sawtooth' rising from its lowest voltage to its highest, and falling back at the cycle's end.
-% 'Fixed Voltage' steps to fixedVoltage for the play duration, then returns to the resting voltage. A channel keeps
-% both its peak to peak voltage and its fixed voltage, and plays the one its waveform uses.
+% Waveforms start at the trigger: 'Sine' and 'Triangle' at the mean voltage, rising; 'Square' high for the first half of
+% each cycle; 'Sawtooth' rising from its lowest voltage to its highest, and falling back at the cycle's end.
+% 'Fixed Voltage' steps to fixedVoltage for the play duration, then returns to the resting voltage. A channel keeps both
+% its peak to peak voltage and its fixed voltage, and plays the one its waveform uses. 'White Noise' takes a new random
+% voltage on every sample, uniform over peakToPeak around meanVoltage. It is rendered at the sampling rate the frequency
+% sets (samplingRate), so no claim is made about its spectrum. Each channel has its own random sequence, which carries
+% on from one playback to the next, so every playback is new noise; the sequences start from the same point when the
+% device powers up.
 %   S.waveform{2} = 'Fixed Voltage';
 %   S.fixedVoltage(2) = -2.5;          % Steps to -2.5 V when triggered
 %
@@ -117,12 +122,14 @@ classdef SynthPalDevice < handle
         frequency = 100 % Frequency of all output channels, in Hz: 1 to 20000, rounded to 0.01 Hz. It can change during
                         % playback: playing channels carry on from the same point in their cycle, and keep the time
                         % they have left to play.
-        waveform = {'Sine', 'Sine', 'Sine', 'Sine'} % 1x4 cell array: 'Sine', 'Triangle', 'Square', 'Sawtooth' or
-                                                    % 'Fixed Voltage'. Not case sensitive. A change applies to playback
-                                                    % in progress.
-        peakToPeak = [5 5 5 5] % 1x4, in volts, 0 to 20: the periodic waveform's peak to peak voltage. See "Levels" above.
+        waveform = {'Sine', 'Sine', 'Sine', 'Sine'} % 1x4 cell array: 'Sine', 'Triangle', 'Square', 'Sawtooth',
+                                                    % 'Fixed Voltage' or 'White Noise'. Not case sensitive. A change
+                                                    % applies to playback in progress.
+        peakToPeak = [5 5 5 5] % 1x4, in volts, 0 to 20: the periodic waveform's (or white noise's) peak to peak
+                               % voltage. See "Levels" above.
         fixedVoltage = [5 5 5 5] % 1x4, in volts, -10 to 10: what a 'Fixed Voltage' channel steps to. See "Levels" above.
-        meanVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. A periodic waveform's mean. See "Levels" above.
+        meanVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. A periodic waveform's (or white noise's) mean. See "Levels"
+                                % above.
         restingVoltage = [0 0 0 0] % 1x4, in volts: -10 to 10. Output while the channel is idle. See "Levels" above.
         playDuration = [1 1 1 1] % 1x4, in seconds: how long the channel plays at full amplitude after its on ramp, up
                                  % to info.maxPlayDuration. 0 plays until stopped. Counted in samples.
@@ -186,8 +193,8 @@ classdef SynthPalDevice < handle
         SynthPalHandshakeReply = 83 % 'S'
         PulsePalHandshakeReply = 75 % 'K': the device runs Pulse Pal firmware
         WavePalHandshakeReply = 87 % 'W': the device runs Wave Pal firmware
-        WaveformNames = {'Sine', 'Triangle', 'Square', 'Sawtooth', 'Fixed Voltage'} % In order of their code on the
-                                                                                    % device
+        WaveformNames = {'Sine', 'Triangle', 'Square', 'Sawtooth', 'Fixed Voltage', 'White Noise'} % In order of their
+                                                                                                   % code on the device
         TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync'} % In order of their code on the device
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         MaxVoltage_uV = 10000000 % Every output voltage stays within +/-10 V

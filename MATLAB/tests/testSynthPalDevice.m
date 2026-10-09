@@ -35,7 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testSynthPalDevice(portString)
 tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAreExactInSamples, ...
-    @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, ...
+    @testMeanVoltageIsTheMean, @testAmplitudeOfASquareWave, @testOutputRanges, @testFixedVoltage, @testWhiteNoise, ...
     @testWaveformChangesFindAnAcceptedOrder, @testConfigureSetsLevelsTogether, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testSyncToDevice, @testSyncFromDeviceReadsWhatTheDevicePlays, ...
@@ -141,6 +141,36 @@ for i = 1:4
     assert(abs(meanCode - meanVoltageCode) <= 0.5, 'channel %d: mean code %.3f, mean voltage code %.3f', ...
         i, meanCode, meanVoltageCode);
 end
+end
+
+function testWhiteNoise(S)
+% White noise has no model of its samples, so its statistics are checked, through the sums of the codes played: their
+% mean is the mean voltage's exact code, within 5 standard errors of noise uniform over the peak to peak voltage. Noise
+% of 0 V peak to peak plays the mean voltage's code exactly. Every playback, and every channel, plays new noise.
+S.frequency = 100; % 1000 samples per cycle: 100 kHz
+setChannel(S, 1, 'White Noise', 4, 0, 1); % -1 V to 3 V: the -5 V to 5 V range
+setChannel(S, 2, 'White Noise', 4, 0, 1);
+setChannel(S, 3, 'White Noise', 0, 0, 1); % The 0 V to 5 V range
+S.playDuration(1:3) = 0.5;
+S.trigger(1:3);
+waitUntilStopped(S, 1:3, 2);
+[samplesPlayed, sums] = S.playbackChecksums();
+n = expectedSamples(S, 0.5);
+meanCode = (1 + 5)/10*65536;
+sigma = sqrt(n)*(2/10*65536)/sqrt(3); % Standard deviation of the sum: n samples uniform over +/- 2 V
+for i = 1:2
+    total = sums(i) + round((n*meanCode - sums(i))/2^32)*2^32; % The sums wrap at 2^32
+    assert(samplesPlayed(i) == n && abs(total - n*meanCode) <= 5*sigma, ...
+        'channel %d: mean code %.2f, mean voltage''s code %.2f', i, total/n, meanCode);
+end
+assert(sums(1) ~= sums(2), 'channels 1 and 2 played the same noise');
+checkPlayed(S, 3, n, n*13107); % 1 V in the 0 V to 5 V range: code 13107.2
+first = sums(1);
+S.trigger(1);
+waitUntilStopped(S, 1, 2);
+[~, sums] = S.playbackChecksums();
+assert(sums(1) ~= first, 'channel 1 played the same noise twice');
+S.setDefaultParams();
 end
 
 function testAmplitudeOfASquareWave(S)

@@ -1,12 +1,12 @@
 # Working on the Synth Pal firmware
 
 Synth Pal is alternative firmware for Pulse Pal 3 hardware (Teensy 4.1): a four channel waveform
-synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave, or steps to a
-fixed voltage, with its own amplitude, mean voltage, resting voltage, play duration, and linear
-on and off ramps, when a TTL edge, a USB command or the joystick menu triggers it. The trigger
-channels have Pulse Pal's trigger modes, param sync included. One
-frequency, 1 Hz to 20 kHz in steps of 0.01 Hz, applies to all four. The USB protocol is in
-`PROTOCOL.md` in this folder. Read this page before changing anything here.
+synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave or white noise,
+or steps to a fixed voltage, with its own amplitude, mean voltage, resting voltage, play duration,
+and linear on and off ramps, when a TTL edge, a USB command or the joystick menu triggers it. The
+trigger channels have Pulse Pal's trigger modes, param sync included. One frequency, 1 Hz to
+20 kHz in steps of 0.01 Hz, applies to all four. The USB protocol is in `PROTOCOL.md` in this folder.
+Read this page before changing anything here.
 
 ## Where things are
 
@@ -169,19 +169,22 @@ cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3
 cd /Python/PulsePal && uv run python tests/synthpal_hardware_test.py COM3 --driver COM4
 ```
 
-It checks every sample played against a model of the firmware's synthesis, which computes each
-DAC code as `synthesizeCode()` does, in single precision (`ChannelModel`): every waveform at
-4, 32 and 12868 samples per cycle, each output range, fixed voltages and their ranges, means
-exactly at the mean voltage, whatever the resting voltage, play durations exact to the sample,
-every code of the on and off ramps, a stop at full amplitude, a trigger during the off ramp,
-frequency and setting changes during playback, a channel joining a running clock, the
-firmware's own checks of the levels (with commands sent past the class's checks), op 85
-applied at once and stored in param sync mode, op 82's read-back, and the timing budget with four channels in their
-ramps. With `--driver`, it also sends param sync edges: a set loaded into channels at rest, a
-channel playing at the edge finishing first, and one TTL on both trigger channels. A change to the synthesis must change the
+It checks every sample played against a model of the firmware's synthesis, which computes each DAC
+code as `synthesizeCode()` does, in single precision (`ChannelModel`). White noise is the
+exception: its samples are random, so the test checks their mean (from the playback checksums)
+against the mean voltage within 5 standard errors, also through ramps, and that every channel and
+every playback plays new noise. The model covers every other waveform at 4, 32 and 12868 samples
+per cycle, each output range, fixed voltages and their ranges, means exactly at the mean voltage,
+whatever the resting voltage, play durations exact to the sample, every code of the on and off
+ramps, a stop at full amplitude, a trigger during the off ramp, frequency and setting changes
+during playback, a channel joining a running clock, the firmware's own checks of the levels (with
+commands sent past the class's checks), op 85 applied at once and stored in param sync mode, op
+82's read-back, and the timing budget with four channels in their ramps. With `--driver`, it also
+sends param sync edges: a set loaded into channels at rest, a channel playing at the edge
+finishing first, and one TTL on both trigger channels. A change to the synthesis must change the
 model too. `synthesizeCode()`'s multiply-adds are explicit `fmaf()` calls, so that each rounds
-once whatever the compiler would do: it fused the full amplitude one by itself when the ramps
-were added, and the model went one code wrong in a few samples.
+once whatever the compiler would do: it fused the full amplitude one by itself when the ramps were
+added, and the model went one code wrong in a few samples.
 
 The MATLAB class has its own test (about 15 s, verified with R2025a):
 
@@ -196,7 +199,10 @@ Only a scope, a TTL source and a person can check the rest. After a change to pl
 triggers or the menu, check:
 
 - Each waveform on a scope, with levels in each output range: shape, frequency, amplitude, mean
-  voltage, and the resting voltage between playbacks.
+  voltage, and the resting voltage between playbacks. White noise fills the band from the mean
+  voltage minus half the peak to peak voltage to the mean voltage plus half of it, evenly (a
+  histogram of a long capture is flat across the band, and empty outside it), with a new value on
+  every sample.
 - Ramps on a scope: the amplitude and the mean rise and fall in straight lines over the on and
   off ramps, a fixed voltage ramps in a straight line, a gated channel ramps off from the falling
   edge, and a channel triggered during its off ramp (or stopped during its on ramp) turns back
@@ -209,16 +215,16 @@ triggers or the menu, check:
   mode with two trigger channels linked to one output. The trigger LEDs follow the TTL, and the
   output LEDs light while a channel plays.
 - The joystick menu: edit each setting of an output channel, the frequency and the trigger mode;
-  play and stop a channel from its menu and see the item change back when its play duration
-  ends; trigger a trigger channel; screen saver, device info, reset and exit. The splash screen
-  shows the Synth Pal logo. Mean Voltage comes before Resting Voltage, and On Ramp and Off Ramp
-  follow Play Duration; a ramp of 0 shows "None". The mean voltage edits within what the
-  amplitude allows, and the resting voltage over the whole -10 V to 10 V. The waveform list
-  reads downwards, Sine at the top: down moves to Triangle, and on to Fixed Voltage (the other
+  play and stop a channel from its menu and see the item change back when its play duration ends;
+  trigger a trigger channel; screen saver, device info, reset and exit. The splash screen shows
+  the Synth Pal logo. Mean Voltage comes before Resting Voltage, and On Ramp and Off Ramp follow
+  Play Duration; a ramp of 0 shows "None". The mean voltage edits within what the amplitude
+  allows, and the resting voltage over the whole -10 V to 10 V. The waveform list reads downwards,
+  Sine at the top: down moves to Triangle, and on to Fixed Voltage and White Noise (the other
   lists, as in Pulse Pal firmware, move to their next item with up). With "Fixed Voltage": the
-  amplitude shows in V (not Vpp) and edits from -10.00 to +10.00 V, and switching the waveform
-  to and from it takes the nearest amplitude that suits the new waveform (`fitAmplitude()`: a
-  fixed voltage of -5 V becomes 5 Vpp; 20 Vpp becomes 10 V).
+  amplitude shows in V (not Vpp) and edits from -10.00 to +10.00 V, and switching the waveform to
+  and from it takes the nearest amplitude that suits the new waveform (`fitAmplitude()`: a fixed
+  voltage of -5 V becomes 5 Vpp; 20 Vpp becomes 10 V).
 - After a power cycle (unplug the USB cable, plug it back in), all four outputs play. Flashing
   the device does not reset the DAC, so a test right after flashing over other firmware cannot
   catch a fault in `setup()` (rule 4).

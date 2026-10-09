@@ -26,6 +26,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   fillSineTable()
 //   quarterSine()
 //   unitWaveform()
+//   seedNoise()
+//   noiseSample()
+//   waveformValue()
 //   synthesizeCode()
 //   setNextCode()
 //   endPlayback()
@@ -75,6 +78,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // own output range on the DAC, the one with the finest steps that holds its whole waveform and its resting voltage
 // (Settings.ino). A fixed voltage (WAVEFORM_FIXED_VOLTAGE) is the same code on every sample, so it is written once, as it
 // starts: it plays like the other waveforms (start, ramps, play duration, stop, triggers), on the same sample clock.
+// White noise (WAVEFORM_WHITE_NOISE) takes a new random value on every sample in place of the waveform's value at its
+// phase (noiseSample()), and is otherwise played as a periodic waveform is: it swings around the mean voltage within
+// the amplitude, at the sampling rate the frequency sets, through the same ramps. The frequency sets only how often it
+// changes, so its spectrum is whatever that sampling rate and the DAC make of it.
 //
 // Ramps. Each sample has an envelope, 0 to 1, which fades the waveform in from the resting voltage and back to it: at
 // envelope e, the output is the resting voltage plus e times (the waveform at full amplitude minus the resting voltage).
@@ -163,7 +170,7 @@ static inline float quarterSine(uint32_t r) {
 
 // The value of a periodic waveform at sample n of its cycle (0 to samplesPerCycle - 1), from -1 to 1. Each waveform's
 // values are symmetric about 0, so its mean is exactly the resting voltage, and its highest and lowest samples are
-// exactly 1 and -1. A fixed voltage never comes here: see synthesizeCode().
+// exactly 1 and -1. A fixed voltage and white noise never come here: see synthesizeCode().
 static inline float unitWaveform(byte shape, uint32_t n) {
   uint32_t quarter = samplesPerQuarter;
   switch (shape) {
@@ -193,6 +200,46 @@ static inline float unitWaveform(byte shape, uint32_t n) {
   }
 }
 
+// Seeds each channel's white noise generator (noiseSample()) at startup, with splitmix32 (the MurmurHash3 finalizer
+// applied to a Weyl sequence), so that the four channels' sequences are unrelated and no state is all zeros. The
+// sequences start from the same point at every power-up. Startup only, so it runs from flash (FLASHMEM).
+FLASHMEM void seedNoise() {
+  uint32_t weyl = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    for (byte k = 0; k < 4; k++) {
+      uint32_t z = (weyl += 0x9E3779B9);
+      z = (z ^ (z >> 16)) * 0x85EBCA6B;
+      z = (z ^ (z >> 13)) * 0xC2B2AE35;
+      noiseState[i][k] = z ^ (z >> 16);
+    }
+  }
+}
+
+// White noise: the next value of a channel's random sequence, uniform from -1 to 1. Each channel has its own generator
+// (xoshiro128+, Blackman and Vigna 2018, which its authors recommend for floating point values; period 2^128 - 1). It
+// carries on from one playback to the next, so every playback is new noise, and the channels are unrelated: a 32-bit
+// generator shared by four channels at different points of one 2^32 cycle could, after hours of uneven use, replay one
+// channel's noise on another. The 32 bits of its output, as a signed integer times 2^-31, are uniform from -1 to 1; the
+// float keeps their top 24 bits, the generator's best. About 10 integer operations: less time than a sine sample.
+static inline float noiseSample(byte channel) {
+  uint32_t *s = noiseState[channel];
+  uint32_t result = s[0] + s[3];
+  uint32_t t = s[1] << 9;
+  s[2] ^= s[0];
+  s[3] ^= s[1];
+  s[1] ^= s[2];
+  s[0] ^= s[3];
+  s[2] ^= t;
+  s[3] = (s[3] << 11) | (s[3] >> 21);
+  return (float)(int32_t)result * 4.656612873077393e-10f; // 2^-31
+}
+
+// The value of a channel's waveform for sample n of its cycle, from -1 to 1: a periodic waveform's value at that phase,
+// or the next value of the channel's white noise
+static inline float waveformValue(byte channel, byte shape, uint32_t n) {
+  return (shape == WAVEFORM_WHITE_NOISE) ? noiseSample(channel) : unitWaveform(shape, n);
+}
+
 // The DAC code of sample n (0 to samplesPerCycle - 1) of a channel's waveform, at an envelope (see "Ramps" above), in
 // the channel's output range. At full amplitude (envelope 1), the offset from the mean voltage's code is rounded half
 // away from zero, so samples the same distance above and below the mean voltage are the same number of codes from it:
@@ -212,11 +259,12 @@ static inline uint16_t synthesizeCode(byte channel, uint32_t n, float envelope) 
     if (isFixed) {
       return out.fixedCode;
     }
-    float offset = fmaf(out.halfAmplitudeCodes, unitWaveform(out.waveform, n), out.meanCodeFraction);
+    float offset = fmaf(out.halfAmplitudeCodes, waveformValue(channel, out.waveform, n), out.meanCodeFraction);
     code = (int32_t)out.meanCode + (int32_t)roundf(offset);
   } else {
     float target = isFixed ? out.rampOffsetCodes
-                           : fmaf(out.halfAmplitudeCodes, unitWaveform(out.waveform, n), out.rampOffsetCodes);
+                           : fmaf(out.halfAmplitudeCodes, waveformValue(channel, out.waveform, n),
+                                  out.rampOffsetCodes);
     code = (int32_t)out.restCode + (int32_t)roundf(fmaf(target, envelope, out.restCodeFraction));
   }
   if (code < 0) {
