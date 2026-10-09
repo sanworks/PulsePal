@@ -6,10 +6,16 @@ inputs. This repository holds its firmware, its client libraries and its hardwar
 files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse Pal 3
 (Teensy 4.1). The current firmware is v22.
 
+This file is about changing the repository. To use a Pulse Pal, Wave Pal or Synth Pal from
+Python or MATLAB, for example to write or check an experiment script, read `/USING.md`: the
+device limits, the standard calls of each class, recipes and pitfalls. Keep it up to date when
+a change alters what users see.
+
 ## Layout
 
 | Path | Contents |
 |---|---|
+| `/USING.md` | Using the devices from Python and MATLAB: limits, standard calls, recipes, pitfalls |
 | `/Firmware/PulsePal3/` | Current firmware, for **both** Pulse Pal 2 and Pulse Pal 3. Read its `AGENTS.md` before changing it |
 | `/Firmware/PROTOCOL.md` | The USB serial protocol: op codes, parameter codes, replies, settings file layout |
 | `/Firmware/WavePal/` | Wave Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform player. Its own `AGENTS.md` and `PROTOCOL.md` |

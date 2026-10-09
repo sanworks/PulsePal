@@ -18,6 +18,9 @@ https://sites.google.com/site/pulsepalwiki/
 
 Code contributions are welcome! Please follow guidelines in CONTRIBUTING.md
 
+Using Pulse Pal from Python or MATLAB: USING.md covers the device limits, the standard calls, recipes for common
+experiments and pitfalls.
+
 Developer documentation: AGENTS.md is the guide to this repository (for people and for AI coding agents),
 and Firmware/PROTOCOL.md documents the USB serial protocol.
 
