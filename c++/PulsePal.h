@@ -81,14 +81,14 @@ public:
     bool setPhase1Voltage(uint8_t channel, float voltage);
     bool setPhase2Voltage(uint8_t channel, float voltage);
     bool setRestingVoltage(uint8_t channel, float voltage);
-    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 3600
-    bool setInterPhaseInterval(uint8_t channel, float timeInSeconds);  // 0 to 3600
-    bool setPhase2Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 3600
-    bool setInterPulseInterval(uint8_t channel, float timeInSeconds);  // 0.0001 to 3600
-    bool setBurstDuration(uint8_t channel, float timeInSeconds);       // 0 to 3600. 0 = no bursts
-    bool setBurstInterval(uint8_t channel, float timeInSeconds);       // 0 to 3600
-    bool setPulseTrainDuration(uint8_t channel, float timeInSeconds);  // 0.0001 to 3600
-    bool setPulseTrainDelay(uint8_t channel, float timeInSeconds);     // 0 to 3600
+    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 9999.9999
+    bool setInterPhaseInterval(uint8_t channel, float timeInSeconds);  // 0 to 9999.9999
+    bool setPhase2Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 9999.9999
+    bool setInterPulseInterval(uint8_t channel, float timeInSeconds);  // 0.0001 to 9999.9999
+    bool setBurstDuration(uint8_t channel, float timeInSeconds);       // 0 to 9999.9999. 0 = no bursts
+    bool setBurstInterval(uint8_t channel, float timeInSeconds);       // 0 to 9999.9999
+    bool setPulseTrainDuration(uint8_t channel, float timeInSeconds);  // 0.0001 to 9999.9999
+    bool setPulseTrainDelay(uint8_t channel, float timeInSeconds);     // 0 to 9999.9999
     bool setTrigger1Link(uint8_t channel, uint8_t link_state); // 1: trigger channel 1 starts this output channel
     bool setTrigger2Link(uint8_t channel, uint8_t link_state);
     bool setCustomTrainID(uint8_t channel, uint8_t ID); // ID = 0: no custom train. ID = 1-2 (Pulse Pal 2) or 1-4 (Pulse Pal 3): that custom train

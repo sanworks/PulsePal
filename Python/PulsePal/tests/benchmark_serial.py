@@ -83,11 +83,11 @@ def main():
                    payload_bytes=n_pulses * 6 + 7)
 
         # Settings file round trip through the microSD card
-        report("sd_settings save (op 90)",
-               timed(lambda: P.sd_settings("BENCH.pps", "save"), max(5, arguments.repeats // 20)))
-        report("sd_settings load (op 90 + 93)",
-               timed(lambda: P.sd_settings("BENCH.pps", "load"), max(5, arguments.repeats // 20)))
-        P.sd_settings("BENCH.pps", "delete")
+        report("save_settings_file (op 90)",
+               timed(lambda: P.save_settings_file("BENCH.pps"), max(5, arguments.repeats // 20)))
+        report("load_settings_file (op 90 + 93)",
+               timed(lambda: P.load_settings_file("BENCH.pps"), max(5, arguments.repeats // 20)))
+        P.delete_settings_file("BENCH.pps")
         print("\nDone. The device has been left with the default parameters.")
 
 

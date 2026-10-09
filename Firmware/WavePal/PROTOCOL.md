@@ -47,7 +47,8 @@ The Python and MATLAB classes connect in this order:
 4. Op 88 ('X') with all four channel bits, then the default settings: ops 83, 82, 79, 68,
    84 and 73.
 
-When they close, they send op 81, which puts "Wave Pal v3.0" back on the screen.
+When they close, they send op 81, which stops playback and puts "Wave Pal v3.0" back on the
+screen.
 
 Waveforms loaded by an earlier session stay on the device unless op 82 changes the output
 range.
@@ -76,12 +77,13 @@ the waveform could not be written to the microSD card; that channel is then left
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
 | 71 | `G` | Get status | none | Playing channel bits (uint8), samples loaded on channels 1-4 (4 uint32, 0 = empty), underruns on channels 1-4 (4 uint32, counted since startup), longest playback interrupt since the previous op 71, in nanoseconds (uint32) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
-| 81 | `Q` | Disconnect: show the device's own name on the top screen again | none | none |
+| 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
 | 90 | `Z` | Playback checksums (testing) | none | For channels 1-4: samples played since the channel last started (4 uint32), then the sum of their DAC codes, modulo 2^32 (4 uint32) |
 
 Ops 72, 81 and 89 are Pulse Pal's ops of the same numbers, so that a client shows its name on the
-screen in the same way. Unlike Pulse Pal's op 81, Wave Pal's does not stop playback: a device
-left playing, or waiting for TTL triggers, carries on after the client closes.
+screen in the same way. Like Pulse Pal's op 81, Wave Pal's stops every channel, as op 88 does, so
+that closing a client stops its outputs on all three firmwares. The settings and waveforms stay:
+TTL triggers still play them after the client closes.
 
 Op 90 is for testing, like Pulse Pal's debugging ops 86 and 87: `/Python/PulsePal/tests/wavepal_hardware_test.py`
 and `/MATLAB/tests/testWavePalDevice.m` use it to check every sample a device played against the waveform

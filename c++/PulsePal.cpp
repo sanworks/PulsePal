@@ -28,6 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "PulsePal.h"
 
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -43,10 +44,11 @@ static const uint32_t CurrentFirmwareVersion = 22;
 // milliseconds. A missing reply usually means that the device is showing COMM. FAILURE! (see readConfirm()).
 static const unsigned int ReplyTimeoutMs = 2000;
 
-// Parameter ranges, as in the MATLAB class
+// Parameter ranges, as in the MATLAB and Python classes
 static const double MaxVoltage = 10;         // Volts. Voltages are -MaxVoltage to +MaxVoltage
-static const double MinPulseTime = 0.0001;   // Seconds. For phase durations, inter-pulse interval and train duration
-static const double MaxTime = 3600;          // Seconds
+static const double MinPulseTime = 0.0001;   // Seconds. For phase durations, inter-pulse interval and train duration,
+                                             // and the step of custom pulse times
+static const double MaxTime = 9999.9999;     // Seconds: the longest time the joystick menu shows and edits
 static const uint16_t DACMax = 65535;        // DAC code for +10V. 0 is -10V
 static const uint8_t TriggerModeParamSync = 3; // Pulse Pal 3 only
 
@@ -649,15 +651,26 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
     for (int i = 0; i < nPulses; i++) {
         float pulseTime = customPulseTimes[i];
         if (!((pulseTime >= 0) && (pulseTime <= MaxTime))) { // Written this way to also reject NaN
-            error << "pulse " << (i + 1) << " is at " << pulseTime << " s. Pulse times must be 0 to 3600 s.";
+            error << "pulse " << (i + 1) << " is at " << pulseTime << " s. Pulse times must be 0 to " << std::setprecision(8) << MaxTime << " s.";
             reportError(error.str());
             return false;
         }
-        pulseCycles[i] = timeToCycles(pulseTime);
+        // Each time is a multiple of MinPulseTime (100 us), as in the MATLAB and Python classes: a time between two
+        // steps is refused, not rounded. A float holds a time only to within half its last bit (30 us at 1000 s), so
+        // a time that near a step counts as that step.
+        double steps = (double)pulseTime / MinPulseTime;
+        double nearestStep = roundHalfEven(steps);
+        double halfBit = ((double)std::nextafter(pulseTime, 2 * pulseTime + 1) - pulseTime) / 2;
+        double tolerance = (halfBit > 0.5e-6) ? halfBit : 0.5e-6; // And at least half a microsecond, as in MATLAB and Python
+        if (std::fabs(steps - nearestStep) * MinPulseTime > tolerance) {
+            error << "pulse " << (i + 1) << " is at " << pulseTime << " s. Custom pulse times must be multiples of "
+                  << (MinPulseTime * 1000000.0) << " us.";
+            reportError(error.str());
+            return false;
+        }
+        pulseCycles[i] = (uint32_t)nearestStep * minSpacing;
         // The device plays each pulse until the next one's time, so a time that is not later than the one before it
-        // would freeze the output for the rest of the train, and one a single cycle later would play a pulse too short
-        // for a trigger channel to detect (MinPulseTime, as in the Python class). The check is on the times the device
-        // will receive, after rounding to its timer cycles.
+        // would freeze the output for the rest of the train
         if ((i > 0) && (pulseCycles[i] < pulseCycles[i - 1] + minSpacing)) {
             error << "pulse times must increase, by at least " << (MinPulseTime * 1000000.0) << " us ("
                   << minSpacing << " timer cycles). "
@@ -831,11 +844,11 @@ bool PulsePal::checkParam(uint8_t paramCode, float value, int channel, const cha
         if (std::isfinite(value)) {
             // Compared in timer cycles, as the device will receive it, so that float rounding cannot reject 0.0001
             double cycles = roundHalfEven((double)value * cycleFrequency);
-            if ((cycles >= roundHalfEven(minTime * cycleFrequency)) && (cycles <= (MaxTime * cycleFrequency))) {
+            if ((cycles >= roundHalfEven(minTime * cycleFrequency)) && (cycles <= roundHalfEven(MaxTime * cycleFrequency))) {
                 return true;
             }
         }
-        error << " s. It must be " << minTime << " to " << MaxTime << " s.";
+        error << " s. It must be " << minTime << " to " << std::setprecision(8) << MaxTime << " s.";
     } else {
         int maxValue = 1;
         if (paramCode == PARAM_CUSTOM_TRAIN_ID) {

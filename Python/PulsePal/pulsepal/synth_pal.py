@@ -35,12 +35,13 @@ Settings that apply to one output channel, such as
 0 is unused and holds `None`, and indices 1 to 4 hold the settings of
 output channels 1-4, as in `pulsepal.PulsePalDevice`. Setting an element
 or a slice programs the device at once. Assigning a whole list sets all
-four channels, and a single value sets them all to that value:
+four channels, and takes one value per channel: a single value raises an
+error, because it does not say which channels it is meant for.
 
 ```python
 S.peak_to_peak[2] = 5              # channel 2 only
 S.play_duration[1:5] = [1, 2, 3, 4]
-S.waveform = "Square"              # all four channels
+S.waveform = ["Square"] * 4        # all four channels
 ```
 
 `SynthPalDevice.trigger_mode` is indexed the same way by trigger
@@ -277,9 +278,10 @@ class SynthPalDevice:
     `SynthPalDevice.serialportlist` lists. `SynthPalDevice` is also a
     context manager, which closes the port on exit.
 
-    Closing the connection puts the device's own name back on its
-    screen, and leaves everything else as it is: playback continues, and
-    TTL triggers keep playing the channels.
+    Closing the connection stops playback, as it does on Pulse Pal (each
+    channel over its off ramp), and puts the device's own name back on its
+    screen. The device keeps its settings, so TTL triggers still play the
+    channels.
     """
 
     port: "serial.Serial"
@@ -438,11 +440,11 @@ class SynthPalDevice:
             for settings, value in ((self._waveform, "Sine"), (self._peak_to_peak, 5.0),
                                     (self._fixed_voltage, 5.0), (self._mean_voltage, 0.0)):
                 settings._store([value] * 4)
-            self.resting_voltage = 0
-            self.play_duration = 1
-            self.on_ramp_duration = 0
-            self.off_ramp_duration = 0
-            self.trigger_mode = "Normal"
+            self.resting_voltage = [0] * 4
+            self.play_duration = [1] * 4
+            self.on_ramp_duration = [0] * 4
+            self.off_ramp_duration = [0] * 4
+            self.trigger_mode = ["Normal"] * 2
             self._set_trigger_links([True] * 4, [False] * 4)
         finally:
             self._auto_sync = auto_sync
@@ -524,7 +526,7 @@ class SynthPalDevice:
         ```python
         with S.batch():
             S.frequency = 880
-            S.waveform = "Triangle"
+            S.waveform = ["Triangle"] * 4
             S.peak_to_peak = [2, 4, 6, 8]
         ```
 
@@ -992,11 +994,13 @@ class SynthPalDevice:
     def close(self, send_disconnect=True):
         """Close the connection to the device.
 
-        The device shows its own name on its screen again, in place of
-        "PYTHON Connected". It keeps its settings, and playback in
-        progress continues. Safe to call more than once. Called
-        automatically when leaving a `with` block and when the object is
-        garbage collected.
+        The device stops playback on all channels, each over its off ramp,
+        and shows its own name on its screen again, in place of "PYTHON
+        Connected". It keeps its settings, so TTL triggers still play the
+        channels. Safe to call more than once. Called automatically when
+        leaving a `with` block and when the object is garbage collected,
+        so playback also stops when the last reference to the object
+        goes.
 
         Args:
             send_disconnect: If `True`, tell the device that the client

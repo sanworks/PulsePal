@@ -91,7 +91,10 @@ void processUSBCommands() {
       showTopScreen();
     } break;
 
-    case OP_DISCONNECT: { // Op 81. Unlike Pulse Pal's op 81, playback continues: TTL triggers still play the waveforms.
+    case OP_DISCONNECT: { // Op 81. As Pulse Pal's op 81: stops every channel. The settings stay, so TTL triggers still play.
+      noInterrupts();
+      stopChannels(ALL_CHANNELS);
+      interrupts();
       strcpy(CommanderString, DefaultCommanderString);
       showTopScreen();
     } break;

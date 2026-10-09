@@ -621,8 +621,8 @@ def store_next_trial(S, trigger_modes=("Normal", "Param Sync")):
         S.fixed_voltage[1] = 2
         S.peak_to_peak[2:5] = [6, 6, 6]
         S.mean_voltage = [0, 1, 1, 1]
-        S.resting_voltage = 0
-        S.play_duration = 0.01
+        S.resting_voltage = [0] * 4
+        S.play_duration = [0.01] * 4
         S.trigger_mode = list(trigger_modes)
 
 
@@ -633,7 +633,7 @@ def old_settings(S):
     S.frequency = 1000
     for channel in (1, 2, 3, 4):
         configure(S, channel, "Sine", 4, 0)
-    S.play_duration = 0.01
+    S.play_duration = [0.01] * 4
     S.link_trigger_channel1 = [True] * 4
     S.link_trigger_channel2 = [False] * 4
 
@@ -722,9 +722,9 @@ def test_four_channels_at_100khz(S, report, seconds=10):
     for channel in (1, 2, 3, 4):
         # Resting voltages -1.5 to 1.5 V, and means -0.75 to 0.75 V
         configure(S, channel, "Sine", 4 * channel, channel - 2.5, (channel - 2.5) / 2)
-    S.on_ramp_duration = seconds / 5
-    S.play_duration = seconds * 3 / 5
-    S.off_ramp_duration = seconds / 5
+    S.on_ramp_duration = [seconds / 5] * 4
+    S.play_duration = [seconds * 3 / 5] * 4
+    S.off_ramp_duration = [seconds / 5] * 4
     S.status()  # Reset the longest interrupt and the late updates
     S.trigger([1, 2, 3, 4])
     longest = wait_until_stopped(S, [1, 2, 3, 4], timeout=seconds + 3)
@@ -734,8 +734,8 @@ def test_four_channels_at_100khz(S, report, seconds=10):
         model = ChannelModel("Sine", 4_000_000 * channel, 1_000_000 * channel - 2_500_000, S.samples_per_cycle,
                              500_000 * channel - 1_250_000)
         check_sum(S, channel, model.codes(np.arange(envelopes.size), envelopes))
-    S.on_ramp_duration = 0
-    S.off_ramp_duration = 0
+    S.on_ramp_duration = [0] * 4
+    S.off_ramp_duration = [0] * 4
     report(f"4 channels at 100 kHz for {seconds} s, with ramps: longest interrupt {longest:.2f} us of "
            f"10 us, {late} late output updates")
     assert longest < 10, "the interrupt takes longer than the sample period"

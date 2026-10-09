@@ -52,7 +52,8 @@ The Python and MATLAB classes connect in this order:
    [param sync mode](#param-sync-trigger-mode-3), and op 84 takes both trigger channels out of
    it, which discards a stored set.
 
-When they close, they send op 81, which puts "Synth Pal v3.0" back on the screen.
+When they close, they send op 81, which stops playback and puts "Synth Pal v3.0" back on the
+screen.
 
 ## Confirm bytes
 
@@ -81,13 +82,14 @@ so that it is not taken for the next command.
 | 88 | `X` | Stop | Channel bits (uint8) | none |
 | 71 | `G` | Get status | none | Playing channel bits (uint8: a channel in its off ramp counts as playing, until it reaches its resting voltage), samples per cycle (uint32), the output range of channels 1-4 (4 uint8, see [Output ranges](#output-ranges)), longest sample clock interrupt since the previous op 71, in nanoseconds (uint32), late output updates since the previous op 71 (uint32, see [Timing](#timing)) |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
-| 81 | `Q` | Disconnect: show the device's own name on the top screen again | none | none |
+| 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
 | 99 | `c` | Set the screen saver | State (uint8: 0 off, 1 on), timeout in seconds (uint16, 1-65535) | 1 / 0 |
 | 90 | `Z` | Playback checksums (testing) | none | For channels 1-4: samples played since the channel last started (4 uint32), then the sum of their DAC codes, modulo 2^32 (4 uint32) |
 
-Ops 72, 81, 89 and 99 are Pulse Pal's ops of the same numbers. Unlike Pulse Pal's op 81, Synth
-Pal's does not stop playback: a device left playing, or waiting for TTL triggers, carries on
-after the client closes. Op 99 works as in Pulse Pal firmware (see its
+Ops 72, 81, 89 and 99 are Pulse Pal's ops of the same numbers. Like Pulse Pal's op 81, Synth
+Pal's stops every channel, as op 88 does (over their off ramps), so that closing a client stops
+its outputs on all three firmwares. The settings stay: TTL triggers still play the channels after
+the client closes. Op 99 works as in Pulse Pal firmware (see its
 [screen saver](../PROTOCOL.md#screen-saver) notes), with the settings at the same EEPROM
 addresses, so they carry over when a device changes firmware.
 

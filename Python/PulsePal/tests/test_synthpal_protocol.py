@@ -397,7 +397,7 @@ def test_large_amplitude_after_moving_the_mean_voltage():
 def test_ramp_durations_are_sent_in_microseconds():
     device, fake = connect()
     device.on_ramp_duration[1:5] = [0, 0.0000015, 2.5, 3600]
-    device.off_ramp_duration = 0.01
+    device.off_ramp_duration = [0.01] * 4
     assert fake.writes == [
         command("B", struct.pack("<4I", 0, 2, 2_500_000, 3_600_000_000)),
         command("E", struct.pack("<4I", *[10_000] * 4)),
@@ -517,7 +517,7 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     device, fake = connect()
     device.trigger_mode[2] = "gated"
     device.trigger_mode = ["Toggle", "Normal"]
-    device.trigger_mode = "GATED"
+    device.trigger_mode = ["GATED", "gated"]
     assert fake.writes == [
         command("T", bytes([0, 2])),
         command("T", bytes([1, 0])),
@@ -596,7 +596,7 @@ def test_batch_sends_everything_at_its_end():
     device, fake = connect()
     with device.batch():
         device.frequency = 880
-        device.waveform = "Triangle"
+        device.waveform = ["Triangle"] * 4
         device.peak_to_peak = [2, 4, 6, 8]
         assert fake.writes == []
     assert fake.ops() == ["U"]
@@ -637,9 +637,15 @@ def test_channel_settings_are_indexed_by_channel_number():
     device, fake = connect()
     device.peak_to_peak = [1, 2, 3, 4]              # 4 values: channels 1-4
     device.peak_to_peak = [None, 4, 3, 2, 1]        # 5 values: index 0 unused
-    device.peak_to_peak = 2                         # one value for all channels
+    device.peak_to_peak = np.full(4, 2.0)           # A NumPy array
     assert device.peak_to_peak == [None, 2, 2, 2, 2]
     fake.writes.clear()
+    # A single value does not say which channels it is meant for (see "One way to use all six" in
+    # /AGENTS.md). configure() takes one value for the channels it is given.
+    for name, value in (("peak_to_peak", 2), ("waveform", "Sine"), ("trigger_mode", "Normal"),
+                        ("play_duration", 1)):
+        error = expect_error(setattr, device, name, value)
+        assert f"{name}[1] = " in str(error), error
     expect_error(device.peak_to_peak.__setitem__, 0, 1)
     expect_error(device.peak_to_peak.__setitem__, slice(1, 3), [1])
     expect_error(setattr, device, "peak_to_peak", [1, 2])
@@ -724,8 +730,8 @@ def test_deleting_the_device_closes_its_port_at_once():
 
 
 def test_close_sends_the_disconnect_op_once():
-    """Op 81 puts the device's own name back on its screen. Unlike Pulse Pal's op 81,
-    it does not stop playback, and nothing else is sent (e.g. no stop op)."""
+    """Op 81 stops playback, as Pulse Pal's op 81 does, and puts the device's own name back
+    on its screen. Nothing else is sent: the firmware stops the channels itself."""
     device, fake = connect()
     device.close()
     device.close()

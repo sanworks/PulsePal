@@ -16,12 +16,13 @@
 %   S.offRampDuration(1) = 0.02;       % Seconds to fade back to it
 %   S.trigger(1);                      % One channel, or several as an array, e.g. S.trigger([1 3])
 %   S.triggerMode{2} = 'Gated';        % Trigger channel 2
-%   clear S                            % Releases the port. The device keeps playing, and TTL triggers still work.
+%   clear S                            % Releases the port and stops playback. TTL triggers still play the channels.
 %
 % Settings are properties, and assigning one programs the device at once. Settings of the output channels are
 % 1x4 arrays with one element per channel, so S.peakToPeak(2) is output channel 2's peak to peak voltage; triggerMode
-% is a 1x2 cell array, with one element per trigger channel. A single value sets all channels, e.g.
-% S.waveform = 'Square'. configure() sets several of the channels' settings at once:
+% is a 1x2 cell array, with one element per trigger channel. Assigning a whole setting takes one value per channel:
+% S.waveform = 'Square' raises an error, because a single value does not say which channels it is meant for.
+% S.waveform(:) = {'Square'} sets all four. configure() sets several of the channels' settings at once:
 %   S.configure(2, 'waveform', 'Triangle', 'peakToPeak', 20, 'meanVoltage', 0);
 % Voltages are in volts, times in seconds, and the frequency in Hz.
 %
@@ -113,7 +114,6 @@ classdef SynthPalDevice < handle
     % a file, and a license block there would hide it.
 
     properties
-        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         frequency = 100 % Frequency of all output channels, in Hz: 1 to 20000, rounded to 0.01 Hz. It can change during
                         % playback: playing channels carry on from the same point in their cycle, and keep the time
                         % they have left to play.
@@ -138,6 +138,7 @@ classdef SynthPalDevice < handle
     end
 
     properties (SetAccess = private)
+        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device
         samplesPerCycle = 1000 % Samples in one cycle of the waveform at the current frequency. See "Sampling" above.
     end
@@ -266,13 +267,13 @@ classdef SynthPalDevice < handle
             % then a valid amplitude for any waveform, and a sine wave is then valid
             obj.sendLevelsInOrder({'M', [0 0 0 0]; 'A', [5 5 5 5]*1e6; 'W', repmat({'Sine'}, 1, 4)}, true);
             obj.storeLevels(repmat({'Sine'}, 1, 4), [5 5 5 5], [5 5 5 5], [0 0 0 0]);
-            obj.restingVoltage = 0;
-            obj.playDuration = 1;
-            obj.onRampDuration = 0;
-            obj.offRampDuration = 0;
-            obj.triggerMode = 'Normal';
-            obj.linkTriggerChannel1 = true;
-            obj.linkTriggerChannel2 = false;
+            obj.restingVoltage = zeros(1,4);
+            obj.playDuration = ones(1,4);
+            obj.onRampDuration = zeros(1,4);
+            obj.offRampDuration = zeros(1,4);
+            obj.triggerMode = {'Normal', 'Normal'};
+            obj.linkTriggerChannel1 = true(1,4);
+            obj.linkTriggerChannel2 = false(1,4);
             clear cleanup
         end
 
@@ -552,9 +553,10 @@ classdef SynthPalDevice < handle
         end
 
         function delete(obj)
-            % Releases the serial port, and shows the device's own name on its screen again in place of
-            % "MATLAB Connected". The device keeps its settings, and playback in progress continues, so TTL triggers
-            % keep playing the channels.
+            % Runs on clear S or delete(S). Tells the device that MATLAB is disconnecting, which stops playback (each
+            % channel over its off ramp), as on Pulse Pal, and puts the device's own name back on its screen in place
+            % of "MATLAB Connected", and releases the serial port. The device keeps its settings, so TTL triggers
+            % still play the channels.
             if obj.initialized
                 try
                     obj.writeCommand(obj.OpDisconnect, []);
@@ -803,7 +805,7 @@ classdef SynthPalDevice < handle
 
         function seconds = checkDurations(obj, seconds, name, zeroMeaning)
             % Checks a duration for each output channel: 0 to info.maxPlayDuration seconds
-            seconds = obj.expandToChannels(seconds, name);
+            seconds = obj.oneValuePerChannel(seconds, 4, name, 'output channel');
             maxDuration = 3600;
             if isstruct(obj.info)
                 maxDuration = obj.info.maxPlayDuration;
@@ -819,23 +821,22 @@ classdef SynthPalDevice < handle
             if nargin < 6
                 note = '';
             end
-            volts = obj.expandToChannels(volts, name);
+            volts = obj.oneValuePerChannel(volts, 4, name, 'output channel');
             if ~isnumeric(volts) || ~isreal(volts) || any(~isfinite(volts)) || any(volts < low) || any(volts > high)
                 error([name ' values must be numbers of volts from ' num2str(low) ' to ' num2str(high) note '.'])
             end
             volts = double(volts);
         end
 
-        function codes = namesToCodes(~, names, validNames, nChannels, settingName, channelType)
-            % Converts a name, or one name per channel, to codes: indices into validNames, from 0
+        function codes = namesToCodes(obj, names, validNames, nChannels, settingName, channelType)
+            % Converts one name per channel to codes: indices into validNames, from 0
             if ischar(names) || (isstring(names) && isscalar(names))
-                names = repmat(cellstr(names), 1, nChannels);
+                obj.oneValuePerChannel({char(names)}, nChannels, settingName, channelType); % Raises the error
             elseif isstring(names)
                 names = cellstr(names);
             end
             if ~iscell(names) || numel(names) ~= nChannels
-                error([settingName ' needs one name for all channels, or a 1x' num2str(nChannels) ' cell array with '...
-                       'one name per ' channelType '.'])
+                error([settingName ' needs a 1x' num2str(nChannels) ' cell array with one name per ' channelType '.'])
             end
             codes = zeros(1, nChannels);
             for i = 1:nChannels
@@ -851,19 +852,30 @@ classdef SynthPalDevice < handle
             end
         end
 
-        function values = expandToChannels(~, values, name)
-            % Returns one value per output channel, as a 1x4 row, from a single value or four values
-            if isscalar(values)
-                values = repmat(values, 1, 4);
-            elseif numel(values) == 4
-                values = reshape(values, 1, 4);
-            else
-                error([name ' needs one value for all channels, or one value per output channel (1x4).'])
+        function values = oneValuePerChannel(~, values, nChannels, name, channelType)
+            % Returns values as a row, after checking that there is one per channel. A single value is refused rather
+            % than copied to every channel: a script that sets one channel should say which, and one that sets them
+            % all should list them, so that it reads the same in every class and language.
+            if numel(values) == nChannels
+                values = reshape(values, 1, nChannels);
+                return
             end
+            if isscalar(values) && iscell(values)
+                example = ['''' char(values{1}) ''''];
+                error([name ' holds one name per ' channelType ', so a single name is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. S.' name '{1} = ' example ', or all ' num2str(nChannels) ', e.g. S.' ...
+                       name '(:) = {' example '}.'])
+            elseif isscalar(values)
+                example = num2str(values);
+                error([name ' holds one value per ' channelType ', so a single value is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. S.' name '(1) = ' example ', or all ' num2str(nChannels) ', e.g. S.' ...
+                       name '(:) = ' example '.'])
+            end
+            error([name ' needs one value per ' channelType ' (1x' num2str(nChannels) ').'])
         end
 
         function values = checkLogical(obj, values, name)
-            values = obj.expandToChannels(values, name);
+            values = obj.oneValuePerChannel(values, 4, name, 'output channel');
             if ~(islogical(values) || isnumeric(values)) || any(values ~= 0 & values ~= 1)
                 error([name ' values must be true or false (1 or 0).'])
             end

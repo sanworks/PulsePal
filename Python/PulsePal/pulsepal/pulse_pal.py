@@ -27,13 +27,14 @@ Each parameter is a list on the device object, indexed by channel
 number: index 0 is unused and holds `None`, and indices 1 to 4 hold the
 values for output channels 1-4. `PulsePalDevice.trigger_mode` is indexed
 the same way by trigger channel, 1 or 2. Assigning an element, a slice
-or the whole list programs the device at once; a single value sets every
-channel:
+or the whole list programs the device at once. The whole list takes one
+value per channel: a single value raises an error, because it does not
+say which channels it is meant for.
 
 ```python
 P.phase1_voltage[2] = 7                  # channel 2 only
 P.inter_pulse_interval[1:5] = [0.2] * 4  # all four channels
-P.phase1_voltage = 5                     # all four channels
+P.phase1_voltage = [5, 5, 5, 5]          # all four channels
 P.trigger_mode[2] = "Toggle"             # trigger channel 2
 ```
 
@@ -54,22 +55,32 @@ how the next trial's parameters wait for a TTL in param sync mode (see
 
 ## Units and values
 
-Voltages are in volts in the range [-10, 10]. Times are in seconds, and
-are rounded to the nearest cycle of the device's hardware timer (see
-`DeviceInfo.cycle_frequency`); a time exactly halfway between two cycles
-rounds to the even one, as in the MATLAB and C++ classes, and voltages
-round to the nearest DAC code the same way. On/off parameters are `True`
-or `False`, and modes are names, such as `"Gated"`; names are not case
-sensitive, and the integer codes of older Pulse Pal software are accepted
-too.
+Voltages are in volts in the range [-10, 10]. Times are in seconds, from
+0 to `MAX_TIME` (9999.9999 s), and are rounded to the nearest cycle of
+the device's hardware timer, 50 us (see `DeviceInfo.cycle_period_us`);
+the parameter then holds the time the device plays, so 0.00012 reads
+back as 0.0001. A time exactly halfway between two cycles rounds to the
+even one, as in the MATLAB and C++ classes, and voltages round to the
+nearest DAC code the same way. On/off parameters are `True` or `False`,
+and modes are names, such as `"Gated"`; names are not case sensitive,
+and the integer codes of older Pulse Pal software are accepted too.
 
 A value the device cannot play raises `pulsepal.PulsePalError` before
-anything is sent: a voltage outside [-10, 10], a time that is negative
-or not a number, or an unknown name. So does a pulse phase, inter-pulse
-interval or pulse train duration shorter than
-`DeviceInfo.min_pulse_width_us`, and custom pulse times closer together
-than that, so that a Pulse Pal's trigger channels can detect the shortest
-pulse its output channels play.
+anything is sent: a voltage outside [-10, 10], a time that is negative,
+longer than `MAX_TIME` or not a number, or an unknown name. So does a
+pulse phase, inter-pulse interval or pulse train duration shorter than
+`DeviceInfo.min_pulse_width_us` (100 us), so that a Pulse Pal's trigger
+channels can detect the shortest pulse its output channels play. Custom
+pulse times are not rounded: each must be a multiple of
+`DeviceInfo.min_pulse_width_us`.
+
+## Saving parameters
+
+`PulsePalDevice.export_params` returns every parameter as a dict, to
+store with your data or in a file, and `PulsePalDevice.import_params`
+programs the device with one. The device's microSD card holds settings
+files too, which its joystick menu can load:
+`PulsePalDevice.save_settings_file`.
 
 ## Further reading
 
@@ -112,8 +123,13 @@ import serial
 from . import _common
 from ._common import ChannelSettings, PulsePalError, to_bool, to_name
 
-__all__ = ["PulsePalDevice", "DeviceInfo", "TRIGGER_MODES", "CUSTOM_TRAIN_TARGETS"]
+__all__ = ["PulsePalDevice", "DeviceInfo", "TRIGGER_MODES", "CUSTOM_TRAIN_TARGETS", "MAX_TIME"]
 __docformat__ = "google"
+
+MAX_TIME = 9999.9999
+"""The longest time parameter or custom pulse time, in seconds: the most
+the device's joystick menu shows and edits (four digits before the
+point)."""
 
 TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync")
 """Names of the trigger modes, in order of their code on the device (0-3).
@@ -241,8 +257,13 @@ class DeviceInfo:
     and shortest time between custom pulses, in microseconds.
 
     Two timer cycles: a trigger channel reads its input once per cycle, so
-    a pulse must last two cycles to be detected reliably.
+    a pulse must last two cycles to be detected reliably. Custom pulse
+    times are multiples of it.
     """
+
+    max_time: float = MAX_TIME
+    """Longest time parameter or custom pulse time, in seconds. See
+    `MAX_TIME`."""
 
 
 def _channel_setting(name, doc):
@@ -295,7 +316,8 @@ class PulsePalDevice:
 
     The attributes below named after Pulse Pal parameters are lists
     indexed by channel number, with index 0 unused (see "Parameters"
-    above). `print(P)` shows them all.
+    above). `print(P)` shows them all, and `PulsePalDevice.export_params`
+    returns them as a dict.
     """
 
     port: "serial.Serial"
@@ -467,8 +489,8 @@ class PulsePalDevice:
     ```python
     P.trigger_mode[2] = "Param Sync"   # sent at once
     with P.batch():
-        P.phase1_voltage = 2.5
-        P.phase1_duration = 0.002
+        P.phase1_voltage[1] = 2.5
+        P.phase1_duration[1] = 0.002
     # Stored by the device: the next rising edge on trigger channel 2 applies it
     ```
     """)
@@ -690,7 +712,7 @@ class PulsePalDevice:
         ```python
         with P.batch():
             P.phase1_voltage = [5, 5, 2.5, 2.5]
-            P.phase1_duration = 0.002
+            P.phase1_duration[3] = 0.002
         ```
 
         In param sync mode, the device stores the parameters for the next
@@ -764,6 +786,52 @@ class PulsePalDevice:
             # first. See PulsePalDevice.trigger_mode.
             self._send_trigger_modes(["Normal"] * 2, "set_default_params()")
         self._send_sync()
+
+    def export_params(self):
+        """Return every parameter, as a dict of plain lists.
+
+        Keyed by parameter name (`DeviceInfo.output_parameter_names`, then
+        `"trigger_mode"`), with one value per channel and no unused index
+        0. It holds only numbers, booleans and names, so it can be saved
+        with `json` and logged with your data, to record exactly what the
+        device played. `PulsePalDevice.import_params` programs it again.
+
+        ```python
+        import json
+        with open("trial_params.json", "w") as f:
+            json.dump(P.export_params(), f)
+        ```
+        """
+        names = [*self.info.output_parameter_names, "trigger_mode"]
+        return {name: list(getattr(self, name))[1:] for name in names}
+
+    def import_params(self, params):
+        """Program the device with parameters exported by `PulsePalDevice.export_params`.
+
+        All of them are checked first, and then sent in one command, as
+        at the end of a `PulsePalDevice.batch` block: in param sync mode,
+        the device stores them for the next sync edge. Parameters missing
+        from `params` keep their values.
+
+        Args:
+            params: A dict of parameter name to one value per channel (a
+                list, tuple or NumPy array), as `export_params` returns.
+
+        Raises:
+            PulsePalError: If a name is not a parameter, or a value is
+                invalid. Nothing is sent, and the parameters keep the
+                values they had.
+        """
+        names = {*self.info.output_parameter_names, "trigger_mode"}
+        unknown = [name for name in params if name not in names]
+        if unknown:
+            raise PulsePalError(
+                f"import_params(): unknown parameter(s) {', '.join(map(repr, unknown))}. Valid names are "
+                f"{', '.join(self.info.output_parameter_names)} and trigger_mode."
+            )
+        with self.batch():
+            for name, values in params.items():
+                setattr(self, name, values)
 
     def set_output_param(self, param_name, channel, value):
         """Program an output channel parameter on the device at once.
@@ -1033,8 +1101,9 @@ class PulsePalDevice:
                 `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
                 4 on Pulse Pal 3).
             pulse_times: Pulse onset times, in seconds, relative to the
-                start of the train. Accepts a list, tuple or NumPy
-                array.
+                start of the train, increasing. Each is a multiple of
+                `DeviceInfo.min_pulse_width_us` (100 us), from 0 to
+                `MAX_TIME`. Accepts a list, tuple or NumPy array.
             pulse_voltages: Voltage of each pulse, in volts [-10, 10].
                 Must be the same length as `pulse_times`.
 
@@ -1042,9 +1111,9 @@ class PulsePalDevice:
             PulsePalError: If `custom_train_id` is out of range,
                 `pulse_times` and `pulse_voltages` differ in length,
                 there are more pulses than
-                `DeviceInfo.max_custom_pulses`, a pulse time is less
-                than `DeviceInfo.min_pulse_width_us` after the one before
-                it (after rounding to the device's timer cycle), or the
+                `DeviceInfo.max_custom_pulses`, a pulse time is not a
+                multiple of `DeviceInfo.min_pulse_width_us`, is out of
+                range or is not later than the one before it, or the
                 device does not acknowledge the command.
         """
         pulse_times = self._as_list(pulse_times)
@@ -1055,7 +1124,7 @@ class PulsePalDevice:
             )
 
         pulse_times_cycles = [
-            self._seconds_to_cycles(pulse_time, "pulse_times")
+            self._custom_time_cycles(pulse_time, "pulse_times")
             for pulse_time in pulse_times
         ]
         pulse_voltage_bits = [
@@ -1100,7 +1169,8 @@ class PulsePalDevice:
             custom_train_id: Custom train to load, from 1 to
                 `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
                 4 on Pulse Pal 3).
-            pulse_width: Sampling period, in seconds. Each voltage is
+            pulse_width: Sampling period, in seconds: a multiple of
+                `DeviceInfo.min_pulse_width_us` (100 us). Each voltage is
                 held for this long.
             pulse_voltages: Waveform samples, in volts [-10, 10].
                 Accepts a list, tuple or NumPy array.
@@ -1108,12 +1178,13 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
                 are more samples than `DeviceInfo.max_custom_pulses`,
-                `pulse_width` rounds to less than
-                `DeviceInfo.min_pulse_width_us`, or the device does not
+                `pulse_width` is not a positive multiple of
+                `DeviceInfo.min_pulse_width_us`, the last sample would
+                start after `MAX_TIME`, or the device does not
                 acknowledge the command.
         """
         pulse_voltages = self._as_list(pulse_voltages)
-        pulse_width_cycles = self._seconds_to_cycles(pulse_width, "pulse_width")
+        pulse_width_cycles = self._custom_time_cycles(pulse_width, "pulse_width")
         pulse_times = [pulse_width_cycles * i for i in range(len(pulse_voltages))]
         pulse_voltage_bits = [
             self._volts_to_bits(voltage, "pulse_voltages")
@@ -1180,47 +1251,73 @@ class PulsePalDevice:
         bits = 0x0F if channels is None else _common.channel_bits(channels)
         self._write_serial((self._OP_MENU_BYTE, 98, bits), "uint8")
 
-    def sd_settings(self, settings_file_name, op):
-        """Save, load, or delete a settings file on the microSD card.
+    def save_settings_file(self, file_name):
+        """Save the parameters to a settings file on the device's microSD card.
 
-        A settings file holds a complete Pulse Pal program, so that it
-        can be recalled later from software or from the device's front
-        panel. Loading a file also refreshes the local copy of the
-        parameters, via `PulsePalDevice.sync_from_device`.
+        A settings file holds a complete Pulse Pal program, which can be
+        loaded later with `PulsePalDevice.load_settings_file` or from the
+        device's joystick menu. A file of the same name is replaced. To
+        keep parameters on this computer instead, see
+        `PulsePalDevice.export_params`.
 
         ```python
-        P.sd_settings("MyProtocol.pps", "save")
+        P.save_settings_file("MyProtocol.pps")
         ```
 
         Args:
-            settings_file_name: Settings file name, at most 15 ASCII
-                characters including the required `.pps` extension.
-            op: `"save"`, `"load"`, or `"delete"`.
+            file_name: At most 15 ASCII characters, ending in `.pps`.
 
         Raises:
-            PulsePalError: If the file name has no `.pps` extension or
-                is too long, `op` is not one of the three operations, or
-                the device does not acknowledge the command. A load that
-                fails leaves the device on its own default parameters
-                (not the ones `set_default_params` sets), and the local
-                copy is read back from the device before the error is
-                raised.
+            PulsePalError: If the file name is invalid, or the device does
+                not acknowledge the command.
         """
-        if ".pps" not in settings_file_name:
-            raise PulsePalError(
-                "The file name must have a valid .pps extension."
-            )
-        op_byte_by_name = {"save": 1, "load": 2, "delete": 3}
-        try:
-            op_byte = op_byte_by_name[str(op).lower()]
-        except KeyError as exc:
-            raise PulsePalError(
-                "File op must be: 'save', 'load' or 'delete'."
-            ) from exc
+        self._settings_file_op(file_name, 1, "save_settings_file()")
 
-        filename_bytes = settings_file_name.encode("ascii")
-        if len(filename_bytes) > 15:
-            raise PulsePalError("settings_file_name is too long.")
+    def load_settings_file(self, file_name):
+        """Load a settings file from the device's microSD card.
+
+        The device plays the program in the file, and the parameters are
+        read back into this object (see `PulsePalDevice.sync_from_device`).
+
+        Args:
+            file_name: The file's name, ending in `.pps`, as saved by
+                `PulsePalDevice.save_settings_file` or the joystick menu.
+
+        Raises:
+            PulsePalError: If the file name is invalid, or the device could
+                not load the file. A load that fails leaves the device on
+                its own default parameters (not the ones
+                `set_default_params` sets), and they are read back into
+                this object before the error is raised.
+        """
+        self._settings_file_op(file_name, 2, "load_settings_file()")
+
+    def delete_settings_file(self, file_name):
+        """Delete a settings file from the device's microSD card.
+
+        Args:
+            file_name: The file's name, ending in `.pps`.
+
+        Raises:
+            PulsePalError: If the file name is invalid, or the device does
+                not acknowledge the command.
+        """
+        self._settings_file_op(file_name, 3, "delete_settings_file()")
+
+    def _settings_file_op(self, file_name, op_byte, context):
+        """Save (op_byte 1), load (2) or delete (3) a settings file, with op 90."""
+        valid = (
+            isinstance(file_name, str)
+            and all(32 <= ord(character) <= 126 for character in file_name)  # Printable ASCII
+            and file_name.lower().endswith(".pps")
+            and 4 < len(file_name) <= 15
+        )
+        if not valid:
+            raise PulsePalError(
+                f"{context}: the file name must be 1 to 11 ASCII characters followed by .pps, "
+                f"e.g. 'Protocol1.pps'. Received {file_name!r}."
+            )
+        filename_bytes = file_name.encode("ascii")
         self._write_serial(
             (self._OP_MENU_BYTE, 90, op_byte, len(filename_bytes)),
             "uint8",
@@ -1230,31 +1327,31 @@ class PulsePalDevice:
         if self.info.firmware_version > 21:
             # Sent after the file operation has finished. A refused load leaves the device on
             # its default parameters, so the local copy is read back first.
-            self._read_ack(
-                "sd_settings()",
-                on_refusal=self.sync_from_device if op_byte == 2 else None,
-            )
+            self._read_ack(context, on_refusal=self.sync_from_device if op_byte == 2 else None)
         elif op_byte == 2:
             time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
         if op_byte == 2:
             self.sync_from_device()
 
-    def format_microsd(self, timeout=30):
+    def format_microsd(self, *, confirm=True, timeout=30):
         """Format the device's microSD card.
 
         Erases every settings file stored on the device and resets its
-        parameters to the defaults. The user is prompted at the console
-        to confirm before anything is erased.
+        parameters to the defaults. By default, asks at the console for
+        confirmation first; a script that runs on its own, or an AI agent,
+        passes `confirm=False`.
 
         Requires Pulse Pal hardware v3 or newer.
 
         Args:
+            confirm: If `True`, ask at the console before anything is
+                erased. If `False`, format at once.
             timeout: Seconds to wait for the device to report that
                 formatting has finished.
 
         Returns:
-            `None` once the card has been formatted, or an empty string
-            if the user declines the confirmation prompt.
+            `True` once the card has been formatted, or `False` if the
+            user declines the confirmation prompt.
 
         Raises:
             PulsePalError: If the connected hardware is older than v3, if
@@ -1266,16 +1363,15 @@ class PulsePalDevice:
                 "format_microsd() requires hardware v3 or newer."
             )
 
-        print("*** Pulse Pal microSD Formatter ***")
-        print("This will format Pulse Pal's microSD card,")
-        print("erase all settings files on the device")
-        print("and reset all parameters to defaults.")
-
-        reply = input("Do you want to continue (y/n)")
-
-        if reply.strip().lower() != "y":
-            print("Choice confirmed - microSD Card NOT formatted.")
-            return ""
+        if to_bool(confirm, "confirm"):
+            print("*** Pulse Pal microSD Formatter ***")
+            print("This will format Pulse Pal's microSD card,")
+            print("erase all settings files on the device")
+            print("and reset all parameters to defaults.")
+            reply = input("Do you want to continue (y/n)")
+            if reply.strip().lower() != "y":
+                print("Choice confirmed - microSD Card NOT formatted.")
+                return False
 
         self._write_serial((self._OP_MENU_BYTE, 97), "uint8")
 
@@ -1306,7 +1402,7 @@ class PulsePalDevice:
                 "Pulse Pal did not report the result of formatting "
                 f"its microSD card within {timeout} s."
             )
-        confirm = message[line_end + 1]
+        confirm_byte = message[line_end + 1]
 
         text = bytes(message[:flag_index]).decode(
             "ascii", errors="replace"
@@ -1318,11 +1414,11 @@ class PulsePalDevice:
         for name, value in _DEFAULT_OUTPUT_VALUES.items():
             getattr(self, name)._store([value] * 4)
         self._trigger_mode._store(["Normal"] * 2)
-        if confirm != 1:
+        if confirm_byte != 1:
             raise PulsePalError(
                 "Pulse Pal could not format its microSD card."
             )
-        return None
+        return True
 
     def gui(self, block=None, theme=None):
         """Open the Pulse Pal parameter GUI, or focus an open one.
@@ -1474,7 +1570,8 @@ class PulsePalDevice:
         raise PulsePalError(f"Unknown trigger parameter: {param_name!r}.")
 
     def _normalize_output_value(self, code, value, channel):
-        """Check a value for an output parameter, and return it as the parameter's list holds it.
+        """Check a value for an output parameter, and return it as the parameter's list holds it:
+        a time as the device plays it, rounded to its timer cycle.
 
         Raises PulsePalError, before anything is sent, for a value the device cannot play. The
         device refuses most of them too, but it also resets them (see validateOutputParams() in
@@ -1500,7 +1597,7 @@ class PulsePalDevice:
                     f"({self._MIN_PULSE_CYCLES} cycles of the device's {self.info.cycle_period_us} us "
                     f"timer), so that trigger channels can detect the pulses. Received {value!r}."
                 )
-            return float(value)
+            return self._cycles_to_seconds(cycles)  # The time the device plays
         if kind == "train_id":
             self._check_whole_number(value, label, 0, self.info.n_custom_pulse_trains)
             return int(value)
@@ -1788,10 +1885,9 @@ class PulsePalDevice:
             )
         # The device plays each pulse until the next one's time, so a time
         # that is not later than the one before it would freeze the output
-        # for the rest of the train, and one only a cycle later would play
-        # a pulse too short for a trigger channel to detect (see
-        # _MIN_PULSE_CYCLES). The check is on the times the device will
-        # receive, after rounding to its timer cycles.
+        # for the rest of the train. Times are multiples of _MIN_PULSE_CYCLES
+        # (see _custom_time_cycles()), so increasing times are far enough
+        # apart for a trigger channel to detect each pulse.
         for i in range(1, n_pulses):
             if (pulse_times_cycles[i] - pulse_times_cycles[i - 1]
                     < self._MIN_PULSE_CYCLES):
@@ -1804,6 +1900,11 @@ class PulsePalDevice:
                     f"and pulse {i} is at "
                     f"{self._cycles_to_seconds(pulse_times_cycles[i - 1])} s."
                 )
+        if n_pulses and pulse_times_cycles[-1] > self._max_time_cycles():
+            raise PulsePalError(
+                f"{context}: the last pulse starts at {self._cycles_to_seconds(pulse_times_cycles[-1])} s. "
+                f"Pulse times must be at most {self.info.max_time} s."
+            )
 
         if self.info.firmware_version > 21:
             header = (self._OP_MENU_BYTE, 95, train_id - 1)
@@ -1957,7 +2058,7 @@ class PulsePalDevice:
 
         Rounds to the nearest cycle, halves to even (round()), as the MATLAB and C++ classes do:
         125 us, 2.5 cycles, is 2 cycles in all three. Raises PulsePalError for a time that is
-        negative, not a number, or too long for the device.
+        negative, not a number, or longer than DeviceInfo.max_time.
         """
         try:
             seconds = float(value)
@@ -1966,11 +2067,32 @@ class PulsePalDevice:
         if isinstance(value, (bool, np.bool_, str)) or not (math.isfinite(seconds) and seconds >= 0):
             raise PulsePalError(f"{name} must be a time of 0 s or more. Received {value!r}.")
         cycles = int(round(seconds * float(self.info.cycle_frequency)))
-        if cycles > 2**32 - 1:
+        if cycles > self._max_time_cycles():
             raise PulsePalError(
-                f"{name} is too long for the device ({2**32 - 1} cycles at most). Received {value!r}."
+                f"{name} must be at most {self.info.max_time} s, the longest time the device's screen "
+                f"shows. Received {value!r}."
             )
         return cycles
+
+    def _max_time_cycles(self):
+        """DeviceInfo.max_time in timer cycles: 199999998 on a 50 us timer."""
+        return int(round(self.info.max_time * float(self.info.cycle_frequency)))
+
+    def _custom_time_cycles(self, value, name):
+        """Convert a custom pulse time or sampling period to timer cycles.
+
+        It must be a whole number of DeviceInfo.min_pulse_width_us (100 us), to the nearest
+        microsecond, as in the MATLAB class. A time between two steps is refused, not rounded
+        as the time parameters are, so that a train plays as it was written.
+        """
+        self._seconds_to_cycles(value, name)  # Checks that it is a time the device can play
+        microseconds = int(round(float(value) * 1e6))
+        step_us = int(self.info.min_pulse_width_us)
+        if microseconds % step_us:
+            raise PulsePalError(
+                f"{name} must be multiples of {step_us} us ({step_us / 1e6:g} s). Received {value!r}."
+            )
+        return microseconds // int(self.info.cycle_period_us)
 
     def _cycles_to_seconds(self, value):
         """Convert hardware timer cycle counts to seconds."""

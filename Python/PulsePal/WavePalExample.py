@@ -87,6 +87,6 @@ W.set_fixed_voltage(3, 1.5)
 # card did not deliver in time) after an experiment
 print(W.status())
 
-# Closing the port leaves the device as it is, so TTL triggers keep playing
-# the loaded waveforms.
+# Closing the port stops playback, as on Pulse Pal. The device keeps its
+# settings and waveforms, so TTL triggers still play them.
 W.close()

@@ -17,7 +17,7 @@ files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse 
 | `/Firmware/tools/` | `build_check.py`: compiles both hardware versions (or Wave Pal and Synth Pal, with `--sketch wavepal` and `--sketch synthpal`), and compares compiled functions between git revisions |
 | `/Firmware/Old/` | Archived firmware, no longer developed |
 | `/Python/PulsePal/` | The `pulsepal` Python package (`pulsepal/`: `pulse_pal.py`, `wave_pal.py`, `synth_pal.py`, the GUI in `gui.py`, shared code in `_common.py`), examples and offline tests |
-| `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/Legacy/` holds the older function-based interface |
+| `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/tests/testPulsePalDeviceOffline.m` tests it against a simulated device. `/MATLAB/Legacy/` holds the older function-based interface |
 | `/MATLAB/@WavePalDevice/` | MATLAB class for Wave Pal. `/MATLAB/tests/testWavePalDevice.m` tests it on a device |
 | `/MATLAB/@SynthPalDevice/` | MATLAB class for Synth Pal. `/MATLAB/tests/testSynthPalDevice.m` tests it on a device |
 | `/c++/` | C++ class (serial port via libserialport) and offline tests. `/c++/legacy/` holds the previous version, which also supports Pulse Pal 1 |
@@ -56,20 +56,28 @@ The Python classes (`/Python/PulsePal/pulsepal/`) and the MATLAB classes (`/MATL
 share these conventions. Keep them in new code.
 
 - **One way to use all six.** Settings are properties indexed by channel number (Python lists
-  with index 0 unused, MATLAB 1x4 arrays), and assigning one programs the device at once. With
+  with index 0 unused, MATLAB 1x4 arrays), and assigning one programs the device at once.
+  Assigning a whole setting takes one value per channel: a single value (`P.phase1Voltage = 5`)
+  raises an error, because it does not say which channels it is meant for, so scripts always
+  address channels (`P.phase1Voltage(1) = 5`, `P.phase1Voltage(:) = 5`). With
   `auto_sync` / `autoSync` off (Pulse Pal and Synth Pal), assignments stay local until
   `sync_to_device()` / `syncToDevice()`, which works whatever auto_sync is; Python's `batch()`
   block does both. `trigger(channels)` and `stop(channels)` take one channel number or several
   as the language's array (a list, tuple or NumPy array; `[1 3]`), nothing else.
   `set_default_params()` / `setDefaultParams()` programs the defaults, whatever auto_sync is.
   Modes are names (case-insensitive) and on/off settings are booleans; Pulse Pal's classes also
-  take the integer codes of older clients. `info` has the same fields in both languages. A user
-  who learns one class, or moves a script between languages, should find the others the same.
+  take the integer codes of older clients. `info` has the same fields in both languages. Methods
+  that program the device return nothing: a failure raises an error. Closing a connection stops
+  the outputs on all three firmwares (op 81). A user who learns one class, or moves a script
+  between languages, should find the others the same.
 
 - **Check values before sending.** A value the device cannot play raises an error, and
   nothing is sent. The device refuses most such values too, but it then resets them, so the
   client's copy would no longer describe what the device plays. When the device does refuse a
-  value, the Python `PulsePalDevice` reads the parameter back (op 93).
+  value, the Python `PulsePalDevice` reads the parameter back (op 93). Pulse Pal's limits, which
+  all three Pulse Pal classes check, are listed in "Value limits" in `/Firmware/PROTOCOL.md`;
+  change them there and in every class together. The Pulse Pal classes hold a time as the device
+  plays it, rounded to the timer cycle, and store values read back from the device as they are.
 - **Round halfway values to the even integer** when converting to timer cycles, DAC codes,
   microseconds or microvolts, as Python's `round()` and the C++ class do. MATLAB's `round()`
   and integer casts round halves away from zero, so the MATLAB classes call
@@ -117,6 +125,9 @@ python Firmware/tools/build_check.py --compare HEAD
 # Python client: check the bytes it sends, using a fake serial port.
 # uv creates the environment (numpy, pyserial) on first use; see /Python/PulsePal/README.md
 cd Python/PulsePal && uv run python tests/test_protocol.py
+
+# MATLAB client: the same, against a simulated device (/MATLAB/tests/SimulatedPulsePalPort.m)
+matlab -batch "addpath('MATLAB', 'MATLAB/tests'); testPulsePalDeviceOffline"
 
 # Wave Pal: compile its firmware, and check the bytes its Python class sends
 python Firmware/tools/build_check.py --sketch wavepal

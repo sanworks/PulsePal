@@ -137,7 +137,7 @@ assert(isequal(W.triggerMode, {'Toggle', 'Normal'}), 'trigger mode name not norm
 W.triggerMode = {'Gated', 'Master'};
 assert(isequal(W.triggerMode, {'Gated', 'Master'}), 'trigger modes not set');
 for mode = W.info.triggerModes
-    W.triggerMode = mode{1};
+    W.triggerMode(:) = mode;
     W.trigger(1);
     pause(0.5);
     W.trigger(1);
@@ -204,10 +204,14 @@ expectError(@() setProperty(W, 'samplingRate', 100001));
 expectError(@() setProperty(W, 'samplingRate', 44100.5));
 expectError(@() setProperty(W, 'outputRange', '0V:12V'));
 expectError(@() setProperty(W, 'loopMode', [true false]));
-expectError(@() setProperty(W, 'loopMode', 2));
-expectError(@() setProperty(W, 'loopDuration', -1));
-expectError(@() setProperty(W, 'triggerMode', 'Restart'));
-expectError(@() setProperty(W, 'triggerMode', 'Param Sync')); % Pulse Pal firmware only
+expectError(@() setProperty(W, 'loopMode', [2 0 0 0]));
+expectError(@() setProperty(W, 'loopDuration', [-1 0 0 0]));
+expectError(@() setProperty(W, 'triggerMode', {'Restart', 'Normal'}));
+expectError(@() setProperty(W, 'triggerMode', {'Param Sync', 'Normal'})); % Pulse Pal firmware only
+% A single value does not say which channels it is meant for
+expectError(@() setProperty(W, 'loopMode', true));
+expectError(@() setProperty(W, 'loopDuration', 1));
+expectError(@() setProperty(W, 'triggerMode', 'Toggle'));
 expectError(@() setProperty(W, 'triggerMode', {'Normal', 'Normal', 'Normal', 'Normal'})); % Two trigger channels
 expectError(@() setProperty(W, 'linkTriggerChannel1', [1 0 2 0]));
 assert(W.samplingRate ~= 100001 && ~any(W.loopMode) && strcmp(W.outputRange, '-10V:10V'), ...
@@ -311,13 +315,13 @@ W.(name) = value;
 end
 
 function resetLoops(W)
-W.loopMode = false;
-W.loopDuration = 0;
+W.loopMode = false(1,4);
+W.loopDuration = zeros(1,4);
 end
 
 function setNormalMode(W)
 W.stop();
-W.triggerMode = 'Normal';
+W.triggerMode = {'Normal', 'Normal'};
 end
 
 function setRange(W, rangeName)

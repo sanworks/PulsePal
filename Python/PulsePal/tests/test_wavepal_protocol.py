@@ -321,11 +321,17 @@ def test_channel_settings_are_indexed_by_channel_number():
     assert device.loop_mode == [None, True, False, False, True]
     device.loop_mode = [False] * 4           # 4 values: channels 1-4
     device.loop_mode = [None, True, False, True, False]  # 5 values: index 0 unused
-    device.loop_mode = False                 # one value for all channels
+    device.loop_mode = np.zeros(4, dtype=bool)  # A NumPy array
     assert fake.writes[-1] == command("O", bytes(4))
     assert all(type(v) is bool for v in device.loop_mode[1:])
 
     fake.writes.clear()
+    # A single value does not say which channels it is meant for (see "One way to use all six" in
+    # /AGENTS.md)
+    for name, value in (("loop_mode", False), ("loop_duration", 0), ("trigger_mode", "Normal"),
+                        ("link_trigger_channel1", True)):
+        error = expect_error(setattr, device, name, value)
+        assert f"{name}[1] = " in str(error), error
     expect_error(device.loop_mode.__setitem__, 0, True)
     expect_error(device.loop_mode.__setitem__, slice(1, 3), [True])
     expect_error(setattr, device, "loop_mode", [True, False])
@@ -348,7 +354,7 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     device, fake = connect()
     device.trigger_mode[2] = "gated"
     device.trigger_mode = ["Toggle", "MASTER"]
-    device.trigger_mode = "Normal"
+    device.trigger_mode = ["Normal", "Normal"]
     assert fake.writes == [
         command("T", bytes([0, 2])),
         command("T", bytes([1, 4])),
@@ -426,8 +432,8 @@ def test_deleting_the_device_closes_its_port_at_once():
 
 
 def test_close_sends_the_disconnect_op_once():
-    """Op 81 puts the device's own name back on its screen. Unlike Pulse Pal's op 81,
-    it does not stop playback, and nothing else is sent (e.g. no stop op)."""
+    """Op 81 stops playback, as Pulse Pal's op 81 does, and puts the device's own name back
+    on its screen. Nothing else is sent: the firmware stops the channels itself."""
     device, fake = connect()
     device.close()
     device.close()

@@ -108,6 +108,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define MIN_PULSE_CYCLES 2 // Shortest phase, inter-pulse interval and train duration the joystick menu sets, in timer cycles
                            // (100us). A trigger channel reads its input once per cycle, so a pulse from another Pulse Pal
                            // must last 2 cycles to be detected reliably. The MATLAB, Python and C++ classes use the same limit.
+#define MAX_TIME_CYCLES 199999998 // Longest time the joystick menu sets, in timer cycles: 9999.9999s, the most its time editor
+                                  // holds (8 digits in 100us steps, 4 before the point). The MATLAB, Python and C++ classes
+                                  // use the same limit. Times sent over USB are not checked against it.
 
 
 #define TriggerLevel 0  // Trigger line level configuration. This defines the logic level when the trigger is activated.
@@ -425,14 +428,14 @@ const OutputParam outputParams[] = {
   {"<Biphasic Pulse>", IsBiphasic,         PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Phase1 Voltage>", Phase1Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    false},
   {"<Phase2 Voltage>", Phase2Voltage,      PARAM_TYPE_UINT16, UNITS_VOLTS,          0, 65535,    true},
-  {"<Phase1Duration>", Phase1Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
-  {"<InterPhaseTime>", InterPhaseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, true},
-  {"<Phase2Duration>", Phase2Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, true},
-  {"<Pulse Interval>", InterPulseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
-  {"<Burst Duration>", BurstDuration,      PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
-  {"<Burst Interval>", BurstInterval,      PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
-  {"<Train Duration>", PulseTrainDuration, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, 72000000, false},
-  {"< Train Delay  >", PulseTrainDelay,    PARAM_TYPE_UINT32, UNITS_TIME,           0, 72000000, false},
+  {"<Phase1Duration>", Phase1Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, MAX_TIME_CYCLES, false},
+  {"<InterPhaseTime>", InterPhaseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           0, MAX_TIME_CYCLES, true},
+  {"<Phase2Duration>", Phase2Duration,     PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, MAX_TIME_CYCLES, true},
+  {"<Pulse Interval>", InterPulseInterval, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, MAX_TIME_CYCLES, false},
+  {"<Burst Duration>", BurstDuration,      PARAM_TYPE_UINT32, UNITS_TIME,           0, MAX_TIME_CYCLES, false},
+  {"<Burst Interval>", BurstInterval,      PARAM_TYPE_UINT32, UNITS_TIME,           0, MAX_TIME_CYCLES, false},
+  {"<Train Duration>", PulseTrainDuration, PARAM_TYPE_UINT32, UNITS_TIME,           MIN_PULSE_CYCLES, MAX_TIME_CYCLES, false},
+  {"< Train Delay  >", PulseTrainDelay,    PARAM_TYPE_UINT32, UNITS_TIME,           0, MAX_TIME_CYCLES, false},
   {"<Link Trigger 1>", TriggerAddress[0],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Link Trigger 2>", TriggerAddress[1],  PARAM_TYPE_BYTE,   UNITS_OFF_ON,         0, 1,        false},
   {"<Custom Train# >", CustomTrainID,      PARAM_TYPE_BYTE,   UNITS_INDEX,          0, N_CUSTOM_PULSE_TRAINS, false},

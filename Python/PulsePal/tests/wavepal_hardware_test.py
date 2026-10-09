@@ -152,9 +152,9 @@ def test_four_channels_at_100khz(W, report, seconds=25):
     codes = {}
     for channel in (1, 2, 3, 4):
         codes[channel] = load(W, channel, random_waveform(W.info.max_samples))
-    W.loop_mode = True
+    W.loop_mode = [True] * 4
     n_played = int(seconds * W.actual_sampling_rate)
-    W.loop_duration = n_played / W.actual_sampling_rate
+    W.loop_duration = [n_played / W.actual_sampling_rate] * 4
     try:
         underruns_before = W.status().underruns
         W.status()  # Reset the longest interrupt
@@ -168,8 +168,8 @@ def test_four_channels_at_100khz(W, report, seconds=25):
                "of 10 us, no underruns")
         assert longest < 10, "the interrupt takes longer than the sample period"
     finally:
-        W.loop_mode = False
-        W.loop_duration = 0
+        W.loop_mode = [False] * 4
+        W.loop_duration = [0] * 4
 
 
 def test_loading_while_other_channels_play(W, report):
@@ -197,7 +197,7 @@ def test_loading_while_other_channels_play(W, report):
             if n_underruns == 0:  # An underrun holds samples, so the sum could not match
                 check_played(W, channel, codes[channel], played[channel])
     finally:
-        W.loop_mode = False
+        W.loop_mode = [False] * 4
 
 
 class Skipped(Exception):
@@ -217,9 +217,9 @@ def open_driver(port):
     """The driving Pulse Pal, set up for single positive pulses on output channel 1."""
     D = PulsePalDevice(port)
     with D.batch():
-        D.phase1_voltage = 4
-        D.inter_pulse_interval = 0.001
-        D.link_trigger_channel1 = False
+        D.phase1_voltage = [4] * 4
+        D.inter_pulse_interval = [0.001] * 4
+        D.link_trigger_channel1 = [False] * 4
     return D
 
 

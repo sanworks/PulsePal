@@ -65,6 +65,7 @@ def make_device(firmware_version=22, hardware_version=3, n_trains=4, max_pulses=
     device.info.hardware_version = hardware_version
     device.info.cycle_frequency = 20000
     device.info.cycle_period_us = 50
+    device.info.min_pulse_width_us = 100
     device.info.n_custom_pulse_trains = n_trains
     device.info.max_custom_pulses = max_pulses
     if not device._has_param_sync():
@@ -137,7 +138,7 @@ def test_assigning_a_parameter_programs_the_device():
     device = make_device()
     device.phase1_voltage[2] = 7
     device.inter_pulse_interval[1:5] = [0.2] * 4
-    device.phase1_duration = 0.002                 # One value for every channel
+    device.phase1_duration = [0.002] * 4           # The whole list
     device.is_biphasic[3] = True
     device.trigger_mode[2] = "Toggle"
     assert device.port.writes == [
@@ -167,7 +168,7 @@ def test_auto_sync_off_keeps_assignments_until_sync_to_device():
     device.auto_sync = False
     device.phase1_voltage[1] = 2.5
     device.custom_train_target[2] = "Bursts"
-    device.trigger_mode = "Gated"
+    device.trigger_mode = ["Gated", "Gated"]
     assert device.port.writes == []
     device.sync_to_device()
     assert len(device.port.writes) == 1 and device.port.writes[0][:2] == bytes([OP_MENU_BYTE, 92])
@@ -207,7 +208,7 @@ def test_a_failed_batch_sends_nothing_and_restores_the_parameters():
 def test_set_default_params_programs_the_device_with_auto_sync_off():
     device = make_device()
     device.auto_sync = False
-    device.phase1_voltage = 1
+    device.phase1_voltage = [1] * 4
     device.set_default_params()
     assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 128, 0, 0])
     assert device.port.writes[1][:2] == bytes([OP_MENU_BYTE, 92]) and len(device.port.writes) == 2
@@ -255,6 +256,49 @@ def test_parameter_lists_are_indexed_by_channel_number():
     device.phase1_voltage = [None, 1, 2, 3, 4]      # Index 0 unused, as the list prints
     assert device.phase1_voltage == [None, 1, 2, 3, 4]
 
+
+def test_a_single_value_for_a_whole_parameter_is_refused():
+    """A single value does not say which channels it is meant for, so the whole list takes one
+    value per channel, in every class (see "One way to use all six" in /AGENTS.md)."""
+    device = make_device()
+    for name, value in (("phase1_voltage", 5), ("phase1_duration", 0.002), ("is_biphasic", True),
+                        ("trigger_mode", "Normal"), ("custom_train_target", "Pulses"),
+                        ("phase1_voltage", np.float64(5))):
+        error = expect_error(setattr, device, name, value)
+        assert f"{name}[1] = " in str(error), error
+    assert device.port.writes == []
+    device.phase1_voltage = np.array([1, 2, 3, 4])
+    assert device.phase1_voltage == [None, 1, 2, 3, 4]
+
+
+def test_times_hold_the_value_the_device_plays():
+    """Times are rounded to the device's 50 us timer cycle, and the list holds the rounded time."""
+    device = make_device()
+    device.phase1_duration[1] = 0.00012     # 2.4 cycles: plays 100 us
+    device.pulse_train_delay[2] = 0.000175  # 3.5 cycles: plays 200 us (halfway, to the even cycle)
+    device.set_output_param("burst_duration", 3, 1.00004)
+    assert device.phase1_duration[1] == 0.0001
+    assert device.pulse_train_delay[2] == 0.0002
+    assert device.burst_duration[3] == 1.00005
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 20, 20, 20)
+
+
+def test_times_are_at_most_9999_9999_seconds():
+    """The longest time the device's joystick menu shows: 199999998 cycles of 50 us."""
+    device = make_device()
+    device.pulse_train_duration[1] = 9999.9999
+    device.pulse_train_delay[1] = 9999.99992     # Rounds to 9999.9999
+    assert device.pulse_train_delay[1] == 9999.9999
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 10]) + struct.pack("<4I", 199999998, *[20000] * 3)
+    n_writes = len(device.port.writes)
+    for bad in (10000, 9999.99995, 3e5):
+        error = expect_error(device.pulse_train_duration.__setitem__, 1, bad)
+        assert "at most 9999.9999 s" in str(error), error
+    expect_error(device.send_custom_pulse_train, 1, [0, 10000], [1, 2])
+    expect_error(device.send_custom_waveform, 1, 1, [1] * 10001)  # The last sample would start at 10000 s
+    assert len(device.port.writes) == n_writes
+    device.send_custom_pulse_train(1, [0, 9999.9999], [1, 2])
+    assert device.port.writes[-1][7:15] == struct.pack("<2I", 0, 199999998)
 
 def test_print_shows_every_parameter():
     device = make_device()
@@ -370,9 +414,6 @@ def test_custom_train_rejects_times_that_do_not_increase():
     cases = [
         [0, 0.2, 0.2],          # Duplicate
         [0, 0.2, 0.1],          # Decreasing
-        [0, 0.00001],           # Distinct, but both round to cycle 0
-        [0, 0.00005, 0.0001],   # One 50 us cycle apart
-        [0, 0.0001, 0.00013],   # The last two round to 1 cycle apart
     ]
     for pulse_times in cases:
         device = make_device()
@@ -381,14 +422,32 @@ def test_custom_train_rejects_times_that_do_not_increase():
         assert device.port.writes == []
 
     device = make_device()
-    error = expect_error(device.send_custom_waveform, 1, 0.00005, [1, 2, 3])  # One 50 us cycle
+    error = expect_error(device.send_custom_waveform, 1, 0, [1, 2, 3])
     assert "must increase" in str(error)
     assert device.port.writes == []
 
+
+def test_custom_pulse_times_are_multiples_of_100_us():
+    """As in the MATLAB class: a custom pulse time or sampling period between two 100 us steps is
+    refused, not rounded."""
+    for call in (
+        lambda d: d.send_custom_pulse_train(1, [0, 0.00001], [1, 2]),
+        lambda d: d.send_custom_pulse_train(1, [0, 0.00005, 0.0001], [1, 2, 3]),   # One 50 us cycle
+        lambda d: d.send_custom_pulse_train(1, [0, 0.0001, 0.00025], [1, 2, 3]),
+        lambda d: d.send_custom_pulse_train(1, [0.00012], [1]),
+        lambda d: d.send_custom_waveform(1, 0.00005, [1, 2, 3]),
+        lambda d: d.send_custom_waveform(1, 0.00015, [1, 2, 3]),
+    ):
+        device = make_device()
+        error = expect_error(call, device)
+        assert "multiples of 100 us" in str(error), error
+        assert device.port.writes == []
+
     device = make_device()
-    device.send_custom_pulse_train(1, [0, 0.0001, 0.00025], [1, 2, 3])  # 2 and 3 cycles apart
-    device.send_custom_waveform(2, 0.0001, [1, 2, 3])
-    assert len(device.port.writes) == 2
+    device.send_custom_pulse_train(1, np.arange(5) * 0.0001 + 0.0003, [1, 2, 3, 4, 5])  # Float error is fine
+    device.send_custom_waveform(2, 0.0002, [1, 2, 3])
+    assert device.port.writes[0][7:27] == struct.pack("<5I", 6, 8, 10, 12, 14)
+    assert device.port.writes[1][7:19] == struct.pack("<3I", 0, 4, 8)
 
 
 def test_waveform_matches_an_equivalent_pulse_train():
@@ -511,6 +570,7 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     device = make_device()
     device.info.cycle_period_us = 25
     device.info.cycle_frequency = 40000
+    device.info.min_pulse_width_us = 50
     device.set_output_param("phase1_duration", 1, 0.00005)  # 2 cycles of 25 us
     device.send_custom_waveform(1, 0.00005, [1, 2, 3])
     assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2)
@@ -566,7 +626,7 @@ def test_a_refused_settings_load_reads_the_parameters_back():
     """A failed load leaves the device on its own defaults, so the local copy is read back."""
     device = make_device()
     device.port.response = bytearray(bytes([0]) + parameter_message(cycles=2))
-    expect_error(device.sd_settings, "MISSING.pps", "load")
+    expect_error(device.load_settings_file, "MISSING.pps")
     assert device.port.writes[-1] == bytes([OP_MENU_BYTE, 93])
     assert device.phase1_duration[1:5] == [0.0001] * 4
 
@@ -596,7 +656,7 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
     try:
         device = make_device()
         device.port.response = bytearray(bytes([1]) + parameter_message())
-        device.sd_settings("TEST.pps", "load")
+        device.load_settings_file("TEST.pps")
         assert sleeps == [], sleeps
         assert device.port.reads == [1, 178], device.port.reads
 
@@ -604,12 +664,57 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
         sleeps.clear()
         legacy = make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000)
         try:
-            legacy.sd_settings("TEST.pps", "load")
+            legacy.load_settings_file("TEST.pps")
         except PulsePalError:
             pass  # v21 has no op 93, so reading the parameters back is unsupported
         assert sleeps == [0.1], sleeps
     finally:
         pulse_pal.time.sleep = original_sleep
+
+
+def test_settings_files_use_op_90():
+    device = make_device()
+    device.port.response = bytearray(bytes([1, 1]) + parameter_message() + bytes([1]))
+    device.save_settings_file("Protocol1.pps")
+    device.load_settings_file("ABCDEFGHIJK.PPS")   # 15 characters
+    device.delete_settings_file("Protocol1.pps")
+    assert device.port.writes == [
+        bytes([OP_MENU_BYTE, 90, 1, 13]) + b"Protocol1.pps",
+        bytes([OP_MENU_BYTE, 90, 2, 15]) + b"ABCDEFGHIJK.PPS",
+        bytes([OP_MENU_BYTE, 93]),
+        bytes([OP_MENU_BYTE, 90, 3, 13]) + b"Protocol1.pps",
+    ]
+    for bad in ("Protocol1", "Protocol1.pps.txt", "ABCDEFGHIJKL.pps", ".pps", "Pr\u00f6tocol.pps", 5):
+        device = make_device()
+        expect_error(device.save_settings_file, bad)
+        assert device.port.writes == []
+
+
+def test_export_and_import_params():
+    """export_params() returns plain lists that json can save, and import_params() sends them in one
+    op 92."""
+    import json
+    device = make_device()
+    device.phase1_voltage[2] = 2.5
+    device.trigger_mode[1] = "Toggle"
+    params = json.loads(json.dumps(device.export_params()))
+    assert list(params) == [*device.info.output_parameter_names, "trigger_mode"]
+    assert params["phase1_voltage"] == [5, 2.5, 5, 5] and params["trigger_mode"] == ["Toggle", "Normal"]
+
+    other = make_device()
+    other.import_params(params)
+    assert len(other.port.writes) == 1 and other.port.writes[0][:2] == bytes([OP_MENU_BYTE, 92])
+    assert other.export_params() == params
+    device.sync_to_device()
+    assert other.port.writes[0] == device.port.writes[-1]  # The same parameters as the first device
+
+    # A partial set keeps the other parameters; a bad name or value changes and sends nothing
+    other.import_params({"phase1_duration": [0.002] * 4})
+    assert other.phase1_duration[1:5] == [0.002] * 4 and other.phase1_voltage[2] == 2.5
+    n_writes = len(other.port.writes)
+    expect_error(other.import_params, {"phase1_voltage": [1] * 4, "playback_mode": [False] * 4})
+    expect_error(other.import_params, {"phase1_voltage": [1] * 4, "phase2_voltage": [11] * 4})
+    assert len(other.port.writes) == n_writes and other.phase1_voltage[1:5] == [5, 2.5, 5, 5]
 
 
 class ClosablePort(FakePort):
@@ -707,7 +812,7 @@ def format_microsd_with_reply(chunks):
     pulse_pal.input = lambda prompt="": "y"  # Answers the confirmation prompt
     pulse_pal.time.sleep = lambda seconds: None
     try:
-        device.format_microsd(timeout=1)
+        assert device.format_microsd(timeout=1) is True
     finally:
         del pulse_pal.input
         pulse_pal.time.sleep = original_sleep
@@ -736,6 +841,25 @@ def test_format_microsd_reads_the_confirm_byte_sent_after_the_text():
 def test_format_microsd_raises_when_the_device_reports_failure():
     error = expect_error(format_microsd_with_reply, [b"ERROR: Format failed!\r\n", b"\x00"])
     assert "could not format" in str(error)
+
+
+def test_format_microsd_without_confirmation_does_not_wait_for_input():
+    """A script run by an AI agent has no one to answer the prompt."""
+    def no_input(prompt=""):
+        raise AssertionError("format_microsd(confirm=False) asked for input")
+
+    device = make_device()
+    device.port = ChunkedPort([b"SUCCESS: Card format complete!\r\n\x01"])
+    pulse_pal.input = no_input
+    try:
+        assert device.format_microsd(confirm=False) is True
+        assert device.port.writes == [bytes([OP_MENU_BYTE, 97])]
+        device = make_device()
+        pulse_pal.input = lambda prompt="": "n"
+        assert device.format_microsd() is False
+        assert device.port.writes == []
+    finally:
+        del pulse_pal.input
 
 
 def test_set_screen_saver_uses_op_99():

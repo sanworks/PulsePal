@@ -13,12 +13,13 @@
 %   W.loopMode(1) = true;                % Loop channel 1's waveform...
 %   W.loopDuration(1) = 3;               % ...for 3 seconds after each trigger
 %   W.triggerMode{2} = 'Toggle';         % Trigger channel 2
-%   clear W                              % Releases the port. The device keeps playing, and TTL triggers still work.
+%   clear W                              % Releases the port and stops playback. TTL triggers still play the waveforms.
 %
 % Settings are properties, and assigning one programs the device at once. Settings of the output channels are
 % 1x4 arrays with one element per channel, so W.loopMode(2) is output channel 2's loop mode; triggerMode is a 1x2
-% cell array, with one element per trigger channel, as in PulsePalDevice. A single value sets all channels, e.g.
-% W.triggerMode = 'Gated'. Voltages are in volts, within outputRange. Times are in seconds.
+% cell array, with one element per trigger channel, as in PulsePalDevice. Assigning a whole setting takes one value
+% per channel: W.loopMode = true raises an error, because a single value does not say which channels it is meant
+% for. W.loopMode(:) = true sets all four. Voltages are in volts, within outputRange. Times are in seconds.
 %
 % Triggers. triggerMode sets how each trigger channel acts on the output channels linked to it
 % (linkTriggerChannel1, linkTriggerChannel2). The first three are Pulse Pal's trigger modes:
@@ -61,7 +62,6 @@ classdef WavePalDevice < handle
     % a file, and a license block there would hide it.
 
     properties
-        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         samplingRate = 10000 % Sampling rate of all output channels, in Hz: a whole number from 1 to info.maxSamplingRate.
                              % It can change during playback. The rate played can differ slightly: see actualSamplingRate.
         outputRange = '' % Voltage range of all output channels: '0V:5V', '0V:10V', '-5V:5V' or '-10V:10V'. The smallest
@@ -78,6 +78,7 @@ classdef WavePalDevice < handle
     end
 
     properties (SetAccess = private)
+        Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device
         waveforms = cell(1,4) % 1x4 cell array of the waveforms loaded by loadWaveform(), in volts. [] if none.
                               % status() shows what the device itself holds, which can include waveforms loaded
@@ -192,11 +193,11 @@ classdef WavePalDevice < handle
             % waveform does not fit the default range.
             obj.samplingRate = 10000;
             obj.outputRange = '-10V:10V';
-            obj.loopMode = false;
-            obj.loopDuration = 0;
-            obj.triggerMode = 'Normal';
-            obj.linkTriggerChannel1 = true;
-            obj.linkTriggerChannel2 = false;
+            obj.loopMode = false(1,4);
+            obj.loopDuration = zeros(1,4);
+            obj.triggerMode = {'Normal', 'Normal'};
+            obj.linkTriggerChannel1 = true(1,4);
+            obj.linkTriggerChannel2 = false(1,4);
         end
 
         function loadWaveform(obj, channel, waveform)
@@ -338,7 +339,7 @@ classdef WavePalDevice < handle
         end
 
         function set.loopDuration(obj, durations)
-            durations = obj.expandToChannels(durations, 'loopDuration');
+            durations = obj.oneValuePerChannel(durations, 4, 'loopDuration', 'output channel');
             if ~isnumeric(durations) || ~isreal(durations) || any(~isfinite(durations)) || any(durations < 0)
                 error('loopDuration must be 0 (loop until stopped) or a positive number of seconds.')
             end
@@ -353,13 +354,13 @@ classdef WavePalDevice < handle
 
         function set.triggerMode(obj, modes)
             if ischar(modes) || (isstring(modes) && isscalar(modes))
-                modes = repmat(cellstr(modes), 1, 2);
+                obj.oneValuePerChannel({char(modes)}, 2, 'triggerMode', 'trigger channel'); % Raises the error
             elseif isstring(modes)
                 modes = cellstr(modes);
             end
             if ~iscell(modes) || numel(modes) ~= 2
-                error(['triggerMode needs one mode for both trigger channels, or a 1x2 cell array with one mode per '...
-                       'trigger channel, e.g. {''Normal'', ''Toggle''}.'])
+                error(['triggerMode needs a 1x2 cell array with one mode per trigger channel, e.g. '...
+                       '{''Normal'', ''Toggle''}.'])
             end
             matches = zeros(1,2);
             for i = 1:2
@@ -397,9 +398,9 @@ classdef WavePalDevice < handle
         end
 
         function delete(obj)
-            % Releases the serial port, and shows the device's own name on its screen again in place of
-            % "MATLAB Connected". The device keeps its settings and waveforms, and playback in progress continues,
-            % so TTL triggers keep playing the loaded waveforms.
+            % Runs on clear W or delete(W). Tells the device that MATLAB is disconnecting, which stops playback, as on
+            % Pulse Pal, and puts the device's own name back on its screen in place of "MATLAB Connected", and releases
+            % the serial port. The device keeps its settings and waveforms, so TTL triggers still play them.
             if obj.initialized
                 try
                     obj.writeCommand(obj.OpDisconnect, []);
@@ -514,19 +515,30 @@ classdef WavePalDevice < handle
             rangeName = obj.OutputRangeNames{rangeIndex};
         end
 
-        function values = expandToChannels(~, values, name)
-            % Returns one value per output channel, as a 1x4 row, from a single value or four values
-            if isscalar(values)
-                values = repmat(values, 1, 4);
-            elseif numel(values) == 4
-                values = reshape(values, 1, 4);
-            else
-                error([name ' needs one value for all channels, or one value per output channel (1x4).'])
+        function values = oneValuePerChannel(~, values, nChannels, name, channelType)
+            % Returns values as a row, after checking that there is one per channel. A single value is refused rather
+            % than copied to every channel: a script that sets one channel should say which, and one that sets them
+            % all should list them, so that it reads the same in every class and language.
+            if numel(values) == nChannels
+                values = reshape(values, 1, nChannels);
+                return
             end
+            if isscalar(values) && iscell(values)
+                example = ['''' char(values{1}) ''''];
+                error([name ' holds one name per ' channelType ', so a single name is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. W.' name '{1} = ' example ', or all ' num2str(nChannels) ', e.g. W.' ...
+                       name '(:) = {' example '}.'])
+            elseif isscalar(values)
+                example = num2str(values);
+                error([name ' holds one value per ' channelType ', so a single value is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. W.' name '(1) = ' example ', or all ' num2str(nChannels) ', e.g. W.' ...
+                       name '(:) = ' example '.'])
+            end
+            error([name ' needs one value per ' channelType ' (1x' num2str(nChannels) ').'])
         end
 
         function values = checkLogical(obj, values, name)
-            values = obj.expandToChannels(values, name);
+            values = obj.oneValuePerChannel(values, 4, name, 'output channel');
             if ~(islogical(values) || isnumeric(values)) || any(values ~= 0 & values ~= 1)
                 error([name ' values must be true or false (1 or 0).'])
             end

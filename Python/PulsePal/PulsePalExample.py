@@ -41,9 +41,11 @@ P.phase1_duration[1] = 0.001       # 1 ms long,
 P.inter_pulse_interval[1] = 0.049  # 49 ms apart (end of one to start of the next): 20 per second,
 P.pulse_train_duration[1] = 2      # for 2 seconds after each trigger
 
-# A slice sets several channels, and a single value sets all four
+# A slice sets several channels. Assigning the whole list sets all four, and
+# takes one value per channel: a single value raises an error, as it does not
+# say which channels it is meant for.
 P.inter_phase_interval[1:5] = [0.0002] * 4
-P.resting_voltage = 0
+P.resting_voltage = [0, 0, 0, 0]
 
 # Biphasic pulses on channel 2: phase 1, an interval at the resting voltage,
 # then phase 2
@@ -64,6 +66,10 @@ with P.batch():
 
 # Print every parameter
 print(P)
+
+# Every parameter as a dict, e.g. to save with your data (json.dump() writes
+# it to a file). P.import_params(params) programs it again.
+params = P.export_params()
 
 # Programming a custom pulse train
 pulse_times = [0, 0.2, 0.5, 1]  # Pulse onset times, in seconds

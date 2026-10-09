@@ -30,7 +30,7 @@ import tkinter as tk
 import weakref
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
-from .pulse_pal import CUSTOM_TRAIN_TARGETS, TRIGGER_MODES
+from .pulse_pal import CUSTOM_TRAIN_TARGETS, MAX_TIME, TRIGGER_MODES
 
 # Widget colors for each theme. The light palette matches the platform's
 # native widget colors, so light mode can keep the native ttk theme.
@@ -427,14 +427,14 @@ class PulsePalGUI:
         "resting_voltage": (-10.0, 10.0),
         "phase1_voltage": (-10.0, 10.0),
         "phase2_voltage": (-10.0, 10.0),
-        "phase1_duration": (None, 3600.0),
-        "inter_phase_interval": (0.0, 3600.0),
-        "phase2_duration": (None, 3600.0),
-        "inter_pulse_interval": (None, 3600.0),
-        "burst_duration": (0.0, 3600.0),
-        "inter_burst_interval": (0.0, 3600.0),
-        "pulse_train_duration": (None, 3600.0),
-        "pulse_train_delay": (0.0, 3600.0),
+        "phase1_duration": (None, MAX_TIME),
+        "inter_phase_interval": (0.0, MAX_TIME),
+        "phase2_duration": (None, MAX_TIME),
+        "inter_pulse_interval": (None, MAX_TIME),
+        "burst_duration": (0.0, MAX_TIME),
+        "inter_burst_interval": (0.0, MAX_TIME),
+        "pulse_train_duration": (None, MAX_TIME),
+        "pulse_train_delay": (0.0, MAX_TIME),
     }
 
     def __init__(self, device, theme=None):

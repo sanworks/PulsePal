@@ -14,18 +14,22 @@
 %
 % Parameters are properties, with one element per channel: the output channel parameters below are 1x4, so
 % P.phase1Voltage(2) belongs to output channel 2, and triggerMode is a 1x2 cell array, one element per trigger
-% channel. A single value sets every channel, e.g. P.phase1Voltage = 5. With autoSync on (the default), assigning a
-% parameter programs the device at once. With autoSync off, assignments change only this object's copy of the
-% parameters, and syncToDevice() sends all of them in one command:
+% channel. Assigning a whole parameter takes one value per channel: P.phase1Voltage = 5 raises an error, because a
+% single value does not say which channels it is meant for. P.phase1Voltage = [5 5 5 5] or P.phase1Voltage(:) = 5
+% sets all four. With autoSync on (the default), assigning a parameter programs the device at once. With autoSync
+% off, assignments change only this object's copy of the parameters, and syncToDevice() sends all of them in one
+% command:
 %   P.autoSync = false;
 %   P.phase1Voltage = [5 5 2.5 2.5];
 %   P.phase1Duration = [0.001 0.001 0.002 0.002];
 %   P.syncToDevice();
 %   P.autoSync = true;
 %
-% Units and values. Voltages are in volts, -10 to 10. Times are in seconds, rounded to the nearest cycle of the
-% device's timer (50 us). Phase durations, the inter-pulse interval and the pulse train duration are at least 100 us
-% (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's trigger channel detects reliably. On/off
+% Units and values. Voltages are in volts, -10 to 10. Times are in seconds, from 0 to 9999.9999 (info.maxTime, the
+% longest time the device's screen shows), rounded to the nearest cycle of the device's timer (50 us); the property
+% then holds the time the device plays, so 0.00012 reads back as 0.0001. Phase durations, the inter-pulse interval and
+% the pulse train duration are at least 100 us (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's
+% trigger channel detects reliably. Custom pulse times are not rounded: each must be a multiple of 100 us. On/off
 % parameters are logical (true or false; 1 and 0 work too), and modes are names, such as 'Gated' (not case sensitive;
 % the numbers older Pulse Pal software used work too). A value out of range raises an error, and nothing is sent.
 %
@@ -75,7 +79,7 @@
 %                 trigger channels out of param sync mode.
 %   P.triggerMode{2} = 'Param Sync';     % Sent at once
 %   P.autoSync = false;
-%   P.phase1Voltage = 2;
+%   P.phase1Voltage(1) = 2;
 %   P.syncToDevice();                    % Stored: trigger channel 2's next rising edge applies it
 %   P.autoSync = true;
 %
@@ -88,8 +92,11 @@
 %   syncToDevice()                       Sends every parameter to the device in one command
 %   syncFromDevice()                     Reads every parameter from the device into the properties
 %   setDefaultParams()                   Programs the default parameters
+%   exportParams()                       Returns every parameter as a struct, e.g. to save with your data;
+%                                        importParams(params) programs the device with one
 %   saveParameters(fileName)             Saves the parameters to a .mat file; loadParameters(fileName) loads them
-%   sdSettings(fileName, op)             Saves, loads or deletes a settings file on the device's microSD card
+%   saveSettingsFile(fileName)           Saves the parameters to a settings file on the device's microSD card;
+%                                        loadSettingsFile(fileName) and deleteSettingsFile(fileName)
 %   gui()                                Opens the parameter editor window
 %   setScreenSaver(state, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
 % info holds the connected device's hardware and firmware versions, and its limits.
@@ -121,9 +128,12 @@ classdef PulsePalDevice < handle
     % The class help is at the top of this file, above the license: MATLAB's help shows the first comment block in
     % a file, and a license block there would hide it.
 
-    properties
+    properties (SetAccess = private)
         Port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device: hardware and firmware versions, and its limits
+    end
+
+    properties
         autoSync = true; % true: assigning a parameter programs the device at once. false: syncToDevice() sends them all
         isBiphasic % 1x4 logical. false for monophasic pulses, true for biphasic. See "Output channel parameters" above
         phase1Voltage % 1x4, volts
@@ -154,11 +164,15 @@ classdef PulsePalDevice < handle
         nCustomPulseTrains % Number of custom pulse trains supported
         maxCustomPulses % Maximum number of custom pulses per pulse train supported
         ui % Struct with user interface handles
+        storing = false % True while values read from the device are stored, unchecked (see syncFromDevice())
     end
 
     properties (Constant, Access = private)
         CurrentFirmwareVersion = 22; % Most recent firmware version
         OpMenuByte = 213; % Byte code to access op menu
+        MaxTime = 9999.9999 % Longest time parameter or custom pulse time, in seconds: the most the device's joystick
+                            % menu shows and edits (four digits before the point), as in the Python and C++ classes
+        MaxSettingsFileNameLength = 15 % Characters, including '.pps'
         % Output parameter names in order of their parameter code, and the kind of value each takes. The codes are
         % fixed: see "Parameter codes" in /Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
         ParamNames = {...
@@ -181,7 +195,8 @@ classdef PulsePalDevice < handle
             % P = PulsePalDevice(portName) connects to the Pulse Pal on a USB serial port, e.g. 'COM3' on Windows or
             % '/dev/ttyACM0' on Linux, checks that it runs supported Pulse Pal firmware, reads its properties into
             % info, shows "MATLAB Connected" on its screen, and programs the default parameters (see
-            % setDefaultParams).
+            % setDefaultParams). portName may also be an open port object with the methods of
+            % pulsepal.DotNetSerialPort, as in /MATLAB/tests/testPulsePalDeviceOffline.m, which simulates a device.
 
             % Check for minimum MATLAB version
             MinVer = '9.9';
@@ -214,11 +229,15 @@ classdef PulsePalDevice < handle
             % waits for a confirm byte would take 16 ms. .NET's SerialPort takes about 0.3 ms (see
             % pulsepal.DotNetSerialPort). It is not available if MATLAB has been set to use .NET (Core) with dotnetenv,
             % and serialport is used then.
-            if pulsepal.DotNetSerialPort.isAvailable()
+            if ~(ischar(portString) || isstring(portString))
+                obj.Port = portString; % An open port object (see above)
+                portString = char(obj.Port.Port);
+            elseif pulsepal.DotNetSerialPort.isAvailable()
                 obj.Port = pulsepal.DotNetSerialPort(portString, defaultBaudRate);
             else
                 obj.Port = serialport(portString, defaultBaudRate);
             end
+            portString = char(portString);
             setDTR(obj.Port, true);
             obj.Port.write([obj.OpMenuByte 72], 'uint8');
             HandShakeOkByte = obj.Port.read(1, 'uint8'); % read() waits for the reply, up to the port's Timeout
@@ -273,6 +292,7 @@ classdef PulsePalDevice < handle
                 obj.info.cycleFrequency = obj.cycleFrequency;
                 obj.info.cyclePeriod_us = obj.cyclePeriod;
                 obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
+                obj.info.maxTime = obj.MaxTime;
             elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
                 wavePalVersion = obj.Port.read(1, 'uint32');
                 obj.Port = [];
@@ -325,21 +345,21 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function confirmed = syncToDevice(obj)
+        function syncToDevice(obj)
             % Sends every parameter to the device in one command. Use it after assignments made with autoSync off; with
             % autoSync on, they have already reached the device.
             % On Pulse Pal 3, if either trigger channel is in param sync mode (triggerMode 'Param Sync'), the device
             % stores the parameters instead of programming them, and loads them on the next rising edge of that
             % channel. It still checks every value at once: an error is raised if one is out of range. See "Trigger
             % modes" in help PulsePalDevice.
-            confirmed = obj.syncAllParams;
+            obj.syncAllParams;
         end
 
-        function confirmed = syncFromDevice(obj)
+        function syncFromDevice(obj)
             % Reads every parameter from the device into the properties, e.g. after they were changed with the
             % joystick or by loading a settings file. Requires firmware v22 or newer. continuousLoop is left as it
             % is: the device does not report it.
-            confirmed = obj.importCurrentParamsFromPulsePal;
+            obj.importCurrentParamsFromPulsePal;
         end
 
         function setFixedVoltage(obj, channels, voltage)
@@ -359,22 +379,22 @@ classdef PulsePalDevice < handle
 
         function setCalibration(obj, channel, voltageOffset)
             % Sets an output channel's zero code calibration: an offset, in volts from -0.1 to 0.1, that corrects the
-            % DAC's offset error, e.g. P.setCalibration(2, -0.003). Pulse Pal 3 stores it in its EEPROM and applies
-            % it after every power cycle; Pulse Pal 2 keeps it until it is switched off. Requires firmware v22.
-            if obj.firmwareVersion > 21
-                if ~ismember(channel, [1 2 3 4])
-                    error('channel must be 1, 2, 3 or 4')
-                end
-                if ~isscalar(voltageOffset) || ~(voltageOffset >= -0.1 && voltageOffset <= 0.1) % Also refuses NaN
-                    error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
-                end
-                voltageBits = obj.roundHalfEven(voltageOffset*(1/(20/65536)));
-                obj.Port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
-                obj.confirmWrite;
-                disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
-            else
-                error(['Zero code calibration requires firmware v22 or newer. Detected firmware is: v' num2str(obj.firmwareVersion)])
+            % DAC's offset error, e.g. P.setCalibration(2, -0.003). The device stores it in its EEPROM and applies it
+            % after every power cycle, so it only needs to be set once. Requires Pulse Pal 3 (hardware v3 or newer).
+            if obj.hardwareVersion < 3
+                error('setCalibration() requires hardware v3 or newer.')
             end
+            if ~isnumeric(channel) || ~isscalar(channel) || ~ismember(channel, [1 2 3 4])
+                error('channel must be 1, 2, 3 or 4')
+            end
+            if ~isnumeric(voltageOffset) || ~isscalar(voltageOffset) || ...
+                    ~(voltageOffset >= -0.1 && voltageOffset <= 0.1) % Also refuses NaN
+                error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
+            end
+            voltageBits = obj.roundHalfEven(voltageOffset*(1/(20/65536)));
+            obj.Port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
+            obj.confirmWrite;
+            disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
         end
 
         function setScreenSaver(obj, state, timeout)
@@ -412,7 +432,8 @@ classdef PulsePalDevice < handle
         function sendCustomPulseTrain(obj, trainID, pulseTimes, voltages)
             % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
             % trainID: 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
-            % pulseTimes: in seconds from the start of the train, increasing, in multiples of 100 us.
+            % pulseTimes: in seconds from the start of the train, increasing, in multiples of 100 us
+            %             (info.minPulseWidth_us), up to 9999.9999 s (info.maxTime).
             % voltages: one per pulse, in volts, -10 to 10.
             % An output channel plays the train when its customTrainID is trainID. Each pulse takes the channel's own
             % phase durations; a biphasic pulse's second phase is its voltage with the sign reversed. Example:
@@ -427,13 +448,13 @@ classdef PulsePalDevice < handle
             % channel that plays it, so that each sample lasts until the next. trainID: 1-4 on Pulse Pal 3, 1-2 on
             % Pulse Pal 2. voltages: in volts, -10 to 10.
             nVoltages = length(voltages);
-            if ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
+            if ~isnumeric(samplingPeriod) || ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
             end
-            if rem(round(samplingPeriod*1000000), obj.cyclePeriod*2) > 0
+            if rem(obj.roundHalfEven(double(samplingPeriod)*1000000), obj.cyclePeriod*2) > 0
                 error(['Error: sampling period must be a multiple of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
-            pulseTimes = 0:samplingPeriod:((nVoltages*samplingPeriod)-(1*samplingPeriod));
+            pulseTimes = (0:nVoltages-1)*double(samplingPeriod); % One per sample
             sendCustomTrain(obj, trainID, pulseTimes, voltages);
         end
 
@@ -441,70 +462,78 @@ classdef PulsePalDevice < handle
             % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 1 ms, 10 ms
             % apart, for 1 second, resting at 0 V and linked to trigger channel 1; both trigger channels in normal
             % mode. They are sent at once, also while autoSync is off. The constructor calls it.
-            autoSyncState = obj.autoSync;
-            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
             if obj.hardwareVersion > 2
                 % A device left in param sync mode would store the sync below instead of running it,
                 % leaving the device on its old program until a TTL arrived. Assigning triggerMode is
                 % not deferred that way, so take both trigger channels out of param sync mode first.
                 % See "Trigger modes" in help PulsePalDevice.
+                autoSyncState = obj.autoSync;
+                cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
                 obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
                 obj.triggerMode = {'Normal', 'Normal'};
+                clear cleanup
             end
-            obj.autoSync = false;
             obj.importParams(obj.defaultParams);
-            obj.syncToDevice;
+        end
+
+        function params = exportParams(obj)
+            % Returns every parameter as a struct, with one field per parameter (info.outputParameterNames, then
+            % triggerMode) holding one value per channel, e.g. to save with your data and record exactly what the
+            % device played. importParams() programs the device with it again. Example:
+            %   params = P.exportParams();
+            %   save('Trial12.mat', 'params');           % Or jsonencode(params), for a text file
+            % The Python class's export_params() returns the same, with snake_case names.
+            params = struct;
+            for i = 1:numel(obj.ParamNames)
+                params.(obj.ParamNames{i}) = obj.(obj.ParamNames{i});
+            end
+            params.triggerMode = obj.triggerMode;
+        end
+
+        function importParams(obj, params)
+            % Programs the device with parameters exported by exportParams(): a struct with one field per parameter,
+            % each holding one value per channel. All of them are checked first, and then sent in one command, as
+            % syncToDevice() sends them: in param sync mode, the device stores them for the next sync edge. Parameters
+            % missing from params keep their values, and autoSync is left as it is. Raises an error, and changes and
+            % sends nothing, if a field is not a parameter or a value is invalid.
+            if ~isstruct(params) || ~isscalar(params)
+                error('importParams() takes a struct of parameters, as exportParams() returns.')
+            end
+            if isfield(params, 'playbackMode') && ~isfield(params, 'continuousLoop')
+                params.continuousLoop = params.playbackMode; % The parameter's name before continuousLoop
+            end
+            % Files saved by earlier versions of saveParameters() also hold autoSync, which is not a parameter
+            names = setdiff(fieldnames(params), {'playbackMode', 'autoSync'}, 'stable');
+            unknown = setdiff(names, [obj.ParamNames {'triggerMode'}]);
+            if ~isempty(unknown)
+                error(['importParams(): unknown parameter(s) ' strjoin(unknown, ', ') '. Valid names are '...
+                       strjoin(obj.ParamNames, ', ') ' and triggerMode.'])
+            end
+            snapshot = obj.exportParams();
+            autoSyncState = obj.autoSync;
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
+            obj.autoSync = false;
+            try
+                for i = 1:numel(names)
+                    obj.(names{i}) = params.(names{i});
+                end
+                obj.checkSyncParams();
+            catch err
+                % Nothing has been sent, so the properties go back to what the device holds
+                snapshotNames = fieldnames(snapshot);
+                for i = 1:numel(snapshotNames)
+                    obj.(snapshotNames{i}) = snapshot.(snapshotNames{i});
+                end
+                rethrow(err)
+            end
+            obj.syncAllParams;
             clear cleanup
         end
 
-        function confirmed = sdSettings(obj, settingsFileName, op)
-            % Saves the parameters to a settings file on the device's microSD card, loads them from one, or deletes
-            % one, e.g. P.sdSettings('MyProgram.pps', 'save'). settingsFileName: the file's name with its extension,
-            % such as .pps. op: 'save', 'load' or 'delete'. Loading a file also reads the parameters back into the
-            % properties (see syncFromDevice). A saved file can also be loaded from the joystick menu.
-            if sum(settingsFileName == '.') == 0
-                error('Error: The file name must have a valid extension.')
-            end
-            op = lower(op);
-            switch op
-                case 'save'
-                    OpByte = 1;
-                case 'load'
-                    OpByte = 2;
-                case 'delete'
-                    OpByte = 3;
-                otherwise
-                    error('File op must be: ''save'', ''load'' or ''delete''')
-            end
-            SettingsNameLength = length(settingsFileName);
-            Message = [obj.OpMenuByte 90 OpByte SettingsNameLength settingsFileName];
-            obj.Port.write(Message, 'uint8');
-            confirmed = 1;
-            if obj.firmwareVersion > 21
-                confirmed = obj.Port.read(1, 'uint8'); % Sent after the file operation has finished
-            elseif OpByte == 2
-                pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
-            end
-            if OpByte == 2
-                % Read the parameters back even if the load failed: the device then loads its own default
-                % parameters (not the ones setDefaultParams() sets), and the properties must describe them.
-                obj.importCurrentParamsFromPulsePal;
-            end
-            if isempty(confirmed) || confirmed ~= 1
-                if OpByte == 2
-                    error(['Error: Pulse Pal could not load ' settingsFileName '. It has loaded its default '...
-                        'parameters instead, and the properties have been updated to match.']);
-                else
-                    error('Error: Pulse Pal did not return an expected byte to confirm the operation.');
-                end
-            end
-            confirmed = true;
-        end
-
         function saveParameters(obj, filename)
-            % Saves the parameters (this object's properties) to a .mat file on this computer, e.g.
+            % Saves the parameters to a .mat file on this computer, as the variable params (see exportParams), e.g.
             % P.saveParameters('MyProgram.mat'). loadParameters() programs the device with them again.
-            if (~strcmp(filename(end-3:end), '.mat'))
+            if ~(ischar(filename) || (isstring(filename) && isscalar(filename))) || ~endsWith(lower(filename), '.mat')
                 error('The file to save must be a .mat file')
             end
             params = obj.exportParams;
@@ -512,62 +541,96 @@ classdef PulsePalDevice < handle
         end
 
         function loadParameters(obj, filename)
-            % Loads parameters from a .mat file saved by saveParameters(), and programs the device with them. autoSync
-            % takes the value saved in the file.
+            % Loads parameters from a .mat file saved by saveParameters(), and programs the device with them (see
+            % importParams). autoSync is left as it is.
             S = load(filename);
-            params = S.params;
-            obj.autoSync = false;
-            obj.importParams(params);
-            obj.syncToDevice;
-            obj.autoSync = params.autoSync;
+            obj.importParams(S.params);
         end
 
-        function formatMicroSD(obj)
+        function saveSettingsFile(obj, fileName)
+            % Saves the parameters to a settings file on the device's microSD card, e.g.
+            % P.saveSettingsFile('MyProgram.pps'). fileName: 1 to 11 ASCII characters followed by .pps. A file of the
+            % same name is replaced. loadSettingsFile() and the device's joystick menu load it. To keep the parameters
+            % on this computer instead, see exportParams().
+            obj.settingsFileOp(fileName, 1, 'saveSettingsFile()');
+        end
+
+        function loadSettingsFile(obj, fileName)
+            % Loads a settings file from the device's microSD card, e.g. P.loadSettingsFile('MyProgram.pps'). The
+            % device plays the program in it, and the parameters are read back into the properties (see
+            % syncFromDevice). If the load fails, the device loads its own default parameters (not the ones
+            % setDefaultParams() sets), the properties are updated to match, and an error is raised.
+            obj.settingsFileOp(fileName, 2, 'loadSettingsFile()');
+        end
+
+        function deleteSettingsFile(obj, fileName)
+            % Deletes a settings file from the device's microSD card, e.g. P.deleteSettingsFile('MyProgram.pps').
+            obj.settingsFileOp(fileName, 3, 'deleteSettingsFile()');
+        end
+
+        function formatted = formatMicroSD(obj, varargin)
             % Formats the device's microSD card (Pulse Pal 3), which erases every settings file on it, and programs
-            % the default parameters. Asks for confirmation at the command prompt first.
+            % the default parameters. By default it asks for confirmation at the command prompt first. A script that
+            % runs on its own, or an AI agent, formats without asking:
+            %   P.formatMicroSD('Confirm', false);
+            % Returns true once the card is formatted, or false if the answer at the prompt was not y.
+            confirm = true;
+            if ~isempty(varargin)
+                if numel(varargin) ~= 2 || ~(ischar(varargin{1}) || isstring(varargin{1})) || ...
+                        ~strcmpi(varargin{1}, 'Confirm')
+                    error('formatMicroSD() takes one option: formatMicroSD(''Confirm'', false) formats without asking.')
+                end
+                confirm = varargin{2};
+                if ~(islogical(confirm) || isnumeric(confirm)) || ~isscalar(confirm) || ~(confirm == 0 || confirm == 1)
+                    error('Confirm must be true or false.')
+                end
+            end
             if obj.hardwareVersion < 3
                 error('formatMicroSD() requires hardware v3 or newer.')
             end
-            disp('*** Pulse Pal microSD Formatter ***')
-            disp('This will format Pulse Pal''s microSD card,')
-            disp('erase all settings files on the device')
-            disp('and reset all parameters to defaults.')
-            reply = input('Do you want to continue (y/n) > ', 's');
-            if lower(reply) == 'y'
-                obj.Port.write([obj.OpMenuByte 97], 'uint8');
-                % The device replies with lines of status text, the last of which contains '!', and
-                % then a confirm byte (1 if the card was formatted, 0 if not). The confirm byte is sent
-                % after the device has reloaded its default parameters, so it can arrive well after the
-                % text. It must be read here: left in the buffer, it would be taken as the reply to the
-                % next command (the one sent by setDefaultParams() below), and every reply after that
-                % would be read one byte late.
-                tic;
-                msg = [];
-                lineEnd = [];
-                replyComplete = false;
-                while toc < 30 && ~replyComplete
-                    if obj.Port.NumBytesAvailable > 0
-                        msg = [msg obj.Port.read(obj.Port.NumBytesAvailable, 'uint8')];
-                        flagIndex = find(msg == '!', 1);
-                        if ~isempty(flagIndex)
-                            lineEnd = flagIndex - 1 + find(msg(flagIndex:end) == 10, 1); % 10 = newline
-                        end
-                        replyComplete = ~isempty(lineEnd) && (length(msg) > lineEnd);
-                    end
-                    pause(.01);
+            formatted = false;
+            if confirm
+                disp('*** Pulse Pal microSD Formatter ***')
+                disp('This will format Pulse Pal''s microSD card,')
+                disp('erase all settings files on the device')
+                disp('and reset all parameters to defaults.')
+                reply = input('Do you want to continue (y/n) > ', 's');
+                if ~strcmpi(strtrim(reply), 'y')
+                    disp('Choice confirmed - microSD Card NOT formatted.')
+                    return
                 end
-                if ~replyComplete
-                    error('Pulse Pal did not report the result of formatting its microSD card within 30 seconds.')
-                end
-                disp(strtrim(char(msg(1:lineEnd))));
-                success = (msg(lineEnd+1) == 1);
-                obj.setDefaultParams();
-                if ~success
-                    error('Pulse Pal could not format its microSD card.')
-                end
-            else
-                disp('Choice confirmed - microSD Card NOT formatted.')
             end
+            obj.Port.write([obj.OpMenuByte 97], 'uint8');
+            % The device replies with lines of status text, the last of which contains '!', and then a confirm byte (1
+            % if the card was formatted, 0 if not). The confirm byte is sent after the device has reloaded its default
+            % parameters, so it can arrive well after the text. It must be read here: left in the buffer, it would be
+            % taken as the reply to the next command (the one sent by setDefaultParams() below), and every reply after
+            % that would be read one byte late.
+            startTime = tic;
+            msg = [];
+            lineEnd = [];
+            replyComplete = false;
+            while toc(startTime) < 30 && ~replyComplete
+                if obj.Port.NumBytesAvailable > 0
+                    msg = [msg obj.Port.read(obj.Port.NumBytesAvailable, 'uint8')]; %#ok<AGROW>
+                    flagIndex = find(msg == '!', 1);
+                    if ~isempty(flagIndex)
+                        lineEnd = flagIndex - 1 + find(msg(flagIndex:end) == 10, 1); % 10 = newline
+                    end
+                    replyComplete = ~isempty(lineEnd) && (length(msg) > lineEnd);
+                end
+                pause(.01);
+            end
+            if ~replyComplete
+                error('Pulse Pal did not report the result of formatting its microSD card within 30 seconds.')
+            end
+            disp(strtrim(char(msg(1:lineEnd))));
+            success = (msg(lineEnd+1) == 1);
+            obj.setDefaultParams();
+            if ~success
+                error('Pulse Pal could not format its microSD card.')
+            end
+            formatted = true;
         end
 
         function set.isBiphasic(obj, val)
@@ -703,8 +766,9 @@ classdef PulsePalDevice < handle
         function [value, deviceValues] = checkOutputParam(obj, paramCode, val)
             % Checks a parameter's new value on every channel (1x4, or 1x2 for triggerMode), and returns it as the
             % property holds it, and as the device reads it: DAC codes for voltages, timer cycles for times, and
-            % codes for the rest. Raises an error for a value the device cannot play. A single value is used for
-            % every channel.
+            % codes for the rest. A time is held as the device plays it, rounded to the timer cycle. Raises an error
+            % for a value the device cannot play, and for a single value: it does not say which channels it is meant
+            % for (see "One way to use all six" in /AGENTS.md).
             if paramCode == obj.TriggerModeCode
                 modes = obj.availableTriggerModes();
                 [~, codes] = ismember(modes, obj.TriggerModeNames);
@@ -719,7 +783,7 @@ classdef PulsePalDevice < handle
                     value = obj.CustomTrainTargetNames(deviceValues + 1);
                     return
                 case 'Logical'
-                    val = obj.expandToChannels(val, 4, name);
+                    val = obj.oneValuePerChannel(val, 4, name, 'output channel');
                     if ~(islogical(val) || isnumeric(val)) || any(val ~= 0 & val ~= 1) % Also refuses NaN
                         error([name ' values must be true or false (1 or 0).'])
                     end
@@ -730,7 +794,7 @@ classdef PulsePalDevice < handle
                     end
                     return
             end
-            val = obj.expandToChannels(val, 4, name);
+            val = obj.oneValuePerChannel(val, 4, name, 'output channel');
             % NaN fails every comparison, so the range checks below would let it through, and it would reach the device
             % as 0: -10 V, or a phase of 0 cycles
             if ~(isnumeric(val) || islogical(val)) || ~isreal(val) || ~all(isfinite(double(val)))
@@ -752,19 +816,25 @@ classdef PulsePalDevice < handle
                     % Checked in whole timer cycles, as the device receives it: [100 100 100 100]*1e-6 is
                     % 9.999999999999999e-05 in floating point, under the 0.0001 minimum, but is exactly 2 cycles.
                     deviceValues = obj.roundHalfEven(value*obj.cycleFrequency);
-                    lowest = 0;
+                    lowestCycles = 0;
                     if strcmp(obj.ParamKinds{paramCode}, 'PulseTime')
-                        lowest = 2*obj.cyclePeriod/1e6;
+                        lowestCycles = 2;
                     end
-                    if any(deviceValues/obj.cycleFrequency < lowest) || any(value > 3600)
-                        error([name ' was out of range: ' num2str(lowest) ' to 3600 s']);
+                    if any(deviceValues < lowestCycles) || any(deviceValues > obj.maxTimeCycles())
+                        error([name ' was out of range: ' num2str(lowestCycles/obj.cycleFrequency) ' to '...
+                               num2str(obj.MaxTime, 8) ' s']);
                     end
+                    value = deviceValues/obj.cycleFrequency; % The time the device plays
             end
         end
 
         function value = setOutputParam(obj, paramCode, val)
             % Checks a parameter's new value (see checkOutputParam()), and with autoSync on, programs it on the device.
-            % Returns the value as the property holds it.
+            % Returns the value as the property holds it. Values read from the device are stored as they are.
+            if obj.storing
+                value = val;
+                return
+            end
             [value, deviceValues] = obj.checkOutputParam(paramCode, val);
             if ~obj.autoSync
                 return
@@ -792,28 +862,25 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function codes = namesToCodes(~, names, validNames, validCodes, nChannels, settingName, channelType)
-            % Converts a name, or one name per channel, to codes: validCodes(i) is validNames{i}'s code. The codes
-            % themselves are accepted too, as numbers, as Pulse Pal's clients used them before names.
+        function codes = namesToCodes(obj, names, validNames, validCodes, nChannels, settingName, channelType)
+            % Converts one name per channel to codes: validCodes(i) is validNames{i}'s code. The codes themselves are
+            % accepted too, as numbers, as Pulse Pal's clients used them before names.
             if isnumeric(names) && ~isempty(names)
-                if isscalar(names)
-                    names = repmat(names, 1, nChannels);
-                end
-                if numel(names) ~= nChannels || ~all(ismember(names(:), validCodes))
+                names = obj.oneValuePerChannel(names, nChannels, settingName, channelType);
+                if ~all(ismember(names, validCodes))
                     error([settingName ' takes one name per ' channelType ' (or its code). Valid names are: '...
                            strjoin(validNames, ', ') '.'])
                 end
-                codes = double(reshape(names, 1, nChannels));
+                codes = double(names);
                 return
             end
             if ischar(names) || (isstring(names) && isscalar(names))
-                names = repmat(cellstr(names), 1, nChannels);
+                obj.oneValuePerChannel({char(names)}, nChannels, settingName, channelType); % Raises the error
             elseif isstring(names)
                 names = cellstr(names);
             end
             if ~iscell(names) || numel(names) ~= nChannels
-                error([settingName ' needs one name for all channels, or a 1x' num2str(nChannels) ' cell array with '...
-                       'one name per ' channelType '.'])
+                error([settingName ' needs a 1x' num2str(nChannels) ' cell array with one name per ' channelType '.'])
             end
             codes = zeros(1, nChannels);
             for i = 1:nChannels
@@ -831,15 +898,26 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function values = expandToChannels(~, values, nChannels, name)
-            % Returns one value per channel, as a row, from a single value or one per channel
-            if isscalar(values)
-                values = repmat(values, 1, nChannels);
-            elseif numel(values) == nChannels
+        function values = oneValuePerChannel(~, values, nChannels, name, channelType)
+            % Returns values as a row, after checking that there is one per channel. A single value is refused rather
+            % than copied to every channel: a script that sets one channel should say which, and one that sets them
+            % all should list them, so that it reads the same in every class and language.
+            if numel(values) == nChannels
                 values = reshape(values, 1, nChannels);
-            else
-                error([name ' needs one value for all channels, or one value per output channel (1x' num2str(nChannels) ').'])
+                return
             end
+            if isscalar(values) && iscell(values)
+                example = ['''' char(values{1}) ''''];
+                error([name ' holds one name per ' channelType ', so a single name is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. P.' name '{1} = ' example ', or all ' num2str(nChannels) ', e.g. P.' ...
+                       name '(:) = {' example '}.'])
+            elseif isscalar(values)
+                example = num2str(values);
+                error([name ' holds one value per ' channelType ', so a single value is ambiguous. Set one ' channelType ...
+                       ' by its number, e.g. P.' name '(1) = ' example ', or all ' num2str(nChannels) ', e.g. P.' ...
+                       name '(:) = ' example '.'])
+            end
+            error([name ' needs one value per ' channelType ' (1x' num2str(nChannels) ').'])
         end
 
         function channelList = channelNumbers(~, channels)
@@ -871,14 +949,24 @@ classdef PulsePalDevice < handle
         end
 
         function volts = bytes2Volts(obj, bytes)
-            % Convert serialized 16-bit DAC bytes to volt values.
+            % Converts serialized 16-bit DAC codes to volts. A code within one step (305 uV) of a value with 3 decimals,
+            % such as 5 or 4.255, gives that value, as in the Python class: the code for 5 V plays 4.99992 V.
             voltageBits = typecast(uint8(bytes), 'uint16');
             volts = ((double(voltageBits) ./ 65535) .* 20) - 10;
+            clean = round(volts, 3);
+            near = abs(volts - clean) <= 20/65535;
+            volts(near) = clean(near);
+            volts(~near) = round(volts(~near), 4);
         end
 
         function seconds = bytes2Seconds(obj, Bytes)
             % Convert serialized hardware timer counts to seconds.
             seconds = double(typecast(uint8(Bytes), 'uint32'))/obj.cycleFrequency;
+        end
+
+        function cycles = maxTimeCycles(obj)
+            % MaxTime in timer cycles: 199999998 on a 50 us timer
+            cycles = obj.roundHalfEven(obj.MaxTime*obj.cycleFrequency);
         end
 
         function confirmed = confirmWrite(obj)
@@ -891,15 +979,20 @@ classdef PulsePalDevice < handle
             end
         end
 
-        function confirmed = syncAllParams(obj)
-            %   Encode and transmit the complete parameter set in one command: op 92, or op 73 on firmware v21. This is
-            %   more efficient than item-wise data transfers. See "Op codes" in /Firmware/PROTOCOL.md.
+        function checkSyncParams(obj)
+            % The checks on the whole parameter set that assigning one parameter cannot make
             for i = 1:4
                 if strcmp(obj.customTrainTarget{i}, 'Bursts') && obj.burstDuration(i) == 0
                     error(['Error in output channel ' num2str(i)...
                         ': When custom train times target burst onsets, a non-zero burst duration must be defined.'])
                 end
             end
+        end
+
+        function syncAllParams(obj)
+            %   Encode and transmit the complete parameter set in one command: op 92, or op 73 on firmware v21. This is
+            %   more efficient than item-wise data transfers. See "Op codes" in /Firmware/PROTOCOL.md.
+            obj.checkSyncParams();
             [~, targets] = ismember(obj.customTrainTarget, obj.CustomTrainTargetNames);
             [~, modes] = ismember(obj.triggerMode, obj.TriggerModeNames);
             TimeData = obj.roundHalfEven([obj.phase1Duration; obj.interPhaseInterval; obj.phase2Duration;...
@@ -926,7 +1019,7 @@ classdef PulsePalDevice < handle
                 double(obj.linkTriggerChannel2) modes - 1];
             obj.Port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
                 typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
-            confirmed = obj.confirmWrite;
+            obj.confirmWrite;
         end
 
         function sendCustomTrain(obj, trainID, pulseTimes, voltages)
@@ -935,7 +1028,8 @@ classdef PulsePalDevice < handle
                 error('There must be one voltage value for every timestamp');
             end
             nPulses = length(pulseTimes);
-            if ~all(isfinite(double(pulseTimes(:)))) || ~all(isfinite(double(voltages(:))))
+            if ~isnumeric(pulseTimes) || ~isnumeric(voltages) || ~all(isfinite(double(pulseTimes(:)))) || ...
+                    ~all(isfinite(double(voltages(:))))
                 error('Error: custom pulse times and voltages must be numbers (NaN and Inf are not allowed).');
             end
             if nPulses > obj.maxCustomPulses
@@ -943,32 +1037,29 @@ classdef PulsePalDevice < handle
                     num2str(obj.info.hardwareVersion) ' can only store '...
                     num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
-            if sum(sum(rem(round(pulseTimes*1000000), obj.cyclePeriod*2))) > 0
-                error(['Non-zero time values for Pulse Pal must be multiples of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
+            % Times are refused, not rounded, between two steps of info.minPulseWidth_us (100 us), as in the Python
+            % class, so that a train plays as written. Checked to the nearest microsecond.
+            microseconds = obj.roundHalfEven(double(pulseTimes(:)')*1000000);
+            if any(rem(microseconds, obj.cyclePeriod*2) ~= 0)
+                error(['Custom pulse times must be multiples of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
             end
-            if (sum(pulseTimes < 0) > 0)
+            if any(microseconds < 0)
                 error('Error: Custom pulse times must be positive');
             end
-            CandidateTimes = uint32(obj.roundHalfEven(double(pulseTimes)*obj.cycleFrequency));
-            CandidateVoltages = voltages;
+            CandidateTimes = microseconds/obj.cyclePeriod; % Timer cycles
             % The device plays each pulse until the next one's time, so a time that is not later than the one
-            % before it would freeze the output for the rest of the train. diff() is taken on doubles because
-            % uint32 subtraction saturates at 0 in MATLAB, which would hide decreasing times.
-            if any(diff(double(CandidateTimes)) <= 0)
+            % before it would freeze the output for the rest of the train
+            if any(diff(CandidateTimes) <= 0)
                 error('Error: Custom pulse times must always increase');
             end
-            if (CandidateTimes(end) > (3600*obj.cycleFrequency))
-                error('Error: Custom pulse times must be < 3600 s');
+            if nPulses > 0 && CandidateTimes(end) > obj.maxTimeCycles()
+                error(['Error: Custom pulse times must be at most ' num2str(obj.MaxTime, 8) ' s']);
             end
-            if (sum(abs(CandidateVoltages) > 10) > 0)
+            if any(abs(double(voltages(:))) > 10)
                 error('Error: Custom voltage range = -10V to +10V');
             end
-            if (length(CandidateVoltages) ~= length(CandidateTimes))
-                error('Error: There must be a voltage for every timestamp');
-            end
-            TimeOutput = CandidateTimes;
-            VoltageOutput = obj.volts2Bits(voltages);
-            if ~ismember(trainID, 1:obj.nCustomPulseTrains)
+            VoltageOutput = obj.volts2Bits(voltages(:)');
+            if ~isnumeric(trainID) || ~isscalar(trainID) || ~ismember(trainID, 1:obj.nCustomPulseTrains)
                 error(['The custom pulse train ID must be an integer in range 1:' num2str(obj.nCustomPulseTrains)])
             end
             opCode = 95;
@@ -981,27 +1072,60 @@ classdef PulsePalDevice < handle
                 end
                 trainCode = [];
             end
-            obj.Port.write([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses TimeOutput]), 'uint8') ...
+            obj.Port.write([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses CandidateTimes]), 'uint8') ...
                 typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
             obj.confirmWrite;
         end
 
-        function confirmed = importCurrentParamsFromPulsePal(obj)
+        function settingsFileOp(obj, fileName, opByte, context)
+            % Saves (opByte 1), loads (2) or deletes (3) a settings file on the microSD card, with op 90
+            if isstring(fileName) && isscalar(fileName)
+                fileName = char(fileName);
+            end
+            if ~ischar(fileName) || ~isrow(fileName) || any(fileName < 32 | fileName > 126) || ...
+                    numel(fileName) < 5 || numel(fileName) > obj.MaxSettingsFileNameLength || ...
+                    ~endsWith(lower(fileName), '.pps')
+                error([context ': the file name must be 1 to 11 ASCII characters followed by .pps, e.g. '...
+                       '''Protocol1.pps''.'])
+            end
+            obj.Port.write([obj.OpMenuByte 90 opByte numel(fileName) double(fileName)], 'uint8');
+            confirmed = 1;
+            if obj.firmwareVersion > 21
+                confirmed = obj.Port.read(1, 'uint8'); % Sent after the file operation has finished
+            elseif opByte == 2
+                pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
+            end
+            if opByte == 2
+                % Read the parameters back even if the load failed: the device then loads its own default
+                % parameters (not the ones setDefaultParams() sets), and the properties must describe them.
+                obj.importCurrentParamsFromPulsePal;
+            end
+            if isempty(confirmed) || confirmed ~= 1
+                if opByte == 2
+                    error(['Error: Pulse Pal could not load ' fileName '. It has loaded its default '...
+                        'parameters instead, and the properties have been updated to match.']);
+                else
+                    error(['Error: Pulse Pal did not confirm ' context '.']);
+                end
+            end
+        end
+
+        function importCurrentParamsFromPulsePal(obj)
             %   Import all parameters currently stored on the device (op 93). Firmware v22 or newer is required.
-            %   The method reads the packed parameter message, decodes times and voltages, and updates object
-            %   properties while temporarily disabling autoSync. continuousLoop is not part of op 93.
+            %   The values are stored as the device holds them, without the checks of an assignment, as the Python
+            %   class stores them: the device can hold values that a client would refuse, set by an older client.
+            %   continuousLoop is not part of op 93.
             if obj.firmwareVersion < 22
-                error(['importCurrentParamsFromPulsePal() requires firmware v22 or newer.'...
+                error(['syncFromDevice() requires firmware v22 or newer.'...
                       newline 'Detected firmware is v' num2str(obj.firmwareVersion)])
             end
-            confirmed = false;
             obj.Port.write([obj.OpMenuByte 93], 'uint8');
             Msg = obj.Port.read(178, 'uint8');
-            if length(Msg) == 178
-                confirmed = true;
+            if length(Msg) ~= 178
+                error(['Pulse Pal sent ' num2str(length(Msg)) ' of the 178 bytes of its parameters.'])
             end
-            autoSyncState = obj.autoSync;
-            obj.autoSync = false;
+            obj.storing = true;
+            cleanup = onCleanup(@() obj.endStoring());
             Pos = 1;
             obj.phase1Duration = obj.bytes2Seconds(Msg(Pos:Pos+15)); Pos = Pos + 16;
             obj.interPhaseInterval = obj.bytes2Seconds(Msg(Pos:Pos+15)); Pos = Pos + 16;
@@ -1014,36 +1138,19 @@ classdef PulsePalDevice < handle
             obj.phase1Voltage = obj.bytes2Volts(Msg(Pos:Pos+7)); Pos = Pos + 8;
             obj.phase2Voltage = obj.bytes2Volts(Msg(Pos:Pos+7)); Pos = Pos + 8;
             obj.restingVoltage = obj.bytes2Volts(Msg(Pos:Pos+7)); Pos = Pos + 8;
-            obj.isBiphasic = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.customTrainID = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.customTrainTarget = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.customTrainLoop = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.linkTriggerChannel1 = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.linkTriggerChannel2 = Msg(Pos:Pos+3); Pos = Pos + 4;
-            obj.triggerMode = Msg(Pos:Pos+1);
-            obj.autoSync = autoSyncState;
+            obj.isBiphasic = Msg(Pos:Pos+3) > 0; Pos = Pos + 4;
+            obj.customTrainID = double(Msg(Pos:Pos+3)); Pos = Pos + 4;
+            obj.customTrainTarget = obj.CustomTrainTargetNames(min(Msg(Pos:Pos+3), 1) + 1); Pos = Pos + 4;
+            obj.customTrainLoop = Msg(Pos:Pos+3) > 0; Pos = Pos + 4;
+            obj.linkTriggerChannel1 = Msg(Pos:Pos+3) > 0; Pos = Pos + 4;
+            obj.linkTriggerChannel2 = Msg(Pos:Pos+3) > 0; Pos = Pos + 4;
+            obj.triggerMode = obj.TriggerModeNames(min(Msg(Pos:Pos+1), 3) + 1);
+            clear cleanup
         end
 
-        function params = exportParams(obj)
-            % Export the current parameters of the PulsePalDevice object to a struct
-            params = struct;
-            params.autoSync = obj.autoSync;
-            for i = 1:numel(obj.ParamNames)
-                params.(obj.ParamNames{i}) = obj.(obj.ParamNames{i});
-            end
-            params.triggerMode = obj.triggerMode;
-        end
-
-        function importParams(obj, params)
-            % Import a struct of parameters to be the current parameters of the PulsePalDevice object. Its values may
-            % be the GUI's numbers (see defaultParams()), which the properties take as well as names and logicals.
-            if isfield(params, 'playbackMode') && ~isfield(params, 'continuousLoop')
-                params.continuousLoop = params.playbackMode; % The parameter's name before continuousLoop
-            end
-            for i = 1:numel(obj.ParamNames)
-                obj.(obj.ParamNames{i}) = params.(obj.ParamNames{i});
-            end
-            obj.triggerMode = params.triggerMode;
+        function endStoring(obj)
+            % For importCurrentParamsFromPulsePal(): assignments are checked again, also if reading back failed
+            obj.storing = false;
         end
 
         function fh = makeCallback(obj, fun, varargin)

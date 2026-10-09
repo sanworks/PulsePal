@@ -92,7 +92,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // are those of Pulse Pal firmware. The others are ASCII letters, as in Wave Pal.
 enum OpCode {
   OP_HANDSHAKE = 72,                  // Returns HANDSHAKE_REPLY and the firmware version
-  OP_DISCONNECT = 81,                 // The client is closing: show the device's own name on the screen again
+  OP_DISCONNECT = 81,                 // The client is closing: stop playback, and show the device's own name again
   OP_SET_CLIENT_NAME = 89,            // Set the 6-character client name shown on the top screen, as "NAME Connected"
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM)
   OP_HARDWARE_INFO = 'N',             // 78. Returns the hardware properties and the limits of the settings

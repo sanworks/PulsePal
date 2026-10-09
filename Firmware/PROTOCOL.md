@@ -85,7 +85,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 78 | Show a message on the screen | Length byte, then that many characters. A character of 254 moves to the second line | none |
 | 79 | Set a fixed voltage | Channel (1-4), DAC code (uint16) | 1 / 0 |
 | 80 | Stop all channels | none | none |
-| 81 | Disconnect: stop all channels and restore the device's own screen title | none | none |
+| 81 | Disconnect: stop all channels and restore the device's own screen title. Wave Pal and Synth Pal firmware do the same | none | none |
 | 82 | Set continuous loop mode | Channel (1-4), state (0 or 1) | 1 / 0 |
 | 85 | Send the current settings file | none | 178 bytes: the file without its end marker |
 | 86 | Write a pin (debugging) | Pin number, value | none |
@@ -169,12 +169,28 @@ is 0, and the value is set to 1 cycle. A biphasic channel with no inter-pulse in
 pulses back to back. The device checks each channel's parameters together, so to change such a
 channel to monophasic, set its inter-pulse interval first.
 
-The clients (MATLAB, Python, C++) and the joystick menu are stricter: phase durations, the
-inter-pulse interval and the pulse train duration are at least 2 cycles (100 µs), and custom pulse
-times at least 2 cycles apart. A trigger channel reads its input once per cycle, so a 1 cycle
-pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse a trigger
-channel detects reliably. The device still accepts 1 cycle over USB, and settings files saved by
-older firmware may hold one.
+The clients (MATLAB, Python, C++) and the joystick menu are stricter: see "Value limits" below.
+
+### Value limits
+
+The MATLAB, Python and C++ classes check every value against these limits, and refuse one outside
+them before anything is sent. The joystick menu keeps to them too. The device itself accepts any
+value that fits its data type, apart from the times of 0 cycles above, so a value outside these
+limits can still reach it from older software or an old settings file; the classes read such a
+value back as it is (op 93).
+
+| Value | Limit |
+|---|---|
+| Voltages | -10 to 10 V, sent as the nearest DAC code (a halfway value to the even code) |
+| Times | 0 to 9999.9999 s, rounded to the nearest 50 µs cycle (a halfway value to the even cycle). 9999.9999 s (199999998 cycles) is the longest time the joystick menu shows and edits: four digits before the point. The Python and MATLAB classes hold the rounded time, as the device plays it |
+| Phase 1 and 2 durations, inter-pulse interval, pulse train duration | At least 2 cycles (100 µs). A trigger channel reads its input once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse a trigger channel detects reliably |
+| Custom pulse times, and a custom waveform's sampling period | Multiples of 2 cycles (100 µs), up to 9999.9999 s, each later than the one before. A time between two steps is refused, not rounded, so that a train plays as written |
+| Pulses per custom train | 5000 on Pulse Pal 2, 10000 on Pulse Pal 3 (op 94 reports it) |
+| Custom train ID | 0 to 2 on Pulse Pal 2, 0 to 4 on Pulse Pal 3 |
+| Trigger mode | 0 to 2 on Pulse Pal 2; 3 (param sync) on Pulse Pal 3 only |
+| Zero code calibration (op 96) | -0.1 to 0.1 V, on Pulse Pal 3 only: its EEPROM stores it |
+| Settings file name (op 90) | 1 to 11 printable ASCII characters followed by `.pps`, 15 in all, so that the joystick menu can list the file |
+| Screen saver (op 99) | Timeout 1 to 65535 s. On Pulse Pal 3 only |
 
 In a burst, a pulse starts only if it ends before the burst does: its phase 1, or for a biphasic
 pulse the whole pulse, so that the end of the burst never cuts off phase 2. Likewise, a biphasic

@@ -128,7 +128,7 @@ for i = 1:4
     setLevels(S, i, peakToPeaks(i), meanVoltages(i), restingVoltages(i));
 end
 S.waveform = {'Sine', 'Triangle', 'Square', 'Sawtooth'};
-S.playDuration = 0.02; % 20 cycles
+S.playDuration(:) = 0.02; % 20 cycles
 S.trigger(1:4);
 waitUntilStopped(S, 1:4, 2);
 [samplesPlayed, sums] = S.playbackChecksums();
@@ -334,26 +334,30 @@ setLevels(S, 1, 2, 9);
 expectError(@() setProperty(S, 'frequency', 0.99));
 expectError(@() setProperty(S, 'frequency', 20000.01));
 expectError(@() setProperty(S, 'frequency', NaN));
-expectError(@() setProperty(S, 'waveform', 'Ramp'));
+expectError(@() setProperty(S, 'waveform', {'Ramp', 'Sine', 'Sine', 'Sine'}));
 expectError(@() setProperty(S, 'waveform', {'Sine', 'Sine'}));
 expectError(@() setProperty(S, 'peakToPeak', [3 1 1 1])); % 9 V + 1.5 V on channel 1
-expectError(@() setProperty(S, 'peakToPeak', 20.1));
-expectError(@() setProperty(S, 'fixedVoltage', -10.1));
+expectError(@() setProperty(S, 'peakToPeak', [5 5 5 20.1]));
+expectError(@() setProperty(S, 'fixedVoltage', [5 5 5 -10.1]));
 expectError(@() setProperty(S, 'meanVoltage', [-9.5 0 0 0])); % -9.5 V - 1 V on channel 1
-expectError(@() setProperty(S, 'meanVoltage', 10.5));
-expectError(@() setProperty(S, 'restingVoltage', 10.5));
-expectError(@() setProperty(S, 'playDuration', -1));
-expectError(@() setProperty(S, 'playDuration', 3600.5));
-expectError(@() setProperty(S, 'onRampDuration', -0.001));
-expectError(@() setProperty(S, 'offRampDuration', 3600.5));
-expectError(@() setProperty(S, 'triggerMode', 'Master'));
+expectError(@() setProperty(S, 'meanVoltage', [9 0 0 10.5]));
+expectError(@() setProperty(S, 'restingVoltage', [9 0 0 10.5]));
+expectError(@() setProperty(S, 'playDuration', [1 1 1 -1]));
+expectError(@() setProperty(S, 'playDuration', [1 1 1 3600.5]));
+expectError(@() setProperty(S, 'onRampDuration', [0 0 0 -0.001]));
+expectError(@() setProperty(S, 'offRampDuration', [0 0 0 3600.5]));
+expectError(@() setProperty(S, 'triggerMode', {'Master', 'Normal'}));
+% A single value does not say which channels it is meant for
+expectError(@() setProperty(S, 'waveform', 'Square'));
+expectError(@() setProperty(S, 'playDuration', 1));
+expectError(@() setProperty(S, 'triggerMode', 'Normal'));
 expectError(@() setProperty(S, 'triggerMode', {'Normal', 'Normal', 'Normal', 'Normal'}));
 expectError(@() setProperty(S, 'linkTriggerChannel1', [1 0 2 0]));
 expectError(@() S.trigger([1 7]));
 expectError(@() S.trigger([]));
 expectError(@() S.setScreenSaver(2));
 expectError(@() setProperty(S, 'autoSync', 2));
-expectError(@() setProperty(S, 'triggerMode', 'Sync'));
+expectError(@() setProperty(S, 'triggerMode', {'Sync', 'Normal'}));
 S.autoSync = false;
 expectError(@() setProperty(S, 'peakToPeak', [3 1 1 1])); % Checked with autoSync off too
 S.autoSync = true;

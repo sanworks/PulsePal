@@ -33,12 +33,13 @@ Settings that apply to one output channel, such as
 is unused and holds `None`, and indices 1 to 4 hold the settings of
 output channels 1-4, as in `pulsepal.PulsePalDevice`. Setting an element
 or a slice programs the device at once. Assigning a whole list sets all
-four channels, and a single value sets them all to that value:
+four channels, and takes one value per channel: a single value raises an
+error, because it does not say which channels it is meant for.
 
 ```python
 W.loop_mode[2] = True          # channel 2 only
 W.loop_duration[1:5] = [1, 2, 3, 4]
-W.loop_mode = False            # all four channels
+W.loop_mode = [False] * 4      # all four channels
 ```
 
 `WavePalDevice.trigger_mode` is indexed the same way by trigger channel
@@ -199,9 +200,9 @@ class WavePalDevice:
     `WavePalDevice.serialportlist` lists. `WavePalDevice` is also a
     context manager, which closes the port on exit.
 
-    Closing the connection puts the device's own name back on its
-    screen, and leaves everything else as it is: playback continues, and
-    TTL triggers keep playing the loaded waveforms.
+    Closing the connection stops playback, as it does on Pulse Pal, and
+    puts the device's own name back on its screen. The device keeps its
+    settings and waveforms, so TTL triggers still play them.
     """
 
     port: "serial.Serial"
@@ -336,9 +337,9 @@ class WavePalDevice:
         """
         self.sampling_rate = 10000
         self.output_range = "-10V:10V"
-        self.loop_mode = False
-        self.loop_duration = 0
-        self.trigger_mode = "Normal"
+        self.loop_mode = [False] * 4
+        self.loop_duration = [0] * 4
+        self.trigger_mode = ["Normal"] * 2
         self._set_trigger_links([True] * 4, [False] * 4)
 
     @property
@@ -665,11 +666,12 @@ class WavePalDevice:
     def close(self, send_disconnect=True):
         """Close the connection to the device.
 
-        The device shows its own name on its screen again, in place of
-        "PYTHON Connected". It keeps its settings and waveforms, and
-        playback in progress continues. Safe to call more than once.
-        Called automatically when leaving a `with` block and when the
-        object is garbage collected.
+        The device stops playback on all channels, and shows its own name
+        on its screen again, in place of "PYTHON Connected". It keeps its
+        settings and waveforms, so TTL triggers still play them. Safe to
+        call more than once. Called automatically when leaving a `with`
+        block and when the object is garbage collected, so playback also
+        stops when the last reference to the object goes.
 
         Args:
             send_disconnect: If `True`, tell the device that the client

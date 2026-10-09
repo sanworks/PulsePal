@@ -116,10 +116,11 @@ These changed:
   returns `bool`.
 - `initialize()` now programs the device with the default parameters, as the MATLAB and Python classes do, so
   that the device and `currentOutputParams` agree.
-- Out-of-range values are rejected, instead of silently limited. Voltages are -10 to 10 V. Times are 0 to 3600 s,
-  except phase durations, the inter-pulse interval and the pulse train duration, whose minimum is 0.0001 s. These
-  are the MATLAB class's limits. Custom pulse times must also be at least 0.0001 s apart, as in the Python class.
-  0.0001 s is two timer cycles, the shortest pulse a trigger channel detects reliably.
+- Out-of-range values are rejected, instead of silently limited. Voltages are -10 to 10 V. Times are 0 to
+  9999.9999 s, the longest time the device's joystick menu shows, except phase durations, the inter-pulse interval
+  and the pulse train duration, whose minimum is 0.0001 s: two timer cycles, the shortest pulse a trigger channel
+  detects reliably. Custom pulse times must be multiples of 0.0001 s. These are the MATLAB and Python classes'
+  limits, listed in "Value limits" in [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
 - Times are rounded to the nearest 50 µs timer cycle, and voltages to the nearest DAC code, as in the Python
   class. The legacy class truncated times, so e.g. a 0.0007 s phase was sent as 13 cycles (0.00065 s) instead of 14.
 - The device's confirm bytes are read. The legacy class left them unread.

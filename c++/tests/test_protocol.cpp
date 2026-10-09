@@ -399,7 +399,7 @@ static void test_single_parameters_use_op_74()
     CHECK(pulsePal.setPhase2Duration(3, 0.0001f));     // 2 cycles, the minimum
     CHECK(pulsePal.setInterPulseInterval(4, 0.25f));   // 5000 cycles
     CHECK(pulsePal.setBurstDuration(1, 1));
-    CHECK(pulsePal.setBurstInterval(2, 3600));         // 72000000 cycles, the maximum
+    CHECK(pulsePal.setBurstInterval(2, 3600));         // 72000000 cycles
     CHECK(pulsePal.setPulseTrainDuration(3, 2));
     CHECK(pulsePal.setPulseTrainDelay(4, 0));
     CHECK(pulsePal.setTrigger1Link(1, 0));
@@ -455,7 +455,7 @@ static void test_out_of_range_arguments_send_nothing()
     CHECK(!pulsePal.setPhase1Voltage(1, 10.01f));
     CHECK(!pulsePal.setRestingVoltage(1, NAN));
     CHECK(!pulsePal.setPhase1Duration(1, 0.00005f));
-    CHECK(!pulsePal.setPulseTrainDuration(1, 3601));
+    CHECK(!pulsePal.setPulseTrainDuration(1, 10000));  // The longest time is 9999.9999 s
     CHECK(!pulsePal.setPulseTrainDelay(1, -0.001f));
     CHECK(!pulsePal.setBurstDuration(1, INFINITY));
     CHECK(!pulsePal.setPhase1Voltage(0, 5));
@@ -471,6 +471,9 @@ static void test_out_of_range_arguments_send_nothing()
     CHECK(!pulsePal.updateDisplay(std::string(200, 'a'), std::string(55, 'b')));
     CHECK(port.writes.empty());
     CHECK(contains(errors.text(), "setCustomTrainID(): customTrainID on output channel 1 was 3. It must be an integer from 0 to 2"));
+    CHECK(contains(errors.text(), "It must be 0.0001 to 9999.9999 s"));
+    CHECK(pulsePal.setPulseTrainDuration(1, 9999.999f)); // Near the longest time that a float holds
+    CHECK(port.writes.size() == 1);
     CHECK(contains(errors.text(), "setTriggerMode(): trigger channel 3 does not exist"));
     CHECK(pulsePal.currentOutputParams[1].phase1Voltage == 5); // Unchanged
 }
@@ -555,6 +558,12 @@ static void test_custom_trains_use_op_95_with_a_zero_based_index()
                                            255, 255, 0, 0, 0, 128}));
     CHECK((port.reads == std::vector<size_t>{1}));
 
+    // A float holds 1000.0001 s as 1000.000122 s: as near to a 100 us step as a float can be, so it is that step
+    const float lateTimes[2] = {1000.0001f, 9999.999f};
+    CHECK(pulsePal.sendCustomPulseTrain(1, 2, lateTimes, voltages));
+    CHECK_BYTES(Bytes(port.writes.back().begin() + 7, port.writes.back().begin() + 15),
+                bytes({2, 45, 49, 1, 236, 193, 235, 11})); // 20000002 and 199999980 cycles
+
     // A full-size train on Pulse Pal 3 is sent in one write
     std::vector<float> longTimes(10000), longVoltages(10000, 5);
     for (int i = 0; i < 10000; i++) {
@@ -603,11 +612,17 @@ static void test_custom_trains_reject_bad_ids_sizes_and_times()
     CHECK(!pulsePal.sendCustomPulseTrain(1, 5001, longTimes.data(), longVoltages.data()));
     CHECK(contains(errors.text(), "up to 5000 pulses"));
 
-    const float sameCycle[2] = {0.001f, 0.00101f}; // Both round to 20 cycles
-    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, sameCycle, voltages));
+    const float same[2] = {0.001f, 0.001f};
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, same, voltages));
     CHECK(contains(errors.text(), "pulse times must increase"));
-    const float oneCycle[2] = {0.001f, 0.00105f}; // 20 and 21 cycles: too short for a trigger channel
-    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, oneCycle, voltages));
+    // Custom pulse times are multiples of 100 us, as in the MATLAB and Python classes
+    const float betweenSteps[2] = {0.001f, 0.00105f}; // 20 and 21 cycles: too short for a trigger channel
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, betweenSteps, voltages));
+    CHECK(contains(errors.text(), "Custom pulse times must be multiples of 100 us"));
+    const float notQuite[1] = {0.00012f};
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 1, notQuite, voltages));
+    const float tooLate[1] = {10000};
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 1, tooLate, voltages));
     const float decreasing[2] = {0.002f, 0.001f};
     CHECK(!pulsePal.sendCustomPulseTrain(1, 2, decreasing, voltages));
     const float negative[2] = {-0.001f, 0.001f};

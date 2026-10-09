@@ -1,5 +1,6 @@
 % Opens the parameter editor window, e.g. P.gui(), or brings an open one to the front. The window edits its own copy
-% of the parameters, and its Load to Device button programs the device with them.
+% of the parameters, and its Load to Device button programs the device with them. Its toolbar opens and saves
+% programs as .json files, in the format of the Python GUI, so that either GUI opens them.
 
 %{
 ----------------------------------------------------------------------------
@@ -762,10 +763,8 @@ if any(leavingParamSync)
 end
 programBuffered = any(deviceModes == paramSyncMode);
 
-% Sync paramaters from GUI to user fields
-obj.autoSync = false;
+% Sends the GUI's parameters in one command, whatever autoSync is
 obj.importParams(obj.ui.params);
-obj.syncAllParams;
 if any(enteringParamSync)
     obj.autoSync = true;
     obj.triggerMode = newModes;
@@ -798,97 +797,192 @@ end
 end
 
 function saveProgram(obj)
+% Saves the program as a .json file in the Python GUI's format (/Python/PulsePal/pulsepal/gui.py), so that either GUI
+% opens it: the parameters by their Python names, as the GUI keeps them (on/off as 0 or 1, modes as their codes), the
+% text of each custom train as typed, and the device's info.
 program = struct;
-program.params = obj.ui.params;
-program.customTrainTimestamps = cell(1,4);
-program.customTrainVoltages = cell(1,4);
-for iTrain = 1:4
-    program.customTrainTimestamps{iTrain} = str2double(split(obj.ui.customTrain.timestamps{iTrain}, ','))';
-    program.customTrainVoltages{iTrain} = str2double(split(obj.ui.customTrain.voltages{iTrain}, ','))';
+program.params = struct;
+names = guiParamNames(obj);
+for i = 1:numel(names)
+    program.params.(snakeCase(names{i})) = double(obj.ui.params.(names{i}));
 end
-program.deviceInfo = obj.info;
-if isempty(obj.ui.lastProgramPath)
-    [file,path] = uiputfile('PulsePalProgram.mat','Save program');
-else
-    [file,path] = uiputfile('PulsePalProgram.mat','Save program', obj.ui.lastProgramPath);
+program.trigger_mode = double(obj.ui.params.triggerMode);
+nTrains = obj.info.nCustomPulseTrains;
+program.custom_train_timestamps = obj.ui.customTrain.timestamps(1:nTrains);
+program.custom_train_voltages = obj.ui.customTrain.voltages(1:nTrains);
+program.device_info = struct;
+infoNames = fieldnames(obj.info);
+for i = 1:numel(infoNames)
+    value = obj.info.(infoNames{i});
+    if any(strcmp(infoNames{i}, {'outputParameterNames', 'triggerParameterNames'}))
+        value = cellfun(@snakeCase, value, 'UniformOutput', false); % As the Python class names them
+    end
+    program.device_info.(snakeCase(infoNames{i})) = value;
 end
+startName = 'PulsePalProgram.json';
+if ~isempty(obj.ui.lastProgramPath)
+    startName = fullfile(obj.ui.lastProgramPath, startName);
+end
+[file, path] = uiputfile({'*.json', 'Pulse Pal program (*.json)'}, 'Save program', startName);
 if ischar(file) && ischar(path)
     obj.ui.lastProgramPath = path;
-    savepath = fullfile(path, file);
-    save(savepath, 'program');
-    obj.ui.StatusLabel.Text = 'Status: Program Saved';
+    if verLessThan('matlab', '9.10') %#ok<VERLESSMATLAB> jsonencode's PrettyPrint is in R2021a and newer
+        text = jsonencode(program);
+    else
+        text = jsonencode(program, 'PrettyPrint', true);
+    end
+    fileID = fopen(fullfile(path, file), 'w', 'n', 'UTF-8');
+    if fileID < 0
+        errordlg(['Failed to save the program: ' fullfile(path, file) ' could not be opened for writing.'])
+    else
+        fwrite(fileID, text, 'char');
+        fclose(fileID);
+        obj.ui.StatusLabel.Text = 'Status: Program Saved';
+    end
 end
 figure(obj.ui.Figure);
 end
 
 function openProgram(obj)
+% Opens a program saved by either GUI as a .json file (see saveProgram), or a .mat file saved by an older version of
+% this GUI or by the legacy PulsePalGUI
+filters = {'*.json;*.mat', 'Pulse Pal programs (*.json, *.mat)'; '*.json', 'Pulse Pal program (*.json)'; ...
+           '*.mat', 'Program from an older Pulse Pal GUI (*.mat)'};
 if isempty(obj.ui.lastProgramPath)
-    [file,path] = uigetfile('*.mat','Open program');
+    [file, path] = uigetfile(filters, 'Open program');
 else
-    [file,path] = uigetfile('*.mat','Open program', obj.ui.lastProgramPath);
+    [file, path] = uigetfile(filters, 'Open program', obj.ui.lastProgramPath);
 end
 if ischar(file) && ischar(path)
     obj.ui.lastProgramPath = path;
-    newProgram = load(fullfile(path, file));
-    isValidProgram = false;
-    if isfield(newProgram, 'program') % Saved from PulsePalDevice object
-        resetGUISelections(obj);
-        program = newProgram.program;
-        customTimestamps = cell(1,4);
-        customVoltages = cell(1,4);
-        for iTrain = 1:4 % Convert custom train timestamps and voltages to string
-            thisTimestamp = program.customTrainTimestamps{iTrain};
-            if isnan(thisTimestamp)
-                customTimestamps{iTrain} = '';
-            else
-                customTimestamps{iTrain} = char(strjoin(string(thisTimestamp), ', '));
-            end
-            thisVoltage = program.customTrainVoltages{iTrain};
-            if isnan(thisVoltage)
-                customVoltages{iTrain} = '';
-            else
-                customVoltages{iTrain} = char(strjoin(string(thisVoltage), ', '));
-            end
+    try
+        if endsWith(lower(file), '.json')
+            [params, timestamps, voltages] = readJsonProgram(obj, fullfile(path, file));
+        else
+            [params, timestamps, voltages] = readMatProgram(obj, fullfile(path, file));
         end
-        obj.ui.customTrain.timestamps = customTimestamps;
-        obj.ui.customTrain.voltages = customVoltages;
-        ui_SetCustomTrainView(obj);
-        isValidProgram = true;
-    elseif isfield(newProgram, 'ParameterMatrix') % Saved from legacy PulsePalGUI
-        resetGUISelections(obj);
-        program = struct;
-        program.params = struct;
-        matrix = newProgram.ParameterMatrix;
-        program.params.isBiphasic = cell2mat(matrix(2,2:5));
-        program.params.phase1Voltage = cell2mat(matrix(3,2:5));
-        program.params.phase2Voltage = cell2mat(matrix(4,2:5));
-        program.params.restingVoltage = cell2mat(matrix(18,2:5));
-        program.params.phase1Duration = cell2mat(matrix(5,2:5));
-        program.params.interPhaseInterval = cell2mat(matrix(6,2:5));
-        program.params.phase2Duration = cell2mat(matrix(7,2:5));
-        program.params.interPulseInterval = cell2mat(matrix(8,2:5));
-        program.params.burstDuration = cell2mat(matrix(9,2:5));
-        program.params.interBurstInterval = cell2mat(matrix(10,2:5));
-        program.params.pulseTrainDuration = cell2mat(matrix(11,2:5));
-        program.params.pulseTrainDelay = cell2mat(matrix(12,2:5));
-        program.params.linkTriggerChannel1 = cell2mat(matrix(13,2:5));
-        program.params.linkTriggerChannel2 = cell2mat(matrix(14,2:5));
-        program.params.customTrainID = cell2mat(matrix(15,2:5));
-        program.params.customTrainTarget = cell2mat(matrix(16,2:5));
-        program.params.customTrainLoop = cell2mat(matrix(17,2:5));
-        program.params.triggerMode = cell2mat(matrix(2,8:9));
-        program.params.continuousLoop = zeros(1,4);
-        isValidProgram = true;
+    catch err
+        errordlg(['Failed to open ' file ': ' err.message])
+        error(['Failed to open ' file ': ' err.message])
     end
-    if ~isValidProgram
-        errordlg(['Failed to open file: ' file ': unknown data format.'])
-        error(['Failed to open file: ' file ': unknown data format.'])
-    end
-    obj.ui.params = program.params;
+    resetGUISelections(obj);
+    obj.ui.params = params;
+    obj.ui.customTrain.timestamps = timestamps;
+    obj.ui.customTrain.voltages = voltages;
+    ui_SetCustomTrainView(obj);
     setUIParams(obj);
     obj.ui.StatusLabel.Text = 'Status: Program Opened';
 end
 figure(obj.ui.Figure);
+end
+
+function [params, timestamps, voltages] = readJsonProgram(obj, fileName)
+% Reads a program saved by either GUI. Parameters it leaves out take their default values, as in the Python GUI.
+program = jsondecode(fileread(fileName));
+if ~isstruct(program) || ~isfield(program, 'params') || ~isstruct(program.params)
+    error('it is not a Pulse Pal program (it has no params).')
+end
+params = obj.defaultParams;
+names = guiParamNames(obj);
+for i = 1:numel(names)
+    key = snakeCase(names{i});
+    if isfield(program.params, key)
+        value = program.params.(key);
+        if ~(isnumeric(value) || islogical(value)) || numel(value) ~= 4
+            error([key ' must have one number per output channel.'])
+        end
+        params.(names{i}) = double(reshape(value, 1, 4)); % jsondecode returns a column
+    end
+end
+if isfield(program, 'trigger_mode')
+    value = program.trigger_mode;
+    if ~isnumeric(value) || numel(value) ~= 2
+        error('trigger_mode must have one number per trigger channel.')
+    end
+    params.triggerMode = double(reshape(value, 1, 2));
+end
+timestamps = customTrainTexts(obj, program, 'custom_train_timestamps');
+voltages = customTrainTexts(obj, program, 'custom_train_voltages');
+end
+
+function texts = customTrainTexts(obj, program, key)
+% The text of each custom train's box, from a .json program: the text as typed, or a list of numbers
+texts = repmat({''}, 1, 4);
+if ~isfield(program, key) || isempty(program.(key))
+    return
+end
+values = program.(key);
+if ~iscell(values)
+    values = num2cell(values, 2); % Lists of numbers of the same length: one row per train
+end
+for i = 1:min(numel(values), obj.info.nCustomPulseTrains)
+    value = values{i};
+    if ischar(value) || isstring(value)
+        texts{i} = char(value);
+    elseif isnumeric(value) && ~isempty(value)
+        texts{i} = char(strjoin(string(value(:)'), ', '));
+    end
+end
+end
+
+function [params, timestamps, voltages] = readMatProgram(obj, fileName)
+% Reads a .mat program saved by this GUI before it saved .json files, or by the legacy PulsePalGUI
+newProgram = load(fileName);
+timestamps = obj.ui.customTrain.timestamps;
+voltages = obj.ui.customTrain.voltages;
+if isfield(newProgram, 'program') % Saved by this GUI
+    program = newProgram.program;
+    params = program.params;
+    for iTrain = 1:4 % Convert custom train timestamps and voltages to text
+        thisTimestamp = program.customTrainTimestamps{iTrain};
+        if all(isnan(thisTimestamp))
+            timestamps{iTrain} = '';
+        else
+            timestamps{iTrain} = char(strjoin(string(thisTimestamp), ', '));
+        end
+        thisVoltage = program.customTrainVoltages{iTrain};
+        if all(isnan(thisVoltage))
+            voltages{iTrain} = '';
+        else
+            voltages{iTrain} = char(strjoin(string(thisVoltage), ', '));
+        end
+    end
+elseif isfield(newProgram, 'ParameterMatrix') % Saved by the legacy PulsePalGUI
+    params = struct;
+    matrix = newProgram.ParameterMatrix;
+    params.isBiphasic = cell2mat(matrix(2,2:5));
+    params.phase1Voltage = cell2mat(matrix(3,2:5));
+    params.phase2Voltage = cell2mat(matrix(4,2:5));
+    params.restingVoltage = cell2mat(matrix(18,2:5));
+    params.phase1Duration = cell2mat(matrix(5,2:5));
+    params.interPhaseInterval = cell2mat(matrix(6,2:5));
+    params.phase2Duration = cell2mat(matrix(7,2:5));
+    params.interPulseInterval = cell2mat(matrix(8,2:5));
+    params.burstDuration = cell2mat(matrix(9,2:5));
+    params.interBurstInterval = cell2mat(matrix(10,2:5));
+    params.pulseTrainDuration = cell2mat(matrix(11,2:5));
+    params.pulseTrainDelay = cell2mat(matrix(12,2:5));
+    params.linkTriggerChannel1 = cell2mat(matrix(13,2:5));
+    params.linkTriggerChannel2 = cell2mat(matrix(14,2:5));
+    params.customTrainID = cell2mat(matrix(15,2:5));
+    params.customTrainTarget = cell2mat(matrix(16,2:5));
+    params.customTrainLoop = cell2mat(matrix(17,2:5));
+    params.triggerMode = cell2mat(matrix(2,8:9));
+    params.continuousLoop = zeros(1,4);
+else
+    error('unknown data format.')
+end
+end
+
+function names = guiParamNames(obj)
+% The parameters a program file holds: all but continuousLoop, which the GUI has no control for and the Python GUI
+% does not save
+names = obj.ParamNames(~strcmp(obj.ParamNames, 'continuousLoop'));
+end
+
+function name = snakeCase(name)
+% A name as the Python class spells it: 'phase1Voltage' is 'phase1_voltage', 'customTrainID' is 'custom_train_id'
+name = lower(regexprep(name, '([A-Z]+)', '_$1'));
 end
 
 function resetGUISelections(obj)

@@ -806,11 +806,12 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
      delayMicroseconds(100000);
      LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
      ChoiceMade = 0;
-    // Read digits from User Value
+    // Read digits from User Value. Digits[0-7] hold a time in 100us steps, so a time above MAX_TIME_CYCLES (one sent
+    // over USB) keeps only its last 8 digits.
     int x = 0;
     if (Units == UNITS_TIME) {
       UVTemp = UVTemp / 2;
-      while (UVTemp > 0) {
+      while ((UVTemp > 0) && (x < 8)) {
         Digits[7-x] = (UVTemp % 10);
         UVTemp = UVTemp / 10;
         x++;

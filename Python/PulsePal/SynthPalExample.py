@@ -110,6 +110,6 @@ with S.batch():
 print(S)
 print(S.status())
 
-# Closing the port leaves the device as it is, so TTL triggers keep playing
-# the channels.
+# Closing the port stops playback, as on Pulse Pal. The device keeps its
+# settings, so TTL triggers still play the channels.
 S.close()

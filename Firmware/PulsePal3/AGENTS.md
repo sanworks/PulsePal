@@ -119,7 +119,9 @@ the `--show` output before concluding that a function really changed.
    0.0001 s digit step) where it reads the digits and where it adds and subtracts a step.
    Phases, the inter-pulse interval and the train duration have a minimum of
    `MIN_PULSE_CYCLES` (2) in the menu and the clients: a trigger channel reads its input once
-   per cycle, so it can miss a 1 cycle pulse from another Pulse Pal.
+   per cycle, so it can miss a 1 cycle pulse from another Pulse Pal. Times have a maximum of
+   `MAX_TIME_CYCLES` (9999.9999 s) in the menu and the clients: the most the editor's 8 digits
+   hold. See "Value limits" in `/Firmware/PROTOCOL.md`.
 9. **Keep the existing names.** The lead developer navigates this code from memory during
    support calls. Renaming variables or reformatting whole files costs more than it saves.
 10. **EEPROM writes stop all interrupts** (Pulse Pal 3). The Teensy 4.1 emulates its EEPROM in

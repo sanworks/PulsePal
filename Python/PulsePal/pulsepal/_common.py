@@ -179,7 +179,8 @@ class ChannelSettings(list):
     Index 0 is unused and holds `None`, so `settings[2]` belongs to
     channel 2. Assigning to an element or a slice sets the device's
     setting (or, with `auto_sync` off, this object's copy of it); if the
-    device refuses the new values, the list is left unchanged. The list
+    device refuses the new values, the list is left unchanged. Assigning
+    the whole setting takes one value per channel. The list
     always holds one element per channel and index 0, so methods that
     would change its length raise `TypeError`. `list(settings)` or
     `copy.copy` gives a plain list, detached from the device.
@@ -209,20 +210,28 @@ class ChannelSettings(list):
         self._set_all(values[1:])
 
     def _assign(self, values):
-        """Set all channels from a single value, one value per channel, or a
-        list with index 0 unused."""
+        """Set all channels from one value per channel, or a list with index
+        0 unused, as the list prints.
+
+        A single value is refused rather than copied to every channel: a
+        script that sets one channel should say which, and one that sets
+        them all should list them, so that it reads the same in every
+        class and language.
+        """
         if isinstance(values, (str, bytes)) or not is_iterable(values):
-            values = [values] * self._n
-        else:
-            values = list(values)
-            if len(values) == self._n + 1 and values[0] is None:
-                values = values[1:]
-            elif len(values) != self._n:
-                raise PulsePalError(
-                    f"{self._name} needs one value for all channels, or one "
-                    f"value per channel 1-{self._n}. Received {len(values)} "
-                    "values."
-                )
+            raise PulsePalError(
+                f"{self._name} holds one value per channel, so a single value is ambiguous. Set one "
+                f"channel by its number, e.g. {self._name}[1] = {values!r}, or all {self._n} with a list, "
+                f"e.g. {self._name} = {[values] * self._n!r}."
+            )
+        values = list(values)
+        if len(values) == self._n + 1 and values[0] is None:
+            values = values[1:]
+        elif len(values) != self._n:
+            raise PulsePalError(
+                f"{self._name} needs one value per channel 1-{self._n}. "
+                f"Received {len(values)} values."
+            )
         self._set_all(values)
 
     def _set_all(self, values):
