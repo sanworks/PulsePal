@@ -23,7 +23,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // USB communication with the PC. Op codes are listed in enum OpCode in WavePal.ino, and documented in PROTOCOL.md.
 //
 // Functions in this file:
-//   isValidOutputChannel()
 //   discardBytes()
 //   allAtMost()
 //   processUSBCommands()
@@ -42,11 +41,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Note on playback: the playback functions in Playback.ino are called with interrupts disabled, because the playback
 // interrupts use the same variables and the same SPI bus. See "Interrupt rules" in Playback.ino.
-
-// Channel numbers in USB commands are 1-indexed
-bool isValidOutputChannel(byte channel) {
-  return (channel >= 1) && (channel <= N_CHANNELS);
-}
 
 // Reads and discards the data of a command that cannot be executed
 void discardBytes(uint64_t nBytes) {
@@ -120,6 +114,7 @@ void processUSBCommands() {
       PPUSB.writeUint32(MAX_SAMPLING_RATE);
       PPUSB.writeUint32(BUFFER_SAMPLES);
       PPUSB.writeUint32(TIMER_CLOCK_HZ);
+      PPUSB.writeByte(N_WAVEFORMS);
     } break;
 
     case OP_SET_SAMPLING_RATE: { // Op 83 ('S'). Rate in Hz.
@@ -134,7 +129,9 @@ void processUSBCommands() {
 
     case OP_SET_OUTPUT_RANGE: { // Op 82 ('R'). See enum OutputRange.
       byte newRange = PPUSB.readByte();
-      if (newRange >= N_OUTPUT_RANGES) {
+      // A range change unloads every waveform, and the client loads them again: in param sync mode, those loads would
+      // be stored for the next edge instead of played, so a change is refused then
+      if ((newRange >= N_OUTPUT_RANGES) || ((newRange != rangeIndex) && anyParamSyncChannel())) {
         PPUSB.writeByte(0);
         break;
       }
@@ -144,6 +141,27 @@ void processUSBCommands() {
 
     case OP_LOAD_WAVEFORM: { // Op 76 ('L')
       loadWaveform();
+    } break;
+
+    case OP_SET_CURRENT_WAVEFORMS: { // Op 67 ('C'). One byte per output channel: its waveform, 1-4, or 0 for none.
+      byte newWaveforms[N_CHANNELS];
+      PPUSB.readByteArray(newWaveforms, N_CHANNELS);
+      if (!allAtMost(newWaveforms, N_CHANNELS, N_WAVEFORMS)) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      noInterrupts(); // A param sync edge reads them in its interrupt
+      boolean store = anyParamSyncChannel(); // For the next param sync edge (see "Param sync" in Playback.ino)
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        if (store) {
+          storedCurrentWaveform[i] = newWaveforms[i];
+        } else {
+          currentWaveform[i] = newWaveforms[i]; // A channel that is playing finishes its memory block first
+        }
+      }
+      currentWaveformsStored = store;
+      interrupts();
+      PPUSB.writeByte(1);
     } break;
 
     case OP_PLAY: { // Op 80 ('P'). Soft trigger: one bit per output channel. Starts idle channels, as in Pulse Pal.
@@ -210,6 +228,9 @@ void processUSBCommands() {
       for (byte i = 0; i < N_TRIGGER_CHANNELS; i++) {
         triggerMode[i] = newModes[i];
       }
+      if (!anyParamSyncChannel()) {
+        applyStoredSet(); // What was stored for a param sync edge becomes current, as at an edge
+      }
       interrupts();
       PPUSB.writeByte(1);
     } break;
@@ -232,23 +253,38 @@ void processUSBCommands() {
 
     case OP_GET_STATUS: { // Op 71 ('G')
       byte playingBits = 0;
-      uint32_t loadedSamples[N_CHANNELS];
+      uint32_t loadedSamples[N_WAVEFORMS];
       uint32_t underruns[N_CHANNELS];
+      byte waveforms[N_CHANNELS];
+      byte storedLoadBits = 0;
+      byte storedWaveforms[N_CHANNELS];
       noInterrupts();
       for (byte i = 0; i < N_CHANNELS; i++) {
         if (playing[i] && !stopAfterWrite[i]) {
           bitSet(playingBits, i);
         }
-        loadedSamples[i] = nSamples[i];
         underruns[i] = underrunCount[i];
+        waveforms[i] = currentWaveform[i];
+        storedWaveforms[i] = storedCurrentWaveform[i];
       }
+      for (byte w = 0; w < N_WAVEFORMS; w++) {
+        loadedSamples[w] = nSamples[currentBlock[w]];
+        if (loadStored[w]) {
+          bitSet(storedLoadBits, w);
+        }
+      }
+      byte waveformsStored = currentWaveformsStored;
       uint32_t longestCycles = longestHandlerCycles;
       longestHandlerCycles = 0;
       interrupts();
       PPUSB.writeByte(playingBits);
-      PPUSB.writeUint32Array(loadedSamples, N_CHANNELS);
+      PPUSB.writeUint32Array(loadedSamples, N_WAVEFORMS);
       PPUSB.writeUint32Array(underruns, N_CHANNELS);
       PPUSB.writeUint32((uint32_t)(((uint64_t)longestCycles * 1000000000ULL) / F_CPU_ACTUAL)); // Nanoseconds
+      PPUSB.writeByteArray(waveforms, N_CHANNELS);
+      PPUSB.writeByte(storedLoadBits); // Waveforms with a load stored for the next param sync edge
+      PPUSB.writeByte(waveformsStored); // 1 if op 67's current waveforms are stored for the next param sync edge...
+      PPUSB.writeByteArray(storedWaveforms, N_CHANNELS); // ...and those current waveforms
     } break;
 
     case OP_GET_PLAYBACK_CHECKSUMS: { // Op 90 ('Z'). For testing, like Pulse Pal's debugging ops 86 and 87.
@@ -266,39 +302,52 @@ void processUSBCommands() {
   }
 }
 
-// Op 76: loads one output channel's waveform. The samples arrive in blocks of BUFFER_SAMPLES. Block 0 is read straight
-// into the channel's pre-buffer and the rest into its playback buffers, which are free because the channel is stopped
-// first. Each block is then written to the channel's region of the data file (see Storage.ino). Between blocks, the
-// other channels' playback buffers are refilled, so that they keep playing.
+// Op 76: loads one of the waveforms (1-4) into its unused memory block (see "Waveforms" in Playback.ino). The samples
+// arrive in chunks of BUFFER_SAMPLES. Chunk 0 is read straight into the block's pre-buffer, and the rest into
+// transferBuffer. Each chunk is then written to the block's region of the data file (see Storage.ino). Between chunks,
+// the playing channels' playback buffers are refilled, so that they keep playing. Once the waveform is stored, the
+// block becomes the waveform's current block, or in param sync mode, it is stored for the next param sync edge.
 void loadWaveform() {
-  byte channel = PPUSB.readByte();
+  byte waveformNumber = PPUSB.readByte();
   uint32_t nNewSamples = PPUSB.readUint32();
-  if (!isValidOutputChannel(channel) || (nNewSamples == 0) || (nNewSamples > MAX_WAVE_SAMPLES)) {
+  if ((waveformNumber < 1) || (waveformNumber > N_WAVEFORMS) || (nNewSamples == 0) ||
+      (nNewSamples > MAX_WAVE_SAMPLES)) {
     discardBytes((uint64_t)nNewSamples * 2);
     PPUSB.writeByte(0);
     return;
   }
-  channel = channel - 1; // Convert for zero-indexing
+  byte waveform = waveformNumber - 1; // Convert for zero-indexing
   noInterrupts();
-  stopChannels(bit(channel));
-  nSamples[channel] = 0; // No waveform until the new one is stored, so triggers ignore the channel meanwhile
-  bufferChunk[channel][0] = CHUNK_NONE;
-  bufferChunk[channel][1] = CHUNK_NONE;
+  // In param sync mode, the trigger modes cannot change until this op ends: only ops and the comm failure that ends
+  // one change them. A param sync edge during the load changes nothing for this waveform, since loadStored is false.
+  boolean paramSync = anyParamSyncChannel();
+  byte block = currentBlock[waveform] ^ 1; // The waveform's unused block
+  if (paramSync) {
+    // Channels keep playing the current block. Any still playing this one started before the last edge.
+    stopChannels(channelsPlayingBlock(block));
+  } else {
+    // The waveform is replaced at once: the channels playing it stop, and triggers ignore it until it is stored
+    stopChannels(channelsPlayingBlock(block) | channelsPlayingBlock(currentBlock[waveform]));
+    nSamples[currentBlock[waveform]] = 0;
+  }
+  loadStored[waveform] = false; // A load stored earlier for a param sync edge is in this block: this one replaces it
+  nSamples[block] = 0;
+  forgetBufferedBlock(block);
   interrupts();
   bool stored = true;
   uint32_t samplesLeft = nNewSamples;
   uint32_t chunk = 0;
   while (samplesLeft > 0) {
     uint32_t nChunkSamples = (samplesLeft > BUFFER_SAMPLES) ? BUFFER_SAMPLES : samplesLeft;
-    uint16_t *block = (chunk == 0) ? preBuffer[channel] : playbackBuffers[channel][bufferForChunk(chunk)];
-    PPUSB.readUint16Array(block, nChunkSamples);
+    uint16_t *samples = (chunk == 0) ? preBuffer[block] : transferBuffer;
+    PPUSB.readUint16Array(samples, nChunkSamples);
     if (PPUSB.timedOut()) { // The rest of the waveform never arrived. loop() reports the failure.
       stored = false;
       break;
     }
     if (stored) { // After a failed write, the rest of the samples are still read, so they are not taken for commands
-      stored = waveFile.seekSet(chunkFilePosition(channel, chunk)) &&
-               (waveFile.write(block, nChunkSamples * 2) == nChunkSamples * 2);
+      stored = waveFile.seekSet(chunkFilePosition(block, chunk)) &&
+               (waveFile.write(samples, nChunkSamples * 2) == nChunkSamples * 2);
     }
     samplesLeft -= nChunkSamples;
     chunk++;
@@ -308,16 +357,16 @@ void loadWaveform() {
     stored = waveFile.sync(); // Write any part-sector still in SdFat's cache, so that a failure is reported here
   }
   if (stored) {
-    // The playback buffers hold the last two blocks read, which are this waveform's own, so they need not be read again
-    uint32_t lastChunk = chunk - 1;
-    if (lastChunk >= 1) {
-      bufferChunk[channel][bufferForChunk(lastChunk)] = lastChunk;
+    noInterrupts(); // Last: the block can be played from here on
+    nSamples[block] = nNewSamples;
+    if (paramSync) {
+      loadStored[waveform] = true; // The next param sync edge makes it current
+    } else {
+      currentBlock[waveform] = block;
     }
-    if (lastChunk >= 2) {
-      bufferChunk[channel][bufferForChunk(lastChunk - 1)] = lastChunk - 1;
-    }
-    nSamples[channel] = nNewSamples; // Last: the channel can be triggered from here on
-  }
+    interrupts();
+  } // If it was not stored, the block stays empty: outside param sync mode the waveform is left without samples, and in
+    // param sync mode its current block plays on
   PPUSB.writeByte(stored);
 }
 
@@ -338,10 +387,16 @@ void applyOutputRange(byte newRange) {
   interrupts();
 }
 
-// The settings the device starts with, also loaded after a comm failure. The Python class programs the same ones when
-// it connects. Waveforms are kept, unless the output range changes.
+// The settings the device starts with, also loaded after a comm failure. The Python and MATLAB classes program the same
+// ones when they connect. Waveforms are kept, unless the output range changes, but no channel plays one until op 67
+// sets its current waveform.
 void LoadDefaultSettings() {
   setSamplingRate(DEFAULT_SAMPLING_RATE);
+  noInterrupts();
+  triggerMode[0] = TRIGGER_MODE_NORMAL; // First: leaving param sync mode makes what is stored for an edge current
+  triggerMode[1] = TRIGGER_MODE_NORMAL;
+  applyStoredSet();
+  interrupts();
   applyOutputRange(RANGE_PLUS_MINUS_10V);
   noInterrupts();
   for (byte i = 0; i < N_CHANNELS; i++) {
@@ -349,9 +404,8 @@ void LoadDefaultSettings() {
     loopDuration[i] = 0;
     TriggerAddress[0][i] = 1; // All output channels are triggered by trigger channel 1
     TriggerAddress[1][i] = 0;
+    currentWaveform[i] = 0;
   }
-  triggerMode[0] = TRIGGER_MODE_NORMAL;
-  triggerMode[1] = TRIGGER_MODE_NORMAL;
   interrupts();
 }
 

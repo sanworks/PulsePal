@@ -29,6 +29,8 @@ from pulsepal import PulsePalError  # noqa: E402
 OP_MENU_BYTE = 213
 CLOCK_HZ = 24000000
 BUFFER_SAMPLES = 16384
+N_WAVEFORMS = 4
+PARAM_SYNC = 3
 
 
 class FakeWavePal:
@@ -39,6 +41,12 @@ class FakeWavePal:
     reading. Set `ack` to 0 to have the device reject confirmable commands.
     Bytes in `late_reply` are sent before the reply to the next command, as
     the reply to a command an earlier session left queued on the device.
+
+    It models what the firmware holds: `loaded` (waveform number -> DAC codes
+    of its current version), `current_waveform` (per channel, 0 = none), and
+    in param sync mode, `stored` loads and `stored_current_waveform` for the
+    next edge, which become current when no trigger channel is left in the
+    mode.
     """
 
     def __init__(self, handshake_reply=87, firmware_version=1, ack=1):
@@ -51,8 +59,12 @@ class FakeWavePal:
         self.firmware_version = firmware_version
         self.ack = ack
         self.range_index = 3  # -10 V to 10 V
-        self.loaded = {}  # channel -> DAC codes
-        self.status_reply = bytes(37)
+        self.trigger_modes = [0, 0]
+        self.loaded = {}  # waveform number -> DAC codes
+        self.stored = {}  # waveform number -> DAC codes, for the next param sync edge
+        self.current_waveform = [0] * 4
+        self.stored_current_waveform = None
+        self.status_reply = bytes(47)
 
     def write(self, data):
         data = bytes(data)
@@ -62,38 +74,68 @@ class FakeWavePal:
         self.replies += self._execute(data)
         return len(data)
 
+    def _param_sync(self):
+        return PARAM_SYNC in self.trigger_modes
+
+    def _apply_stored(self):
+        self.loaded.update(self.stored)
+        self.stored.clear()
+        if self.stored_current_waveform is not None:
+            self.current_waveform = self.stored_current_waveform
+            self.stored_current_waveform = None
+
     def _execute(self, data):
         assert data[0] == OP_MENU_BYTE, f"command without the framing byte: {list(data)}"
         op = data[1]
         payload = data[2:]
         expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, ord("N"): 0, ord("S"): 4, ord("R"): 1,
-                            ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4,
+                            ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4, ord("C"): 4,
                             ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
         if op == ord("L"):
-            channel, n_samples = struct.unpack("<BI", payload[:5])
+            number, n_samples = struct.unpack("<BI", payload[:5])
             assert len(payload) == 5 + 2 * n_samples, "load waveform length"
-            if self.ack:
-                self.loaded[channel] = np.frombuffer(payload[5:], dtype="<u2").copy()
+            assert 1 <= number <= N_WAVEFORMS, f"waveform number {number}"
+            codes = np.frombuffer(payload[5:], dtype="<u2").copy()
+            if self._param_sync():
+                self.stored.pop(number, None)  # Replaced, in the same memory block
+                if self.ack:
+                    self.stored[number] = codes
             else:
-                self.loaded.pop(channel, None)
+                self.loaded.pop(number, None)  # Unloaded first
+                if self.ack:
+                    self.loaded[number] = codes
             return bytes([self.ack])
         assert op in expected_lengths, f"unknown op {op}"
         assert len(payload) == expected_lengths[op], f"op {chr(op)!r} data length"
         if op == 72:
             return bytes([self.handshake_reply]) + struct.pack("<I", self.firmware_version)
         if op == ord("N"):
-            return struct.pack("<BBIIII", 3, 4, 1000000, 100000, BUFFER_SAMPLES, CLOCK_HZ)
+            return struct.pack("<BBIIIIB", 3, 4, 1000000, 100000, BUFFER_SAMPLES, CLOCK_HZ, N_WAVEFORMS)
         if op in (ord("P"), ord("X"), 81, 89):
             return b""
         if op == ord("G"):
             return self.status_reply
+        if not self.ack:
+            return bytes([0])
         if op == ord("T"):
-            # Pulse Pal's trigger mode codes, and Master; 3 is Pulse Pal's param sync, which Wave Pal lacks
-            return bytes([self.ack and all(mode in (0, 1, 2, 4) for mode in payload)])
-        if op == ord("R") and self.ack and payload[0] != self.range_index:
+            if not all(mode <= 4 for mode in payload):  # Pulse Pal's codes 0-3, and Master
+                return bytes([0])
+            self.trigger_modes = list(payload)
+            if not self._param_sync():
+                self._apply_stored()  # Leaving param sync mode makes what is stored current
+        if op == ord("C"):
+            if not all(n <= N_WAVEFORMS for n in payload):
+                return bytes([0])
+            if self._param_sync():
+                self.stored_current_waveform = list(payload)
+            else:
+                self.current_waveform = list(payload)
+        if op == ord("R") and payload[0] != self.range_index:
+            if self._param_sync():
+                return bytes([0])  # The reloads would wait for a param sync edge
             self.range_index = payload[0]
             self.loaded.clear()  # The firmware unloads waveforms when the range changes
-        return bytes([self.ack])
+        return bytes([1])
 
     def read(self, n):
         reply = bytes(self.replies[:n])
@@ -156,22 +198,26 @@ def test_connection_sequence_programs_the_defaults():
         command("N"),
         command(89, b"PYTHON"),  # Shown on the device's screen as "PYTHON Connected"
         command("X", bytes([0x0F])),
+        command("T", bytes(2)),  # First: a device left in param sync mode would store what follows
         command("S", struct.pack("<I", 10000)),
         command("R", bytes([3])),
         command("O", bytes(4)),
         command("D", bytes(16)),
-        command("T", bytes(2)),
         command("I", bytes([1, 1, 1, 1, 0, 0, 0, 0])),
+        command("C", bytes(4)),
     ], fake.ops()
     assert device.info.firmware_version == 1
     assert device.info.max_samples == 1000000
     assert device.info.buffer_samples == BUFFER_SAMPLES
+    assert device.info.n_waveforms == N_WAVEFORMS
     assert device.sampling_rate == 10000
     assert device.output_range == "-10V:10V"
+    assert device.current_waveform == [None, 0, 0, 0, 0]
     assert device.loop_mode == [None, False, False, False, False]
     assert device.trigger_mode == [None, "Normal", "Normal"]
     assert device.link_trigger_channel1 == [None, True, True, True, True]
     assert device.link_trigger_channel2 == [None, False, False, False, False]
+    assert device.waveforms == [None] * 5
 
 
 def test_connecting_to_a_pulse_pal_names_the_firmware_and_closes_the_port():
@@ -228,12 +274,14 @@ def test_export_params_holds_every_setting():
     import json
     device, fake = connect()
     device.sampling_rate = 25000
+    device.load_waveform(3, [1, 2], [2, 4])
     device.loop_mode[2] = True
     device.trigger_mode[1] = "Master"
     params = json.loads(json.dumps(device.export_params()))
-    assert list(params) == ["sampling_rate", "output_range", "loop_mode", "loop_duration", "trigger_mode",
-                            "link_trigger_channel1", "link_trigger_channel2"]
+    assert list(params) == ["sampling_rate", "output_range", "current_waveform", "loop_mode", "loop_duration",
+                            "trigger_mode", "link_trigger_channel1", "link_trigger_channel2"]
     assert params["sampling_rate"] == 25000 and params["output_range"] == "-10V:10V"
+    assert params["current_waveform"] == [0, 3, 0, 3]
     assert params["loop_mode"] == [False, True, False, False] and params["trigger_mode"] == ["Master", "Normal"]
 
 
@@ -251,6 +299,7 @@ def test_load_waveform_sends_dac_codes_for_the_output_range():
     ]
     assert device.waveforms[2].tolist() == [-10, 0, 10, 5]
     assert device.waveforms[1] is None
+    assert device.current_waveform == [None, 0, 0, 0, 0]  # No channel plays it yet
 
     device, fake = connect()
     device.output_range = "0V:5V"
@@ -259,10 +308,30 @@ def test_load_waveform_sends_dac_codes_for_the_output_range():
     assert fake.writes[0][-6:] == struct.pack("<3H", 0, 32768, 65535)
 
 
+def test_load_waveform_sets_the_channels_that_play_it():
+    """The channels given play the waveform; the others keep theirs."""
+    device, fake = connect()
+    device.load_waveform(1, [1, 2, 3], [1, 3])
+    assert fake.writes == [
+        command("L", struct.pack("<BI", 1, 3) + device._volts_to_codes([1, 2, 3]).tobytes()),
+        command("C", bytes([1, 0, 1, 0])),
+    ]
+    device.load_waveform(4, [5], 2)
+    device.load_waveform(4, [6], np.array([4]))
+    assert fake.writes[-1] == command("C", bytes([1, 4, 1, 4]))
+    assert device.current_waveform == [None, 1, 4, 1, 4]
+    assert fake.current_waveform == [1, 4, 1, 4]
+    fake.writes.clear()
+    device.load_waveform(1, [7])  # Channels 1 and 3 play the new waveform 1: nothing else is sent
+    assert fake.ops() == ["L"]
+
+
 def test_load_waveform_validates_before_sending():
     device, fake = connect()
-    for channel in (0, 5, True, 1.0, "1"):
-        expect_error(device.load_waveform, channel, [1, 2])
+    for number in (0, 5, True, 1.0, "1"):
+        expect_error(device.load_waveform, number, [1, 2])
+    for channels in (0, 5, [], [1, 7], True, "1"):
+        expect_error(device.load_waveform, 1, [1, 2], channels)
     expect_error(device.load_waveform, 1, [])
     expect_error(device.load_waveform, 1, [0, 10.01])      # Outside -10 V to 10 V
     expect_error(device.load_waveform, 1, [0, float("nan")])
@@ -271,13 +340,18 @@ def test_load_waveform_validates_before_sending():
     assert fake.writes == []
 
 
-def test_a_rejected_load_leaves_the_channel_empty():
+def test_a_rejected_load_leaves_the_waveform_unloaded_and_the_channels_alone():
     device, fake = connect()
-    device.load_waveform(1, [1, 2, 3])
+    device.load_waveform(1, [1, 2, 3], 2)
     fake.ack = 0
-    error = expect_error(device.load_waveform, 1, [4, 5])
+    error = expect_error(device.load_waveform, 1, [4, 5], [1, 3])
     assert "rejected" in str(error)
     assert device.waveforms[1] is None
+    assert fake.ops()[-1] == "L"  # The channels were not set
+    assert device.current_waveform == [None, 0, 1, 0, 0]
+    fake.ack = 1
+    error = expect_error(device.trigger, 2)  # Channel 2 is left on waveform 1, which is not loaded now
+    assert "not loaded" in str(error), error
 
 
 def test_waveforms_are_read_only_copies():
@@ -289,8 +363,34 @@ def test_waveforms_are_read_only_copies():
     expect_error(device.waveforms[1].__setitem__, 0, 3, error=ValueError)
 
 
+def test_current_waveform_takes_loaded_waveform_numbers():
+    device, fake = connect()
+    device.load_waveform(2, [1])
+    device.load_waveform(3, [1])
+    fake.writes.clear()
+    device.current_waveform[1] = 2
+    device.current_waveform = [3, 3, 2, 0]
+    device.current_waveform[2:4] = [np.int64(2), 0]
+    assert fake.writes == [
+        command("C", bytes([2, 0, 0, 0])),
+        command("C", bytes([3, 3, 2, 0])),
+        command("C", bytes([3, 2, 0, 0])),
+    ]
+    assert device.current_waveform == [None, 3, 2, 0, 0]
+    assert all(type(n) is int for n in device.current_waveform[1:])
+    fake.writes.clear()
+    for value in (1, 4, 5, -1, 2.0, True, "2", None):  # 1 and 4 are not loaded
+        expect_error(device.current_waveform.__setitem__, 1, value)
+    error = expect_error(setattr, device, "current_waveform", 2)
+    assert "current_waveform[1] = " in str(error), error
+    assert fake.writes == []
+    assert device.current_waveform == [None, 3, 2, 0, 0]
+
+
 def test_trigger_stop_and_fixed_voltage_messages():
     device, fake = connect()
+    device.load_waveform(1, [1, 2], [1, 2, 3, 4])
+    fake.writes.clear()
     device.trigger(1)
     device.trigger([2, 4])
     device.trigger(np.array([3]))
@@ -313,6 +413,16 @@ def test_trigger_stop_and_fixed_voltage_messages():
         expect_error(device.trigger, channels)
     expect_error(device.set_fixed_voltage, 1, 11)
     assert len(fake.writes) == 8
+
+
+def test_trigger_refuses_a_channel_without_a_waveform():
+    """Nothing is sent: the device would ignore the channel without saying so."""
+    device, fake = connect()
+    device.load_waveform(2, [1], 2)
+    fake.writes.clear()
+    error = expect_error(device.trigger, [2, 3])
+    assert "Channel 3 has no waveform" in str(error), error
+    assert fake.writes == []
 
 
 def test_sampling_rate_resends_loop_durations_in_samples():
@@ -351,6 +461,22 @@ def test_actual_sampling_rate_and_loop_durations_use_the_24mhz_divider():
     assert device.loop_duration == [None, 1.0, 0.0, 1e-9, 0.5]
 
 
+def test_halfway_values_round_as_the_device_and_the_matlab_class_do():
+    """DAC codes and loop durations exactly halfway between two round to the even one, as in the
+    MATLAB class (see /AGENTS.md). The sample clock divider is the firmware's, which rounds up."""
+    device, fake = connect()
+    # These voltages encode to 1632.5, 1634.5 and 1636.5 in the -10 V to 10 V range. testWavePalDevice.m
+    # plays them.
+    volts = [-9.501792935072862, -9.501182574196994, -9.500572213321126]
+    assert device._volts_to_codes(volts).tolist() == [1632, 1634, 1636]
+    device.loop_duration[1] = 0.00025  # 2.5 samples at 10 kHz
+    assert fake.writes[-1] == command("D", struct.pack("<4I", 2, 0, 0, 0))
+    # 24 MHz / 3072 Hz is 7812.5 cycles, which the firmware rounds up to 7813
+    for rate, cycles in ((3072, 7813), (15360, 1563), (76800, 313), (25600, 938)):
+        device.sampling_rate = rate
+        assert device.actual_sampling_rate == CLOCK_HZ / cycles, rate
+
+
 def test_loop_durations_that_do_not_fit_are_refused():
     device, fake = connect()
     expect_error(setattr, device, "loop_duration", -1)
@@ -381,7 +507,7 @@ def test_channel_settings_are_indexed_by_channel_number():
     # A single value does not say which channels it is meant for (see "One way to use all six" in
     # /AGENTS.md)
     for name, value in (("loop_mode", False), ("loop_duration", 0), ("trigger_mode", "Normal"),
-                        ("link_trigger_channel1", True)):
+                        ("link_trigger_channel1", True), ("current_waveform", 0)):
         error = expect_error(setattr, device, name, value)
         assert f"{name}[1] = " in str(error), error
     expect_error(device.loop_mode.__setitem__, 0, True)
@@ -406,19 +532,20 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     device, fake = connect()
     device.trigger_mode[2] = "gated"
     device.trigger_mode = ["Toggle", "MASTER"]
+    device.trigger_mode = ["param sync", "Normal"]
     device.trigger_mode = ["Normal", "Normal"]
     assert fake.writes == [
         command("T", bytes([0, 2])),
         command("T", bytes([1, 4])),
+        command("T", bytes([3, 0])),
         command("T", bytes([0, 0])),
     ]
     assert device.trigger_mode == [None, "Normal", "Normal"]
-    expect_error(device.trigger_mode.__setitem__, 1, "Param Sync")  # Pulse Pal 3 firmware only
     expect_error(device.trigger_mode.__setitem__, 1, "Restart")
     expect_error(device.trigger_mode.__setitem__, 1, 1)
     expect_error(device.trigger_mode.__setitem__, 3, "Normal", error=IndexError)
     expect_error(setattr, device, "trigger_mode", ["Normal"] * 4)
-    assert len(fake.writes) == 3
+    assert len(fake.writes) == 4
 
     fake.writes.clear()
     device.link_trigger_channel2[3] = True    # Both trigger channels travel together
@@ -429,16 +556,63 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     ]
 
 
+def test_param_sync_loads_wait_for_an_edge():
+    """In param sync mode the device stores loads and current waveforms for the next edge. The object
+    holds what was sent, which the device plays once no trigger channel is left in the mode."""
+    device, fake = connect()
+    device.load_waveform(1, [1, 2], 1)
+    device.trigger_mode[2] = "Param Sync"
+    fake.writes.clear()
+    device.load_waveform(1, [3, 4], [1, 2])
+    assert fake.ops() == ["L", "C"]  # The same ops as outside param sync mode
+    assert device.waveforms[1].tolist() == [3, 4] and device.current_waveform == [None, 1, 1, 0, 0]
+    assert fake.loaded[1].tolist() == device._volts_to_codes([1, 2]).tolist()  # Still plays the old one
+    assert fake.stored[1].tolist() == device._volts_to_codes([3, 4]).tolist()
+    assert fake.current_waveform == [1, 0, 0, 0] and fake.stored_current_waveform == [1, 1, 0, 0]
+    device.trigger([1, 2])  # The object cannot know whether the edge came, so it allows this
+    device.trigger_mode[2] = "Normal"
+    assert fake.loaded[1].tolist() == device._volts_to_codes([3, 4]).tolist() and not fake.stored
+    assert fake.current_waveform == [1, 1, 0, 0]
+
+
+def test_the_output_range_cannot_change_in_param_sync_mode():
+    """A range change reloads the waveforms, which param sync mode would store for an edge."""
+    device, fake = connect()
+    device.load_waveform(1, [1], 1)
+    device.trigger_mode[1] = "Param Sync"
+    fake.writes.clear()
+    error = expect_error(setattr, device, "output_range", "-5V:5V")
+    assert "param sync" in str(error), error
+    assert fake.writes == []
+    device.output_range = "-10V:10V"  # The same range changes nothing, so it is allowed
+    assert fake.ops() == ["R"]
+    assert device.output_range == "-10V:10V"
+
+
+def test_set_default_params_leaves_param_sync_mode_first():
+    device, fake = connect()
+    device.load_waveform(1, [1], 1)
+    device.trigger_mode[1] = "Param Sync"
+    fake.writes.clear()
+    device.set_default_params()
+    assert fake.ops() == ["T", "S", "D", "R", "O", "D", "I", "C"]  # A new rate resends the loop durations
+    assert fake.writes[0] == command("T", bytes(2))
+    assert fake.current_waveform == [0, 0, 0, 0] and fake.stored_current_waveform is None
+    assert device.current_waveform == [None, 0, 0, 0, 0]
+    assert device.waveforms[1].tolist() == [1]  # Waveforms are kept
+
+
 def test_changing_the_output_range_reloads_the_waveforms():
     device, fake = connect()
-    device.load_waveform(1, [0, 5])
-    device.load_waveform(3, [-2, 2])
+    device.load_waveform(1, [0, 5], 1)
+    device.load_waveform(3, [-2, 2], [2, 3])
     fake.writes.clear()
     device.output_range = "-5V:5V"
-    assert fake.ops() == ["R", "L", "L"]
+    assert fake.ops() == ["R", "L", "L"]  # The channels keep their current waveforms
     assert fake.writes[0] == command("R", bytes([2]))
     assert fake.loaded[1].tolist() == [32768, 65535]
     assert fake.loaded[3].tolist() == [round(3 / 10 * 65535), round(7 / 10 * 65535)]
+    assert fake.current_waveform == [1, 3, 3, 0] and device.current_waveform == [None, 1, 3, 3, 0]
 
     # The same range again changes nothing on the device, so nothing is reloaded
     fake.writes.clear()
@@ -452,7 +626,7 @@ def test_a_range_that_does_not_fit_a_waveform_is_refused():
     device.load_waveform(2, [-1, 7])
     fake.writes.clear()
     error = expect_error(setattr, device, "output_range", "0V:10V")
-    assert "channel 2" in str(error)
+    assert "Waveform 2" in str(error)
     for unknown_range in ("0V:12V", "0V:10.8V", "-10.8V:10.8V"):
         expect_error(setattr, device, "output_range", unknown_range)
     assert fake.writes == []
@@ -461,14 +635,20 @@ def test_a_range_that_does_not_fit_a_waveform_is_refused():
 
 def test_status_is_unpacked():
     device, fake = connect()
-    fake.status_reply = struct.pack("<B4I4II", 0b0101, 100, 0, 2000000 // 2, 7,
-                                    0, 3, 0, 0, 4250)
+    fake.status_reply = struct.pack("<B4I4II4BBB4B", 0b0101, 100, 0, 2000000 // 2, 7,
+                                    0, 3, 0, 0, 4250, 1, 0, 1, 4, 0b0110, 1, 2, 2, 0, 3)
     status = device.status()
     assert fake.writes == [command("G")]
     assert status.playing == [1, 3]
     assert status.samples_loaded == [None, 100, 0, 1000000, 7]
     assert status.underruns == [None, 0, 3, 0, 0]
     assert status.longest_interrupt_us == 4.25
+    assert status.current_waveform == [None, 1, 0, 1, 4]
+    assert status.stored_waveforms == [2, 3]
+    assert status.stored_current_waveform == [None, 2, 2, 0, 3]
+    fake.status_reply = bytes(47)
+    status = device.status()
+    assert status.stored_waveforms == [] and status.stored_current_waveform is None
 
 
 def test_deleting_the_device_closes_its_port_at_once():

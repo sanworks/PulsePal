@@ -37,9 +37,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // the ends, and a click selects.
 //
 // MENU_TOP          "Wave Pal v3.0" / "Click for menu". Click -> MENU_LIST, at channel 1
-// MENU_LIST         menuItem  1-4  Output channels 1-4. A click plays the channel's waveform, or stops it while it
-//                                  plays; the second line says which, or "No waveform". The trigger mode does not
-//                                  apply here.
+// MENU_LIST         menuItem  1-4  Output channels 1-4. A click plays the channel's current waveform, or stops it while
+//                                  it plays; the second line says which, with the waveform's number ("Play waveform
+//                                  2"), or "No waveform". The trigger mode does not apply here.
 //                             5    Screen saver on/off: a click switches it (MENU_ITEM_SCREEN_SAVER). Its timeout
 //                                  is set over USB only (op 99).
 //                             6    Device info -> MENU_DEVICE_INFO (MENU_ITEM_DEVICE_INFO)
@@ -142,18 +142,19 @@ void scrollMenu(int8_t direction) {
   RefreshMenuList();
 }
 
-// What a channel's menu item shows: 0 = no waveform, 1 = can be played, 2 = playing
+// What a channel's menu item shows: 0 = no waveform; or the number (1-4) of the waveform a click plays; or, while the
+// channel plays, 8 + the number of the waveform it plays, which a click stops
 int32_t channelMenuState(byte channel) {
-  if (nSamples[channel] == 0) {
-    return 0;
+  if (playing[channel] && !stopAfterWrite[channel]) {
+    return 8 + (playBlock[channel] / 2) + 1;
   }
-  return (playing[channel] && !stopAfterWrite[channel]) ? 2 : 1;
+  byte block = channelStartBlock(channel);
+  return (block == NO_BLOCK) ? 0 : (block / 2) + 1;
 }
 
 // Draws the selected MENU_LIST item. See the menu map above.
 void RefreshMenuList() {
   static const char* channelTitles[N_CHANNELS] = {"<  Channel 1   >", "<  Channel 2   >", "<  Channel 3   >", "<  Channel 4   >"};
-  static const char* channelActions[3] = {"No waveform", "Click to play", "Click to stop"}; // Indexed by channelMenuState()
   shownChannelState = -1;
   switch (menuItem) {
     case MENU_ITEM_SCREEN_SAVER: {write2Screen("< Screen Saver >", screenSaverEnabled ? "On" : "Off");} break;
@@ -162,7 +163,12 @@ void RefreshMenuList() {
     case MENU_ITEM_EXIT: {write2Screen("<     Exit     >", " ");} break;
     default: { // Output channels 1-4
       shownChannelState = channelMenuState(menuItem - 1);
-      write2Screen(channelTitles[menuItem - 1], channelActions[shownChannelState]);
+      char action[17] = "No waveform"; // 16 characters, the screen's width, and the terminator
+      if (shownChannelState > 0) { // Not snprintf(), which would add 20kB of printf code to the RAM the code runs from
+        strcpy(action, (shownChannelState > 8) ? "Stop waveform 0" : "Play waveform 0");
+        action[14] = '0' + (shownChannelState & 7);
+      }
+      write2Screen(channelTitles[menuItem - 1], action);
     } break;
   }
 }

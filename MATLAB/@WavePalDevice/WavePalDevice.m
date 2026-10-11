@@ -1,19 +1,21 @@
 % WavePalDevice controls a Pulse Pal 3 running Wave Pal firmware (/Firmware/WavePal), which makes it a four
-% channel waveform player. Each output channel plays one waveform of up to 1 million samples, stored on the
-% device's microSD card, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(),
-% or from the thumb joystick. Waveforms play at up to 100 kHz.
+% channel waveform player. The device stores four waveforms of up to 1 million samples each on its microSD card,
+% and each output channel plays one of them when it is triggered: by a TTL pulse on a trigger channel, from MATLAB
+% with trigger(), or from the thumb joystick. Waveforms play at up to 100 kHz.
 %
 % Example:
-%   W = WavePalDevice('COM3');           % Replace COM3 with the device's port. serialportlist lists them.
-%   W.samplingRate = 50000;              % Hz, all channels
-%   W.outputRange = '-5V:5V';            % All channels
-%   t = (0:49999)/50000;                 % 1 second
-%   W.loadWaveform(1, 4*sin(2*pi*10*t)); % A 10 Hz sine wave, +/-4 V, on output channel 1
-%   W.trigger(1);                        % One channel, or several as an array, e.g. W.trigger([1 3])
-%   W.loopMode(1) = true;                % Loop channel 1's waveform...
-%   W.loopDuration(1) = 3;               % ...for 3 seconds after each trigger
-%   W.triggerMode{2} = 'Toggle';         % Trigger channel 2
-%   clear W                              % Releases the port and stops playback. TTL triggers still play the waveforms.
+%   W = WavePalDevice('COM3');                  % Replace COM3 with the device's port. serialportlist lists them.
+%   W.samplingRate = 50000;                     % Hz, all channels
+%   W.outputRange = '-5V:5V';                   % All channels
+%   t = (0:49999)/50000;                        % 1 second
+%   W.loadWaveform(1, 4*sin(2*pi*10*t), [1 3]); % Waveform 1, a 10 Hz sine wave, +/-4 V, played by channels 1 and 3
+%   W.trigger([1 3]);                           % One channel, or several as an array
+%   W.loadWaveform(2, linspace(0, 4, 5000));    % Waveform 2, a ramp. No channel plays it yet...
+%   W.currentWaveform(3) = 2;                   % ...until now: channel 3 plays it from its next start
+%   W.loopMode(1) = true;                       % Loop channel 1's waveform...
+%   W.loopDuration(1) = 3;                      % ...for 3 seconds after each trigger
+%   W.triggerMode{2} = 'Toggle';                % Trigger channel 2
+%   clear W                                     % Releases the port and stops playback. TTL triggers still play.
 %
 % Settings are properties, and assigning one programs the device at once. Settings of the output channels are
 % 1x4 arrays with one element per channel, so W.loopMode(2) is output channel 2's loop mode; triggerMode is a 1x2
@@ -21,18 +23,39 @@
 % per channel: W.loopMode = true raises an error, because a single value does not say which channels it is meant
 % for. W.loopMode(:) = true sets all four. Voltages are in volts, within outputRange. Times are in seconds.
 %
+% Waveforms. The device stores four waveforms, numbered 1-4, and each output channel plays one of them: its
+% currentWaveform, or none (0, the default). Several channels can play the same waveform, which is loaded only once.
+% A channel that is playing finishes its waveform: a new currentWaveform plays from the channel's next start. Outside
+% param sync mode, loading a waveform stops the channels playing it.
+%
 % Triggers. triggerMode sets how each trigger channel acts on the output channels linked to it
-% (linkTriggerChannel1, linkTriggerChannel2). The first three are Pulse Pal's trigger modes:
-%   'Normal'  A rising edge starts the linked channels' waveforms. Channels that are playing ignore it.
-%   'Toggle'  A rising edge starts the linked channels, or stops those that are playing.
-%   'Gated'   A rising edge starts the linked channels, and a falling edge stops them, unless the other trigger
-%             channel is also gated, linked to them, and still high. With loop mode on and a loop duration of 0, a
-%             waveform plays for exactly as long as the TTL is high.
-%   'Master'  A rising edge starts the linked channels, and restarts those that are playing from their first
-%             sample.
+% (linkTriggerChannel1, linkTriggerChannel2). The first four are Pulse Pal's trigger modes:
+%   'Normal'      A rising edge starts the linked channels' waveforms. Channels that are playing ignore it.
+%   'Toggle'      A rising edge starts the linked channels, or stops those that are playing.
+%   'Gated'       A rising edge starts the linked channels, and a falling edge stops them, unless the other trigger
+%                 channel is also gated, linked to them, and still high. With loop mode on and a loop duration of 0,
+%                 a waveform plays for exactly as long as the TTL is high.
+%   'Param Sync'  A rising edge starts and stops nothing (the channel's links are ignored). It makes the waveforms
+%                 loaded, and the currentWaveform set, since the previous edge current. This is how the next trial's
+%                 waveforms are loaded during the current trial, and played from the instant it starts.
+%   'Master'      A rising edge starts the linked channels, and restarts those that are playing from their first
+%                 sample.
 % trigger() starts idle channels, and channels that are playing ignore it, as in Pulse Pal. When no channel is
 % playing, a trigger starts the waveform within microseconds. A channel triggered while another plays starts on the
 % next sample of the shared sample clock.
+%
+% Param sync. While a trigger channel is in 'Param Sync' mode, loadWaveform() loads into a second memory block that
+% the device keeps for each waveform: channels go on playing the waveform it replaces, and triggers still start it,
+% until the next rising edge on that trigger channel makes the new one current. A channel playing at the edge
+% finishes what it plays. A later load of the same waveform before the edge replaces the earlier one, and stops any
+% channel still playing that waveform from before the previous edge, since the device reuses that memory block.
+% Changes to currentWaveform wait for the edge in the same way; other settings apply at once. When neither trigger
+% channel is in param sync mode any more, what was waiting becomes current at once, so waveforms and
+% currentWaveform describe the device again (Pulse Pal and Synth Pal discard their stored settings then).
+% outputRange cannot change in param sync mode. To make the waveforms current on the same edge that starts the
+% channels, wire the TTL to the other trigger channel as well: the param sync edge is handled first.
+%   W.triggerMode{2} = 'Param Sync';
+%   W.loadWaveform(1, nextTrialWave);   % Waits for trigger channel 2's next rising edge
 %
 % Wave Pal's USB protocol is documented in /Firmware/WavePal/PROTOCOL.md. The Python class,
 % pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py), has the same features.
@@ -66,13 +89,18 @@ classdef WavePalDevice < handle
                              % It can change during playback. The rate played can differ slightly: see actualSamplingRate.
         outputRange = '' % Voltage range of all output channels: '0V:5V', '0V:10V', '-5V:5V' or '-10V:10V'. The smallest
                          % range that fits the waveforms gives the finest voltage steps. Changing it stops playback,
-                         % sets the outputs to 0 V and loads the waveforms again, encoded for the new range.
+                         % sets the outputs to 0 V and loads the waveforms again, encoded for the new range. It cannot
+                         % change in param sync mode, where the loads would wait for a TTL edge.
+        currentWaveform = zeros(1,4) % 1x4. The number of the waveform each output channel plays, 1-4, from those
+                                     % loaded by loadWaveform(), or 0 for none: a channel with no waveform ignores
+                                     % triggers. A channel that is playing finishes its waveform first. In param sync
+                                     % mode, a change waits for the next edge.
         loopMode = false(1,4) % 1x4. true loops the channel's waveform until loopDuration has elapsed, or until stopped
                               % if loopDuration is 0. false plays it once. A change applies to playback in progress.
         loopDuration = zeros(1,4) % 1x4, in seconds. In loop mode, how long the channel plays after each trigger. It stops
                                   % part way through the waveform if need be. 0 loops until the channel is stopped.
-        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or
-                                           % 'Master'. See "Triggers" above. Not case sensitive.
+        triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated',
+                                           % 'Param Sync' or 'Master'. See "Triggers" above. Not case sensitive.
         linkTriggerChannel1 = true(1,4) % 1x4. true if a rising edge on trigger channel 1 triggers the output channel
         linkTriggerChannel2 = false(1,4) % 1x4. true if a rising edge on trigger channel 2 triggers the output channel
     end
@@ -80,9 +108,10 @@ classdef WavePalDevice < handle
     properties (SetAccess = private)
         port % The serial port connected to the device: a pulsepal.DotNetSerialPort on Windows, otherwise a serialport
         info % Properties of the connected device
-        waveforms = cell(1,4) % 1x4 cell array of the waveforms loaded by loadWaveform(), in volts. [] if none.
-                              % status() shows what the device itself holds, which can include waveforms loaded
-                              % by an earlier connection.
+        waveforms = cell(1,4) % 1x4 cell array of the waveforms loaded by loadWaveform(), in volts, by waveform number.
+                              % [] if none. In param sync mode, it holds the waveforms loaded since the last edge
+                              % before the device plays them. status() shows what the device itself holds, which can
+                              % include waveforms loaded by an earlier connection.
     end
 
     properties (Dependent, SetAccess = private)
@@ -106,6 +135,7 @@ classdef WavePalDevice < handle
         OpSetSamplingRate = 'S'
         OpSetOutputRange = 'R'
         OpLoadWaveform = 'L'
+        OpSetCurrentWaveforms = 'C'
         OpTrigger = 'P'
         OpStop = 'X'
         OpSetFixedVoltage = '!'
@@ -120,8 +150,8 @@ classdef WavePalDevice < handle
         SynthPalHandshakeReply = 83 % 'S': the device runs Synth Pal firmware
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         OutputRangeLimits = [0 5; 0 10; -5 5; -10 10] % Volts, one row per range
-        TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Master'}
-        TriggerModeCodes = [0 1 2 4] % Their codes on the device: Pulse Pal's, and 4. 3 is Pulse Pal's param sync mode
+        TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync', 'Master'}
+        TriggerModeCodes = [0 1 2 3 4] % Their codes on the device: Pulse Pal's, and 4
         DACBitMax = 65535
     end
 
@@ -187,29 +217,43 @@ classdef WavePalDevice < handle
         end
 
         function setDefaultParams(obj)
-            % Programs the default settings on the device: a 10 kHz sampling rate, the -10 V to 10 V output range,
-            % loop mode off with loop durations of 0, both trigger channels in 'Normal' mode, and all output channels
-            % linked to trigger channel 1 and not to trigger channel 2. They match the settings the device starts with.
+            % Programs the default settings on the device: both trigger channels in 'Normal' mode, a 10 kHz sampling
+            % rate, the -10 V to 10 V output range, loop mode off with loop durations of 0, all output channels linked
+            % to trigger channel 1 and not to trigger channel 2, and no currentWaveform on any channel. They match the
+            % settings the device starts with. The trigger modes are sent first: a trigger channel leaving param sync
+            % mode makes what was stored for its next edge current, and the settings after it then apply at once.
             % Loaded waveforms are kept, and loaded again if the output range changes. Raises an error if a loaded
             % waveform does not fit the default range.
+            obj.triggerMode = {'Normal', 'Normal'};
             obj.samplingRate = 10000;
             obj.outputRange = '-10V:10V';
             obj.loopMode = false(1,4);
             obj.loopDuration = zeros(1,4);
-            obj.triggerMode = {'Normal', 'Normal'};
             obj.linkTriggerChannel1 = true(1,4);
             obj.linkTriggerChannel2 = false(1,4);
+            obj.currentWaveform = zeros(1,4);
         end
 
-        function loadWaveform(obj, channel, waveform)
-            % Loads a waveform onto an output channel.
-            % channel: output channel number, 1-4
+        function loadWaveform(obj, waveformNumber, waveform, channels)
+            % Loads one of the device's waveforms, and optionally chooses the channels that play it.
+            % waveformNumber: the waveform to load, 1 to info.nWaveforms (4)
             % waveform: voltages of the samples, played at samplingRate: 1 to info.maxSamples values, all within
             %           outputRange.
+            % channels (optional): output channels that play this waveform from their next start, one channel number
+            %           or several as an array. It sets their currentWaveform, and leaves the other channels' alone,
+            %           so channels already playing this waveform play the new one. Left out, no channel changes.
             % The samples are written to the device's microSD card, and the first info.bufferSamples of them are
-            % also kept in its RAM. Loading stops the channel if it is playing; other channels keep playing.
-            % Example: W.loadWaveform(2, 3*sin(2*pi*100*(0:9999)/W.samplingRate));
-            channel = obj.checkChannel(channel);
+            % also kept in its RAM. Outside param sync mode, loading stops the channels playing that waveform, and the
+            % new one plays from their next start; other channels keep playing. In param sync mode, the new waveform
+            % waits for the next rising edge on the param sync trigger channel, and channels go on playing the old one
+            % until then. If the device cannot store the waveform, it is left out of waveforms: outside param sync
+            % mode the device has unloaded it, and in param sync mode it plays the version made current at the last
+            % edge.
+            % Example: W.loadWaveform(2, 3*sin(2*pi*100*(0:9999)/W.samplingRate), [1 3]);
+            waveformNumber = obj.checkWaveformNumber(waveformNumber);
+            if nargin > 3
+                obj.channelBits(channels); % Checks the channel numbers before anything is sent
+            end
             if ~isnumeric(waveform) && ~islogical(waveform)
                 error('The waveform must be a vector of voltages.')
             end
@@ -220,18 +264,37 @@ classdef WavePalDevice < handle
                        num2str(nSamples) '.'])
             end
             codes = obj.volts2Codes(samples);
-            obj.waveforms{channel} = []; % The device unloads the channel before it reads the new samples
-            obj.writeCommand(obj.OpLoadWaveform, [uint8(channel) typecast(uint32(nSamples), 'uint8')...
+            obj.waveforms{waveformNumber} = []; % Until the device has stored it. Outside param sync mode, it unloads it first.
+            obj.writeCommand(obj.OpLoadWaveform, [uint8(waveformNumber) typecast(uint32(nSamples), 'uint8')...
                 typecast(codes, 'uint8')]);
             obj.confirmWrite('loadWaveform()');
-            obj.waveforms{channel} = samples;
+            obj.waveforms{waveformNumber} = samples;
+            if nargin > 3
+                newWaveforms = obj.currentWaveform;
+                newWaveforms(unique(channels(:))) = waveformNumber;
+                obj.currentWaveform = newWaveforms;
+            end
         end
 
         function trigger(obj, channels)
             % Triggers output channels in software: one channel number, e.g. W.trigger(1), or several as an array,
-            % e.g. W.trigger([2 4]). Idle channels start their waveforms from the first sample, on the same sample.
-            % Channels that are playing ignore it, as Pulse Pal's do, and channels without a waveform are ignored.
-            obj.writeCommand(obj.OpTrigger, obj.channelBits(channels));
+            % e.g. W.trigger([2 4]). Idle channels start their current waveforms from the first sample, on the same
+            % sample. Channels that are playing ignore it, as Pulse Pal's do. Raises an error, and sends nothing, if a
+            % channel has no waveform to play: its currentWaveform is 0, or a waveform this object has not loaded.
+            bits = obj.channelBits(channels);
+            for channel = unique(channels(:))'
+                waveformNumber = obj.currentWaveform(channel);
+                if waveformNumber == 0
+                    error(['Channel ' num2str(channel) ' has no waveform to play. Set currentWaveform(' ...
+                           num2str(channel) ') to a loaded waveform''s number, or load one with loadWaveform(' ...
+                           'number, waveform, ' num2str(channel) ').'])
+                end
+                if isempty(obj.waveforms{waveformNumber})
+                    error(['Channel ' num2str(channel) ' plays waveform ' num2str(waveformNumber) ', which is not ' ...
+                           'loaded. Load it with loadWaveform(' num2str(waveformNumber) ', waveform).'])
+                end
+            end
+            obj.writeCommand(obj.OpTrigger, bits);
         end
 
         function stop(obj, channels)
@@ -259,19 +322,33 @@ classdef WavePalDevice < handle
         function deviceStatus = status(obj)
             % Returns the device's playback state, as a struct with fields:
             % playing: numbers of the output channels playing a waveform, e.g. [1 3]
-            % samplesLoaded: 1x4, samples in each channel's waveform on the device, 0 if it has none
+            % samplesLoaded: 1x4, samples in each waveform on the device, by waveform number, 0 if it has none. A
+            %                load stored for a param sync edge counts from the edge.
             % underruns: 1x4, blocks of samples that were not read from the microSD card in time, since the
             %            device started. The output holds its last value until the block arrives.
             % longestInterrupt_us: longest run of the device's playback interrupt since the previous call to
             %                      status(), in microseconds. It must stay below the sample period.
+            % currentWaveform: 1x4, the waveform each output channel plays from its next start, 0 for none, as the
+            %                  device holds it. In param sync mode, currentWaveform set since the last edge is in
+            %                  storedCurrentWaveform until the next one.
+            % storedWaveforms: numbers of the waveforms loaded in param sync mode since the last edge, which the
+            %                  next edge makes current, e.g. 2
+            % storedCurrentWaveform: 1x4, the currentWaveform set in param sync mode since the last edge, which the
+            %                        next edge applies. [] if none was set.
             obj.writeCommand(obj.OpGetStatus, []);
-            reply = obj.readBytes(37, 'status()');
-            values = double(typecast(uint8(reply(2:end)), 'uint32'));
+            reply = obj.readBytes(47, 'status()');
+            values = double(typecast(uint8(reply(2:37)), 'uint32'));
             deviceStatus = struct;
             deviceStatus.playing = find(bitget(reply(1), 1:4));
             deviceStatus.samplesLoaded = values(1:4);
             deviceStatus.underruns = values(5:8);
             deviceStatus.longestInterrupt_us = values(9)/1000;
+            deviceStatus.currentWaveform = double(reply(38:41));
+            deviceStatus.storedWaveforms = find(bitget(reply(42), 1:4));
+            deviceStatus.storedCurrentWaveform = [];
+            if reply(43)
+                deviceStatus.storedCurrentWaveform = double(reply(44:47));
+            end
         end
 
         function setScreenSaver(obj, enabled, timeout)
@@ -305,7 +382,7 @@ classdef WavePalDevice < handle
             %   save('Session3.mat', 'params');          % Or jsonencode(params), for a text file
             % The Python class's export_params() returns the same, with snake_case names.
             params = struct;
-            names = {'samplingRate', 'outputRange', 'loopMode', 'loopDuration', 'triggerMode', ...
+            names = {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', 'triggerMode', ...
                      'linkTriggerChannel1', 'linkTriggerChannel2'};
             for i = 1:numel(names)
                 params.(names{i}) = obj.(names{i});
@@ -313,8 +390,7 @@ classdef WavePalDevice < handle
         end
 
         function rate = get.actualSamplingRate(obj)
-            clockHz = obj.info.sampleClockHz;
-            rate = clockHz/round(clockHz/obj.samplingRate);
+            rate = obj.info.sampleClockHz/obj.periodCycles(obj.samplingRate);
         end
 
         function set.samplingRate(obj, rate)
@@ -343,13 +419,18 @@ classdef WavePalDevice < handle
             rangeChanged = ~strcmp(rangeName, obj.outputRange);
             if obj.initialized %#ok<MCSUP>
                 limits = obj.OutputRangeLimits(rangeIndex, :);
-                for i = 1:4
+                for i = 1:numel(obj.waveforms) %#ok<MCSUP>
                     wave = obj.waveforms{i}; %#ok<MCSUP>
                     if ~isempty(wave) && (min(wave) < limits(1) || max(wave) > limits(2))
-                        error(['The waveform on channel ' num2str(i) ' spans ' num2str(min(wave)) ' V to '...
+                        error(['Waveform ' num2str(i) ' spans ' num2str(min(wave)) ' V to '...
                                num2str(max(wave)) ' V, which does not fit the ' rangeName ' range. Load a new '...
                                'waveform first, or choose a wider range.'])
                     end
+                end
+                if rangeChanged && any(strcmp(obj.triggerMode, 'Param Sync')) %#ok<MCSUP>
+                    error(['outputRange cannot change while a trigger channel is in param sync mode: the waveforms '...
+                           'are loaded again for the new range, and in param sync mode they would wait for a TTL '...
+                           'edge. Set triggerMode to another mode first.'])
                 end
                 obj.writeCommand(obj.OpSetOutputRange, uint8(rangeIndex-1));
                 obj.confirmWrite('setting outputRange');
@@ -357,15 +438,38 @@ classdef WavePalDevice < handle
             obj.outputRange = rangeName;
             if obj.initialized && rangeChanged %#ok<MCSUP>
                 % The device unloads the waveforms when the range changes, because their samples encode voltages
-                % in the old range. Load them again, encoded for the new one.
+                % in the old range. Load them again, encoded for the new one. The channels keep their current
+                % waveforms.
                 oldWaveforms = obj.waveforms; %#ok<MCSUP>
-                obj.waveforms = cell(1,4); %#ok<MCSUP>
-                for i = 1:4
+                obj.waveforms = cell(size(oldWaveforms)); %#ok<MCSUP>
+                for i = 1:numel(oldWaveforms)
                     if ~isempty(oldWaveforms{i})
                         obj.loadWaveform(i, oldWaveforms{i});
                     end
                 end
             end
+        end
+
+        function set.currentWaveform(obj, waveformNumbers)
+            waveformNumbers = obj.oneValuePerChannel(waveformNumbers, 4, 'currentWaveform', 'output channel');
+            if obj.initialized %#ok<MCSUP>
+                nWaveforms = obj.info.nWaveforms; %#ok<MCSUP>
+                if ~isnumeric(waveformNumbers) || ~isreal(waveformNumbers) || ...
+                        any(~ismember(waveformNumbers, 0:nWaveforms))
+                    error(['currentWaveform values are waveform numbers, 1-' num2str(nWaveforms) ', or 0 for none.'])
+                end
+                % A channel left on a waveform whose load failed is not refused here: trigger() refuses it
+                changed = find(waveformNumbers ~= obj.currentWaveform & waveformNumbers > 0);
+                for channel = changed
+                    if isempty(obj.waveforms{waveformNumbers(channel)}) %#ok<MCSUP>
+                        error(['Waveform ' num2str(waveformNumbers(channel)) ' is not loaded. Load it with '...
+                               'loadWaveform(' num2str(waveformNumbers(channel)) ', waveform) first.'])
+                    end
+                end
+                obj.writeCommand(obj.OpSetCurrentWaveforms, uint8(waveformNumbers));
+                obj.confirmWrite('setting currentWaveform');
+            end
+            obj.currentWaveform = double(waveformNumbers);
         end
 
         function set.loopMode(obj, modes)
@@ -527,10 +631,12 @@ classdef WavePalDevice < handle
 
         function readHardwareInfo(obj)
             obj.writeCommand(obj.OpHardwareInfo, []);
-            reply = obj.readBytes(18, 'reading the hardware info');
-            values = double(typecast(uint8(reply(3:end)), 'uint32'));
+            reply = obj.readBytes(19, 'reading the hardware info');
+            values = double(typecast(uint8(reply(3:18)), 'uint32'));
             obj.info.hardwareVersion = reply(1);
             obj.info.nChannels = reply(2);
+            obj.info.nWaveforms = reply(19); % Waveforms the device stores, numbered from 1
+            obj.waveforms = cell(1, obj.info.nWaveforms);
             obj.info.maxSamples = values(1); % Samples per waveform
             obj.info.maxSamplingRate = values(2); % Hz
             obj.info.bufferSamples = values(3); % Samples of each waveform kept in the device's RAM
@@ -547,9 +653,8 @@ classdef WavePalDevice < handle
 
         function samples = durations2Samples(obj, durations, rate)
             % Converts loop durations in seconds to samples at a sampling rate
-            clockHz = obj.info.sampleClockHz;
-            actualRate = clockHz/round(clockHz/rate);
-            samples = round(durations*actualRate);
+            actualRate = obj.info.sampleClockHz/obj.periodCycles(rate);
+            samples = obj.roundHalfEven(durations*actualRate);
             samples(durations > 0 & samples == 0) = 1; % 0 samples would mean "loop until stopped"
             if any(samples > double(intmax('uint32')))
                 error(['A loopDuration is too long at ' num2str(rate) ' Hz. The longest is '...
@@ -568,7 +673,15 @@ classdef WavePalDevice < handle
                        ' V. Received ' num2str(min(volts)) ' V to ' num2str(max(volts)) ' V. Change outputRange'...
                        ' to use a wider range.'])
             end
-            codes = uint16(round((volts - limits(1))/(limits(2) - limits(1))*obj.DACBitMax));
+            codes = uint16(obj.roundHalfEven((volts - limits(1))/(limits(2) - limits(1))*obj.DACBitMax));
+        end
+
+        function cycles = periodCycles(obj, rate)
+            % The sample period the device plays at a sampling rate, in cycles of its sample clock: the nearest whole
+            % number, computed as the firmware's setSamplingRate() does, in integers. A rate halfway between two
+            % (e.g. 3072 Hz: 7812.5 cycles) rounds up there, not to even, so roundHalfEven() does not apply.
+            clockHz = obj.info.sampleClockHz;
+            cycles = floor((clockHz + floor(rate/2))/rate);
         end
 
         function [rangeName, rangeIndex] = findRange(obj, rangeName)
@@ -613,11 +726,12 @@ classdef WavePalDevice < handle
             values = logical(values);
         end
 
-        function channel = checkChannel(~, channel)
-            if ~isnumeric(channel) || ~isscalar(channel) || ~ismember(channel, 1:4)
-                error('Output channels are numbered 1-4.')
+        function waveformNumber = checkWaveformNumber(obj, waveformNumber)
+            if ~isnumeric(waveformNumber) || ~isscalar(waveformNumber) || ...
+                    ~ismember(waveformNumber, 1:obj.info.nWaveforms)
+                error(['Waveforms are numbered 1-' num2str(obj.info.nWaveforms) '.'])
             end
-            channel = double(channel);
+            waveformNumber = double(waveformNumber);
         end
 
         function bits = channelBits(~, channels)
@@ -626,6 +740,15 @@ classdef WavePalDevice < handle
                 error('Output channels are numbered 1-4: give one, or several as an array, e.g. 1 or [2 4].')
             end
             bits = uint8(sum(bitshift(1, unique(channels(:))' - 1)));
+        end
+
+        function rounded = roundHalfEven(~, value)
+            % Round to the nearest integer, and a value exactly halfway between two to the even one, as the Python
+            % class does, so that both send the same DAC codes and loop durations. MATLAB's round() takes halves
+            % away from zero.
+            rounded = round(value);
+            halfway = abs(value - fix(value)) == 0.5;
+            rounded(halfway) = 2*round(value(halfway)/2);
         end
 
         function writeCommand(obj, opCode, data)

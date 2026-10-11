@@ -1,9 +1,9 @@
 """
 Python interface for Wave Pal, a waveform player for Pulse Pal 3.
 
-Wave Pal is alternative firmware for Pulse Pal 3 hardware. It stores one
-sampled waveform per output channel on the device's microSD card, and
-plays it when the channel is triggered: by a TTL pulse on a trigger
+Wave Pal is alternative firmware for Pulse Pal 3 hardware. It stores four
+sampled waveforms on the device's microSD card, and each output channel
+plays one of them when it is triggered: by a TTL pulse on a trigger
 channel, from software, or from the thumb joystick. Waveforms can be up
 to a million samples long, and are played at up to 100 kHz.
 
@@ -17,8 +17,8 @@ from pulsepal import WavePalDevice
 with WavePalDevice("COM3") as W:
     W.sampling_rate = 50000                         # Hz, all channels
     t = np.arange(50000) / 50000                    # 1 second
-    W.load_waveform(1, 5 * np.sin(2 * np.pi * 10 * t))
-    W.trigger(1)
+    W.load_waveform(1, 5 * np.sin(2 * np.pi * 10 * t), [1, 3])  # waveform 1, played by channels 1 and 3
+    W.trigger([1, 3])
 ```
 
 The device needs Wave Pal firmware, which is in
@@ -44,6 +44,40 @@ W.loop_mode = [False] * 4      # all four channels
 
 `WavePalDevice.trigger_mode` is indexed the same way by trigger channel
 number, 1 or 2, as in Pulse Pal.
+
+## Waveforms
+
+The device stores four waveforms, numbered 1-4. Each output channel plays
+one of them, its `WavePalDevice.current_waveform`, or none (`0`, the
+default). Several channels can play the same waveform, which is loaded
+only once.
+
+```python
+W.load_waveform(1, sine, [1, 3])   # waveform 1, played by channels 1 and 3
+W.load_waveform(2, ramp)           # stored: no channel plays it yet
+W.current_waveform[1] = 2          # channel 1 plays waveform 2 from its next start
+```
+
+A channel that is playing finishes its waveform: a new current waveform
+plays from the channel's next start. Loading a waveform stops the
+channels playing it, outside param sync mode.
+
+## Param sync
+
+`"Param Sync"`, Pulse Pal's param sync trigger mode, lets the waveforms
+of the next trial be loaded during the current one, and take effect the
+instant it starts. While a trigger channel is in param sync mode,
+`WavePalDevice.load_waveform` loads the waveform into a second memory
+block that the device keeps for each waveform: channels go on playing
+the waveform it replaces, and triggers still start it. The next rising
+edge on that trigger channel makes it current. A new
+`WavePalDevice.current_waveform` waits for the edge in the same way.
+
+```python
+W.trigger_mode[2] = "Param Sync"      # sent at once
+W.load_waveform(1, next_trial_wave)   # stored: waveform 1 plays on, unchanged
+# The next rising edge on trigger channel 2 makes it current
+```
 
 ## Units
 
@@ -91,12 +125,11 @@ OUTPUT_RANGES = {
 """Output ranges in order of their range index on the device, with their
 limits in volts. See "Output ranges" in /Firmware/WavePal/PROTOCOL.md."""
 
-TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Master")
+TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync", "Master")
 """Names of the trigger modes. See `WavePalDevice.trigger_mode`."""
 
-# Each trigger mode's code on the device. The first three are Pulse Pal's codes; 3 is Pulse Pal's
-# param sync mode, which Wave Pal does not have.
-_TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Master": 4}
+# Each trigger mode's code on the device. The first four are Pulse Pal's codes.
+_TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Param Sync": 3, "Master": 4}
 
 
 @dataclass
@@ -115,6 +148,9 @@ class DeviceInfo:
 
     n_channels: int = None
     """Number of output channels."""
+
+    n_waveforms: int = None
+    """Number of waveforms the device stores, numbered from 1."""
 
     max_samples: int = None
     """Maximum number of samples in one waveform."""
@@ -154,11 +190,11 @@ class DeviceStatus:
     """Numbers of the output channels playing a waveform, e.g. `[1, 3]`."""
 
     samples_loaded: list
-    """Samples in each channel's waveform, `0` if it has none.
+    """Samples in each waveform, `0` if it has none.
 
-    Indexed by channel number, with index 0 unused. This is what the
+    Indexed by waveform number, with index 0 unused. This is what the
     device holds, which can include waveforms loaded by an earlier
-    connection.
+    connection. A load stored for a param sync edge counts from the edge.
     """
 
     underruns: list
@@ -178,6 +214,24 @@ class DeviceStatus:
     It must stay below the sample period, `1e6 / sampling_rate`.
     """
 
+    current_waveform: list
+    """The waveform each output channel plays from its next start, `0` for
+    none, as the device holds it. Indexed by channel number.
+
+    In param sync mode, `WavePalDevice.current_waveform` set since the
+    last edge is in `DeviceStatus.stored_current_waveform` until the next
+    one.
+    """
+
+    stored_waveforms: list
+    """Numbers of the waveforms loaded in param sync mode since the last
+    edge, which the next edge makes current, e.g. `[2]`."""
+
+    stored_current_waveform: list
+    """The current waveforms set in param sync mode since the last edge,
+    which the next edge applies, indexed by channel number. `None` if
+    none were set."""
+
 
 class WavePalDevice:
     """A class to control a Wave Pal on a USB serial port.
@@ -192,7 +246,7 @@ class WavePalDevice:
     from pulsepal import WavePalDevice
 
     W = WavePalDevice("COM3")
-    W.load_waveform(1, [0, 1, 2, 3, 4, 5, 0])
+    W.load_waveform(1, [0, 1, 2, 3, 4, 5, 0], 1)   # waveform 1, played by channel 1
     W.trigger(1)
     W.close()
     ```
@@ -224,6 +278,7 @@ class WavePalDevice:
     _OP_SET_SAMPLING_RATE = ord("S")
     _OP_SET_OUTPUT_RANGE = ord("R")
     _OP_LOAD_WAVEFORM = ord("L")
+    _OP_SET_CURRENT_WAVEFORMS = ord("C")
     _OP_TRIGGER = ord("P")
     _OP_STOP = ord("X")
     _OP_SET_FIXED_VOLTAGE = ord("!")
@@ -235,8 +290,8 @@ class WavePalDevice:
     _OP_GET_PLAYBACK_CHECKSUMS = ord("Z")
 
     _HANDSHAKE_REPLY = 87  # 'W'
-    _HARDWARE_INFO_FORMAT = "<BBIIII"
-    _STATUS_FORMAT = "<B4I4II"
+    _HARDWARE_INFO_FORMAT = "<BBIIIIB"
+    _STATUS_FORMAT = "<B4I4II4BBB4B"
     _DAC_BITMAX = 65535
     _UINT32_MAX = 2**32 - 1
     _ALL_CHANNELS = 0x0F
@@ -262,7 +317,9 @@ class WavePalDevice:
         self.info = DeviceInfo()
         self._sampling_rate = None
         self._output_range = None
-        self._waveforms = [None] * 5
+        self._waveforms = []  # Indexed by waveform number, once the device has said how many it stores
+        self._current_waveform = ChannelSettings(
+            "current_waveform", [0] * 4, self, "_apply_current_waveform")
         self._loop_mode = ChannelSettings(
             "loop_mode", [False] * 4, self, "_apply_loop_mode")
         self._loop_duration = ChannelSettings(
@@ -288,6 +345,7 @@ class WavePalDevice:
             self.port.reset_input_buffer()
             self._handshake()
             self._read_hardware_info()
+            self._waveforms = [None] * (self.info.n_waveforms + 1)
             # Client name op + "PYTHON" in ASCII, shown as "PYTHON Connected"
             self._write_command(self._OP_SET_CLIENT_NAME, b"PYTHON")
             self.stop()
@@ -325,11 +383,14 @@ class WavePalDevice:
     def set_default_params(self):
         """Program the default settings on the device.
 
-        The defaults are a 10 kHz sampling rate, the -10 V to 10 V output
-        range, loop mode off with loop durations of 0, both trigger
-        channels in normal mode, and all output channels linked to trigger
-        channel 1 and not to trigger channel 2. They match the settings
-        the device starts with.
+        The defaults are both trigger channels in normal mode, a 10 kHz
+        sampling rate, the -10 V to 10 V output range, loop mode off with
+        loop durations of 0, all output channels linked to trigger channel
+        1 and not to trigger channel 2, and no current waveform on any
+        channel. They match the settings the device starts with. The
+        trigger modes are sent first: a trigger channel leaving param sync
+        mode makes what was stored for its next edge current, and the
+        settings after it then apply at once.
 
         Loaded waveforms are kept, and loaded again if the output range
         changes (see `WavePalDevice.output_range`).
@@ -338,12 +399,13 @@ class WavePalDevice:
             PulsePalError: If a loaded waveform does not fit the default
                 output range, -10 V to 10 V.
         """
+        self.trigger_mode = ["Normal"] * 2
         self.sampling_rate = 10000
         self.output_range = "-10V:10V"
         self.loop_mode = [False] * 4
         self.loop_duration = [0] * 4
-        self.trigger_mode = ["Normal"] * 2
         self._set_trigger_links([True] * 4, [False] * 4)
+        self.current_waveform = [0] * 4
 
     @property
     def sampling_rate(self):
@@ -403,7 +465,8 @@ class WavePalDevice:
         Changing the range stops playback, sets all outputs to 0 V, and
         loads the waveforms again, encoded for the new range. It raises
         an error, and changes nothing, if a loaded waveform does not fit
-        the new range.
+        the new range, or if a trigger channel is in param sync mode,
+        where the loads would wait for a TTL edge.
         """
         return self._output_range
 
@@ -411,29 +474,61 @@ class WavePalDevice:
     def output_range(self, range_name):
         name = self._range_name(range_name)
         low, high = OUTPUT_RANGES[name]
-        for channel in range(1, 5):
-            waveform = self._waveforms[channel]
+        changed = name != self._output_range
+        for number, waveform in enumerate(self._waveforms):
             if waveform is not None and (
                     waveform.min() < low or waveform.max() > high):
                 raise PulsePalError(
-                    f"The waveform on channel {channel} spans "
+                    f"Waveform {number} spans "
                     f"{waveform.min():g} V to {waveform.max():g} V, which "
                     f"does not fit the {name} range. Load a new waveform "
                     "first, or choose a wider range."
                 )
+        if changed and "Param Sync" in self._trigger_mode:
+            raise PulsePalError(
+                "output_range cannot change while a trigger channel is in param sync mode: the waveforms are "
+                "loaded again for the new range, and in param sync mode they would wait for a TTL edge. Set "
+                "trigger_mode to another mode first."
+            )
         range_index = list(OUTPUT_RANGES).index(name)
         self._write_command(self._OP_SET_OUTPUT_RANGE, bytes([range_index]))
         self._read_ack("setting output_range")
-        changed = name != self._output_range
         self._output_range = name
         if changed:
             # The device unloads the waveforms when the range changes,
-            # because their samples encode voltages in the old range
+            # because their samples encode voltages in the old range. The
+            # channels keep their current waveforms.
             waveforms = self._waveforms
-            self._waveforms = [None] * 5
-            for channel in range(1, 5):
-                if waveforms[channel] is not None:
-                    self.load_waveform(channel, waveforms[channel])
+            self._waveforms = [None] * len(waveforms)
+            for number, waveform in enumerate(waveforms):
+                if waveform is not None:
+                    self.load_waveform(number, waveform)
+
+    @property
+    def current_waveform(self):
+        """The waveform each output channel plays, by waveform number.
+
+        Indexed by channel number (see "Channel settings" above). Each
+        value is the number of a waveform loaded with
+        `WavePalDevice.load_waveform`, 1 to `DeviceInfo.n_waveforms`, or
+        `0` for none, the default: a channel with no waveform ignores
+        triggers. Several channels can play the same waveform.
+
+        A channel that is playing finishes its waveform: the new one plays
+        from the channel's next start. In param sync mode, a change waits
+        for the next rising edge on the param sync trigger channel (see
+        `WavePalDevice.trigger_mode`).
+
+        ```python
+        W.current_waveform[1] = 2            # channel 1 plays waveform 2
+        W.current_waveform = [1, 1, 1, 1]    # all four play waveform 1
+        ```
+        """
+        return self._current_waveform
+
+    @current_waveform.setter
+    def current_waveform(self, values):
+        self._current_waveform._assign(values)
 
     @property
     def loop_mode(self):
@@ -485,11 +580,42 @@ class WavePalDevice:
           gated, linked to them, and still high. With loop mode on and a
           loop duration of 0, a waveform plays for exactly as long as the
           TTL is high.
+        - `"Param Sync"`: a rising edge starts and stops nothing (the
+          channel's links are ignored). It makes the waveforms loaded,
+          and the `WavePalDevice.current_waveform` set, since the previous
+          edge current. This is how the next trial's waveforms are loaded
+          during the current trial, and played from the instant it starts.
         - `"Master"`: a rising edge starts the linked channels, and
           restarts those that are playing from their first sample.
 
-        The first three are Pulse Pal's trigger modes. Names are not case
+        The first four are Pulse Pal's trigger modes. Names are not case
         sensitive.
+
+        While a trigger channel is in param sync mode,
+        `WavePalDevice.load_waveform` loads into a second memory block
+        that the device keeps for each waveform. Channels go on playing
+        the waveform it replaces, and triggers still start it, until the
+        edge. A channel that is playing at the edge finishes what it plays,
+        and plays the new waveform from its next start. A later load of the
+        same waveform before the edge replaces the earlier one, and stops
+        any channel still playing the waveform from before the previous
+        edge, since the device reuses that memory block. Changes to
+        `WavePalDevice.current_waveform` wait for the edge in the same
+        way. Other settings apply at once.
+
+        When neither trigger channel is in param sync mode any more, what
+        was waiting for an edge becomes current at once, so
+        `WavePalDevice.waveforms` and `WavePalDevice.current_waveform`
+        describe the device again. (Pulse Pal and Synth Pal discard their
+        stored settings then.) `WavePalDevice.output_range` cannot change
+        in param sync mode. To make the waveforms current on the same edge
+        that starts the channels, wire the TTL to the other trigger channel
+        as well: the param sync edge is handled first.
+
+        ```python
+        W.trigger_mode[2] = "Param Sync"      # sent at once
+        W.load_waveform(1, next_trial_wave)   # waits for trigger channel 2's next rising edge
+        ```
         """
         return self._trigger_mode
 
@@ -570,7 +696,7 @@ class WavePalDevice:
         ```
         """
         params = {"sampling_rate": self._sampling_rate, "output_range": self._output_range}
-        for name in ("loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
+        for name in ("current_waveform", "loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
                      "link_trigger_channel2"):
             params[name] = list(getattr(self, name))[1:]
         return params
@@ -579,10 +705,12 @@ class WavePalDevice:
     def waveforms(self):
         """The waveforms loaded with `WavePalDevice.load_waveform`.
 
-        A five element list indexed by channel number, with index 0
-        unused. Each element is a read-only NumPy array of voltages, or
-        `None` if this object has not loaded a waveform on that channel.
-        `WavePalDevice.status` shows what the device itself holds.
+        A list indexed by waveform number, 1 to `DeviceInfo.n_waveforms`,
+        with index 0 unused. Each element is a read-only NumPy array of
+        voltages, or `None` if this object has not loaded that waveform. In
+        param sync mode, it holds the waveforms loaded since the last edge
+        before the device plays them. `WavePalDevice.status` shows what
+        the device itself holds.
         """
         return list(self._waveforms)
 
@@ -590,32 +718,46 @@ class WavePalDevice:
     # Waveforms and playback
     # ------------------------------------------------------------------
 
-    def load_waveform(self, channel, waveform):
-        """Load a waveform onto an output channel.
+    def load_waveform(self, waveform_number, waveform, channels=None):
+        """Load one of the device's waveforms, and choose the channels that play it.
 
         The samples are written to the device's microSD card, and the
         first `DeviceInfo.buffer_samples` of them are also kept in its RAM.
-        Loading stops the channel if it is playing. Other channels keep
-        playing.
+        Outside param sync mode, loading stops the channels playing that
+        waveform, and the new one plays from their next start. Other
+        channels keep playing. In param sync mode, the new waveform waits
+        for the next rising edge on the param sync trigger channel, and
+        channels go on playing the old one until then (see
+        `WavePalDevice.trigger_mode`).
 
         ```python
         t = np.arange(10000) / W.sampling_rate
-        W.load_waveform(2, 3 * np.sin(2 * np.pi * 100 * t))
+        W.load_waveform(2, 3 * np.sin(2 * np.pi * 100 * t), [1, 3])
         ```
 
         Args:
-            channel: Output channel number, 1-4.
+            waveform_number: The waveform to load, 1 to
+                `DeviceInfo.n_waveforms`.
             waveform: Voltages of the samples, played at
                 `WavePalDevice.sampling_rate`. A list, tuple or NumPy
                 array of 1 to `DeviceInfo.max_samples` values, all within
                 `WavePalDevice.output_range`.
+            channels: Output channels that play this waveform, from their
+                next start: one channel number 1-4, or several as a list,
+                tuple or NumPy array. It sets their
+                `WavePalDevice.current_waveform`, and leaves the other
+                channels' alone, so channels already playing this waveform
+                play the new one. `None`, the default, changes no channel.
 
         Raises:
-            PulsePalError: If the channel or waveform is invalid, or the
-                device could not store the waveform. The channel is then
-                left without a waveform.
+            PulsePalError: If an argument is invalid, or the device could
+                not store the waveform. The waveform is then left out of
+                `WavePalDevice.waveforms`: outside param sync mode the
+                device has unloaded it, and in param sync mode it plays the
+                version made current at the last edge.
         """
-        channel = self._channel_number(channel)
+        number = self._waveform_number(waveform_number)
+        channel_list = None if channels is None else _common.channel_numbers(channels)
         samples = np.array(waveform, dtype=float).ravel()
         if not 1 <= samples.size <= self.info.max_samples:
             raise PulsePalError(
@@ -623,22 +765,26 @@ class WavePalDevice:
                 f"Received {samples.size}."
             )
         codes = self._volts_to_codes(samples)
-        self._waveforms[channel] = None  # The device unloads it first
+        self._waveforms[number] = None  # Until the device has stored it. Outside param sync mode, it unloads it first.
         self._write_command(
             self._OP_LOAD_WAVEFORM,
-            struct.pack("<BI", channel, samples.size) + codes.tobytes(),
+            struct.pack("<BI", number, samples.size) + codes.tobytes(),
         )
         self._read_ack("load_waveform()")
         samples.flags.writeable = False
-        self._waveforms[channel] = samples
+        self._waveforms[number] = samples
+        if channel_list:
+            values = list(self._current_waveform[1:])
+            for channel in channel_list:
+                values[channel - 1] = number
+            self._current_waveform._assign(values)
 
     def trigger(self, channels):
         """Trigger output channels in software.
 
-        Idle channels start their waveforms from the first sample,
-        together. Channels that are playing ignore it, as Pulse Pal's
-        channels ignore a soft trigger while they play a pulse train.
-        Channels without a waveform are ignored.
+        Idle channels start their current waveforms from the first
+        sample, together. Channels that are playing ignore it, as Pulse
+        Pal's channels ignore a soft trigger while they play a pulse train.
 
         ```python
         W.trigger(1)
@@ -648,8 +794,26 @@ class WavePalDevice:
         Args:
             channels: Output channel number 1-4, or several as a list,
                 tuple or NumPy array.
+
+        Raises:
+            PulsePalError: If a channel has no waveform to play: its
+                `WavePalDevice.current_waveform` is 0, or a waveform this
+                object has not loaded. Nothing is sent.
         """
-        self._write_command(self._OP_TRIGGER, bytes([_common.channel_bits(channels)]))
+        channel_list = _common.channel_numbers(channels)
+        for channel in channel_list:
+            number = self._current_waveform[channel]
+            if number == 0:
+                raise PulsePalError(
+                    f"Channel {channel} has no waveform to play. Set current_waveform[{channel}] to a loaded "
+                    f"waveform's number, or load one with load_waveform(number, waveform, {channel})."
+                )
+            if self._waveforms[number] is None:
+                raise PulsePalError(
+                    f"Channel {channel} plays waveform {number}, which is not loaded. Load it with "
+                    f"load_waveform({number}, waveform)."
+                )
+        self._write_command(self._OP_TRIGGER, bytes([_common.channel_bits(channel_list)]))
 
     def stop(self, channels=None):
         """Stop playback. The stopped channels output 0 V.
@@ -687,8 +851,9 @@ class WavePalDevice:
 
         Returns:
             A `DeviceStatus`, with the channels that are playing, the
-            number of samples each channel holds, underrun counts, and
-            the longest playback interrupt.
+            number of samples in each waveform, underrun counts, the
+            longest playback interrupt, each channel's current waveform,
+            and what waits for a param sync edge.
         """
         self._write_command(self._OP_GET_STATUS)
         values = struct.unpack(
@@ -696,12 +861,16 @@ class WavePalDevice:
             self._read_raw(struct.calcsize(self._STATUS_FORMAT)),
         )
         playing_bits = values[0]
+        stored_load_bits = values[14]
         return DeviceStatus(
             playing=[ch for ch in range(1, 5)
                      if playing_bits & (1 << (ch - 1))],
             samples_loaded=[None, *values[1:5]],
             underruns=[None, *values[5:9]],
             longest_interrupt_us=values[9] / 1000,
+            current_waveform=[None, *values[10:14]],
+            stored_waveforms=[n for n in range(1, 5) if stored_load_bits & (1 << (n - 1))],
+            stored_current_waveform=[None, *values[16:20]] if values[15] else None,
         )
 
     def _playback_checksums(self):
@@ -774,14 +943,15 @@ class WavePalDevice:
         """Describe the device and its settings, e.g. with `print(W)`."""
         port = getattr(getattr(self, "port", None), "port", None)
         loaded = ", ".join(
-            f"{ch}: {'none' if w is None else f'{w.size} samples'}"
-            for ch, w in enumerate(self._waveforms) if ch > 0
+            f"{number}: {'none' if w is None else f'{w.size} samples'}"
+            for number, w in enumerate(self._waveforms) if number > 0
         )
         return (
             f"WavePalDevice on {port} (Wave Pal firmware "
             f"v{self.info.firmware_version})\n"
             f"sampling_rate: {self._sampling_rate} Hz\n"
             f"output_range: {self._output_range}\n"
+            f"current_waveform: {list(self._current_waveform)}\n"
             f"loop_mode: {list(self._loop_mode)}\n"
             f"loop_duration: {list(self._loop_duration)}\n"
             f"trigger_mode: {list(self._trigger_mode)}\n"
@@ -828,10 +998,31 @@ class WavePalDevice:
             self.info.max_sampling_rate,
             self.info.buffer_samples,
             self.info.sample_clock_hz,
+            self.info.n_waveforms,
         ) = struct.unpack(
             self._HARDWARE_INFO_FORMAT,
             self._read_raw(struct.calcsize(self._HARDWARE_INFO_FORMAT)),
         )
+
+    def _apply_current_waveform(self, values):
+        waveform_numbers = []
+        for channel, value in enumerate(values, start=1):
+            if (isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral)
+                    or not 0 <= value <= self.info.n_waveforms):
+                raise PulsePalError(
+                    f"current_waveform values are waveform numbers, 1-{self.info.n_waveforms}, or 0 for none. "
+                    f"Received {value!r}."
+                )
+            value = int(value)
+            # A channel left on a waveform whose load failed is not refused here: trigger() refuses it
+            if value != 0 and value != self._current_waveform[channel] and self._waveforms[value] is None:
+                raise PulsePalError(
+                    f"Waveform {value} is not loaded. Load it with load_waveform({value}, waveform) first."
+                )
+            waveform_numbers.append(value)
+        self._write_command(self._OP_SET_CURRENT_WAVEFORMS, bytes(waveform_numbers))
+        self._read_ack("setting current_waveform")
+        return waveform_numbers
 
     def _apply_loop_mode(self, values):
         modes = [to_bool(value, "loop_mode") for value in values]
@@ -912,8 +1103,11 @@ class WavePalDevice:
         self._read_ack("setting the trigger channel links")
 
     def _actual_rate(self, rate_hz):
+        # The sample period is the nearest whole number of clock cycles, computed in integers as the
+        # firmware's setSamplingRate() does. A rate halfway between two (e.g. 3072 Hz: 7812.5 cycles)
+        # rounds up there, where round() would round to even.
         clock = self.info.sample_clock_hz
-        return clock / round(clock / rate_hz)
+        return clock / ((clock + rate_hz // 2) // rate_hz)
 
     def _range_name(self, range_name):
         """Return the canonical name of an output range."""
@@ -942,17 +1136,16 @@ class WavePalDevice:
         codes = np.round((volts - low) / (high - low) * self._DAC_BITMAX)
         return codes.astype("<u2")
 
-    @staticmethod
-    def _channel_number(channel):
+    def _waveform_number(self, number):
         if (
-            not isinstance(channel, numbers.Integral)
-            or isinstance(channel, (bool, np.bool_))
-            or not 1 <= channel <= 4
+            not isinstance(number, numbers.Integral)
+            or isinstance(number, (bool, np.bool_))
+            or not 1 <= number <= self.info.n_waveforms
         ):
             raise PulsePalError(
-                f"Output channels are numbered 1-4. Received {channel!r}."
+                f"Waveforms are numbered 1-{self.info.n_waveforms}. Received {number!r}."
             )
-        return int(channel)
+        return int(number)
 
     def _write_command(self, op_code, data=b""):
         """Send one command, with its framing byte, in a single write."""

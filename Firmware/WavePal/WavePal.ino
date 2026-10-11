@@ -21,11 +21,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // WAVE PAL FIRMWARE for Pulse Pal 3 hardware
 //
-// Wave Pal turns a Pulse Pal 3 into a four channel waveform player. Each output channel has one waveform of up to
-// 1 million samples, stored on the microSD card, and plays it when triggered: by a TTL edge on a trigger channel, by
-// a command from the PC, or from the thumb joystick menu. The sampling rate (up to 100kHz) and the output range are
-// set for the whole device. It is the WavePlayer firmware for the Bpod Analog Output Module (BpodWavePlayer.ino),
-// ported to Pulse Pal 3 hardware, with the trigger channels in place of the Bpod UART.
+// Wave Pal turns a Pulse Pal 3 into a four channel waveform player. It stores four waveforms of up to 1 million
+// samples each on the microSD card, and each output channel plays one of them (its current waveform) when triggered:
+// by a TTL edge on a trigger channel, by a command from the PC, or from the thumb joystick menu. Several channels can
+// play the same waveform. In param sync mode, a waveform loaded during one trial becomes current at the next trial's
+// TTL edge. The sampling rate (up to 100kHz) and the output range are set for the whole device. It is the WavePlayer
+// firmware for the Bpod Analog Output Module (BpodWavePlayer.ino), ported to Pulse Pal 3 hardware, with the trigger
+// channels in place of the Bpod UART, and the double-buffered waveforms of its AudioPlayer Live firmware.
 // The USB protocol is documented in PROTOCOL.md in this folder, and AGENTS.md lists the rules for changing this code.
 //
 // ** DEPENDENCIES YOU NEED TO INSTALL FIRST **
@@ -95,8 +97,9 @@ enum OpCode {
   OP_HARDWARE_INFO = 'N',             // 78. Returns the hardware properties
   OP_SET_SAMPLING_RATE = 'S',         // 83. Sampling rate of all output channels, in Hz
   OP_SET_OUTPUT_RANGE = 'R',          // 82. Output range of all output channels. See enum OutputRange
-  OP_LOAD_WAVEFORM = 'L',             // 76. Load one output channel's waveform
-  OP_PLAY = 'P',                      // 80. Soft-trigger output channels (1 bit per channel): starts idle ones
+  OP_LOAD_WAVEFORM = 'L',             // 76. Load one of the waveforms (1-4). See "Waveforms" in Playback.ino
+  OP_SET_CURRENT_WAVEFORMS = 'C',     // 67. The waveform each output channel plays (0 = none)
+  OP_PLAY = 'P',                     // 80. Soft-trigger output channels (1 bit per channel): starts idle ones
   OP_STOP = 'X',                      // 88. Stop output channels (1 bit per channel)
   OP_SET_FIXED_VOLTAGE = '!',         // 33. Hold output channels at a fixed DAC code (1 bit per channel)
   OP_SET_LOOP_MODE = 'O',             // 79. Loop mode of each output channel
@@ -109,18 +112,19 @@ enum OpCode {
 #define HANDSHAKE_REPLY 'W' // 87. Pulse Pal firmware replies 'K' (75) to op 72, so clients can tell the two apart
 
 // Values of triggerMode[], one per trigger channel: what an edge on it does to the output channels linked to it. See
-// processTriggerEdge() in Playback.ino. The first three are Pulse Pal's trigger modes, with Pulse Pal's codes. Code 3
-// is Pulse Pal's param sync mode, which Wave Pal does not have.
+// processTriggerEdge() in Playback.ino. The first four are Pulse Pal's trigger modes, with Pulse Pal's codes.
 enum TriggerModeValue {
   TRIGGER_MODE_NORMAL = 0,            // A rising edge starts idle channels. Channels that are playing ignore it.
   TRIGGER_MODE_TOGGLE = 1,            // A rising edge starts idle channels, and stops those that are playing
   TRIGGER_MODE_GATED = 2,             // A rising edge starts idle channels, and a falling edge stops them
+  TRIGGER_MODE_PARAM_SYNC = 3,        // A rising edge makes the waveforms and current waveforms stored for it current.
+                                      // It starts and stops nothing. See "Param sync" in Playback.ino
   TRIGGER_MODE_MASTER = 4             // A rising edge starts idle channels, and restarts those that are playing
 };
 #define N_TRIGGER_CHANNELS 2
 
 static inline bool isValidTriggerMode(byte mode) {
-  return (mode <= TRIGGER_MODE_GATED) || (mode == TRIGGER_MODE_MASTER);
+  return mode <= TRIGGER_MODE_MASTER;
 }
 
 // Values of rangeIndex. These are WavePlayer's ranges without its 12V ones, which need the Analog Output Module's
@@ -165,15 +169,19 @@ enum MenuItem {
 #define EEPROM_SCREEN_SAVER_ADDRESS 16 // screenSaverEnabled (byte), then screenSaverTimeout (uint16)
 
 #define N_CHANNELS 4
+#define N_WAVEFORMS 4 // Waveforms the device stores, numbered 1-4 over USB. Any output channel can play any of them.
+#define N_MEMORY_BLOCKS (N_WAVEFORMS * 2) // Two memory blocks per waveform: waveform w has blocks 2w and 2w+1. See
+                                          // "Waveforms" in Playback.ino
+#define NO_BLOCK 255 // A memory block number meaning "none"
 #define MAX_WAVE_SAMPLES 1000000 // Samples per waveform
 #define MAX_SAMPLING_RATE 100000 // Hz
 #define DEFAULT_SAMPLING_RATE 10000 // Hz
-#define BUFFER_SAMPLES 16384 // Samples per playback buffer: 32kB, 164ms at 100kHz. Each channel has a pre-buffer and
-                             // two playback buffers of this size. See "How playback works" in Playback.ino.
+#define BUFFER_SAMPLES 16384 // Samples per playback buffer: 32kB, 164ms at 100kHz. Each memory block has a pre-buffer of
+                             // this size, and each channel two playback buffers. See "How playback works" in Playback.ino.
 #define BUFFER_BYTES (BUFFER_SAMPLES * 2)
-#define WAVE_REGION_BYTES 2097152UL // Each channel's region of the data file (2 MiB). A whole number of buffers, so every
-                                    // block read from the card starts on a 512 byte sector boundary.
-#define WAVE_FILE_BYTES (N_CHANNELS * WAVE_REGION_BYTES)
+#define WAVE_REGION_BYTES 2097152UL // Each memory block's region of the data file (2 MiB). A whole number of buffers, so
+                                    // every chunk read from the card starts on a 512 byte sector boundary.
+#define WAVE_FILE_BYTES (N_MEMORY_BLOCKS * WAVE_REGION_BYTES)
 #define WAVE_FOLDER "/Wave_Pal"
 #define WAVE_FILE_NAME "/Wave_Pal/WaveData.wfm"
 #define TIMER_CLOCK_HZ 24000000 // IntervalTimer counts cycles of this clock, so the sample period is a whole number of them
@@ -186,12 +194,13 @@ enum MenuItem {
                                   // control register write (power up, output range) is lost. Measured on a Pulse Pal 3, 47ns
                                   // failed and 63ns worked. That matters when one channel is written. The digitalWrite()
                                   // call used before took about 50ns, which only just worked.
-#define CHUNK_NONE -1 // Value of bufferChunk[][] for a playback buffer that holds no usable block
+#define CHUNK_NONE -1 // Value of bufferChunk[][] for a playback buffer that holds no usable chunk
 #define ALL_CHANNELS 0x0F // Channel bits for output channels 1-4
 
-static_assert(MAX_WAVE_SAMPLES * 2 <= WAVE_REGION_BYTES, "A channel's region of the data file must hold a whole waveform");
-static_assert(WAVE_REGION_BYTES % BUFFER_BYTES == 0, "Blocks must not straddle a channel region boundary");
-static_assert(BUFFER_BYTES % 512 == 0, "Blocks must be whole microSD sectors");
+static_assert(MAX_WAVE_SAMPLES * 2 <= WAVE_REGION_BYTES, "A memory block's region of the data file must hold a whole waveform");
+static_assert(WAVE_REGION_BYTES % BUFFER_BYTES == 0, "Chunks must not straddle a memory block's region boundary");
+static_assert(BUFFER_BYTES % 512 == 0, "Chunks must be whole microSD sectors");
+static_assert(N_MEMORY_BLOCKS < NO_BLOCK, "Memory block numbers must fit in a byte, below NO_BLOCK");
 
 #define TriggerLevel 0  // Trigger line level when the trigger is active. The optoisolators are inverting: their output is
                         // high by default, and goes low when voltage is applied to the trigger channel.
@@ -238,14 +247,26 @@ volatile byte loopMode[N_CHANNELS] = {0}; // If 1, the channel loops its wavefor
 volatile uint32_t loopDuration[N_CHANNELS] = {0}; // In loop mode, samples to play before stopping. 0 = loop until stopped.
 volatile byte triggerMode[N_TRIGGER_CHANNELS] = {0}; // Of trigger channels 1 and 2. See enum TriggerModeValue
 volatile byte TriggerAddress[2][N_CHANNELS] = {0}; // Output channels triggered by trigger channel 1 (row 1) and 2 (row 2)
+volatile byte currentWaveform[N_CHANNELS] = {0}; // The waveform (1-4) each output channel plays from its next start.
+                                                 // 0 = none: the channel ignores triggers.
 
 // ---------------------------------------------------------------------------------------------------------------
-// Waveforms and playback buffers. See "How playback works" in Playback.ino.
+// Waveforms, memory blocks and playback buffers. See "Waveforms" and "How playback works" in Playback.ino.
 // ---------------------------------------------------------------------------------------------------------------
-volatile uint32_t nSamples[N_CHANNELS] = {0}; // Samples in each channel's waveform. 0 = no waveform: triggers are ignored.
-uint16_t preBuffer[N_CHANNELS][BUFFER_SAMPLES]; // The first BUFFER_SAMPLES of each waveform, kept in RAM from the moment it
-                                                // is loaded, so that playback can start without waiting for the card
-// Two playback buffers per channel: while one plays, the next block of the waveform is read from the card into the
+volatile uint32_t nSamples[N_MEMORY_BLOCKS] = {0}; // Samples held in each memory block. 0 = empty.
+uint16_t preBuffer[N_MEMORY_BLOCKS][BUFFER_SAMPLES]; // The first BUFFER_SAMPLES of each memory block's waveform, kept in RAM
+                                                     // from the moment it is loaded, so that playback can start without
+                                                     // waiting for the card
+volatile byte currentBlock[N_WAVEFORMS] = {0, 2, 4, 6}; // The memory block each waveform plays from: the one channels start.
+                                                        // The waveform's other block is its unused block, which op 76 loads.
+// Param sync mode. Op 76 and op 67 store what they send for the next rising edge on a param sync trigger channel. See
+// "Param sync" in Playback.ino
+volatile boolean loadStored[N_WAVEFORMS] = {0}; // True if the waveform's unused block holds a load for the next edge
+volatile boolean currentWaveformsStored = false; // True if storedCurrentWaveform holds op 67's values for the next edge
+volatile byte storedCurrentWaveform[N_CHANNELS] = {0};
+DMAMEM uint16_t transferBuffer[BUFFER_SAMPLES]; // Holds each chunk of a waveform arriving over USB (after the first, which
+                                                // goes to its pre-buffer) until it is written to the card
+// Two playback buffers per channel: while one plays, the next chunk of the waveform is read from the card into the
 // other. They are in RAM2 (DMAMEM), which is not zeroed at startup; nothing is played from a buffer before it is filled.
 DMAMEM uint16_t channel1BufferA[BUFFER_SAMPLES];
 DMAMEM uint16_t channel1BufferB[BUFFER_SAMPLES];
@@ -263,21 +284,26 @@ uint16_t* const playbackBuffers[N_CHANNELS][2] = {
 };
 volatile int32_t bufferChunk[N_CHANNELS][2] = {{CHUNK_NONE, CHUNK_NONE}, {CHUNK_NONE, CHUNK_NONE},
                                                {CHUNK_NONE, CHUNK_NONE}, {CHUNK_NONE, CHUNK_NONE}};
-                                               // The block ("chunk") of the waveform each playback buffer holds, or CHUNK_NONE
+                                               // The chunk of a waveform each playback buffer holds, or CHUNK_NONE
+volatile byte bufferBlock[N_CHANNELS][2] = {{NO_BLOCK, NO_BLOCK}, {NO_BLOCK, NO_BLOCK}, {NO_BLOCK, NO_BLOCK},
+                                            {NO_BLOCK, NO_BLOCK}}; // The memory block that chunk was read from
 
 // Playback state of each output channel. Changed by the playback interrupts, and by loop() with interrupts disabled.
-volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays its waveform
+volatile boolean playing[N_CHANNELS] = {0}; // True while the channel plays a waveform
 volatile boolean stopAfterWrite[N_CHANNELS] = {0}; // The waveform has ended: 0V is waiting to be written, then the channel stops
+volatile byte playBlock[N_CHANNELS] = {0}; // The memory block the channel plays, chosen when it started
 volatile uint32_t wavePos[N_CHANNELS] = {0}; // Index in the waveform of the next sample to fetch
-volatile uint32_t playChunk[N_CHANNELS] = {0}; // Block of the waveform that holds the next sample. 0 = the pre-buffer.
-volatile uint32_t chunkPos[N_CHANNELS] = {0}; // Position of the next sample in its block
+volatile uint32_t playChunk[N_CHANNELS] = {0}; // Chunk of the waveform that holds the next sample. 0 = the pre-buffer.
+volatile uint32_t chunkPos[N_CHANNELS] = {0}; // Position of the next sample in its chunk
 volatile uint32_t samplesPlayed[N_CHANNELS] = {0}; // Samples fetched since the channel was triggered (for the loop duration)
 volatile uint32_t sampleSum[N_CHANNELS] = {0}; // Sum of the DAC codes fetched since the channel was triggered, wrapping.
                                                // Op 90 reports it, so that a test can check every sample played.
-volatile uint32_t underrunCount[N_CHANNELS] = {0}; // Blocks that were not read from the card in time, since startup
+volatile uint32_t underrunCount[N_CHANNELS] = {0}; // Chunks that were not read from the card in time, since startup
 volatile boolean timerRunning = false; // True while the sample clock runs, i.e. while any channel is playing
 volatile uint32_t longestHandlerCycles = 0; // Longest run of handler(), in CPU cycles, since the last status request (op 71)
 volatile boolean triggerLineActive[2] = {0}; // Level of each trigger channel after its last edge. True = TTL high.
+volatile boolean edgeHandledEarly[2] = {0}; // The other trigger channel's interrupt handled this channel's rising edge
+                                            // first, as a param sync edge (see triggerInterrupt())
 volatile boolean triggersEnabled = false; // False while the device cannot play (startup, comm failure)
 
 // DAC variables

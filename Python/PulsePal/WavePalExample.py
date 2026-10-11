@@ -43,17 +43,22 @@ W.sampling_rate = 50000
 # the waveforms gives the finest voltage steps.
 W.output_range = "-5V:5V"
 
-# Each output channel has one waveform. Voltages are in volts, within the
-# output range. Here: a 1 second, 10 Hz sine wave on channel 1, and a 20 ms,
-# 2 V square pulse on channel 2.
+# The device stores four waveforms, numbered 1-4, and each output channel
+# plays one of them. Voltages are in volts, within the output range. Here:
+# waveform 1, a 1 second, 10 Hz sine wave, played by channels 1 and 3, and
+# waveform 2, a 20 ms, 2 V square pulse, played by channel 2.
 t = np.arange(W.sampling_rate) / W.sampling_rate
-W.load_waveform(1, 4 * np.sin(2 * np.pi * 10 * t))
-W.load_waveform(2, np.full(int(0.02 * W.sampling_rate), 2.0))
+W.load_waveform(1, 4 * np.sin(2 * np.pi * 10 * t), [1, 3])
+W.load_waveform(2, np.full(int(0.02 * W.sampling_rate), 2.0), 2)
 
 # Trigger from software: one channel number, or several as a list. Channels
 # in the same call start on the same sample.
-W.trigger([1, 2])
+W.trigger([1, 2, 3])
 time.sleep(1.5)
+
+# Each channel's waveform is its current_waveform (0 for none). Channel 3
+# now plays the square pulse, from its next start.
+W.current_waveform[3] = 2
 
 # Channel settings are lists indexed by channel number (index 0 is unused),
 # and setting an element programs the device at once.
@@ -79,6 +84,15 @@ W.loop_mode[2] = True        # With a loop duration of 0: plays while the TTL is
 # Other trigger modes: in "Normal" mode, channels that are playing ignore a
 # TTL; "Toggle" stops them, and "Master" restarts them.
 W.trigger_mode[1] = "Toggle"
+
+# Param sync: a trigger channel in "Param Sync" mode starts nothing. Waveforms
+# loaded (and current_waveform set) while it is in that mode wait for its next
+# rising edge, and channels play the old ones until then, so each trial's
+# waveform can be loaded during the trial before. Wire the trial-start TTL to
+# both trigger channels to start the channels on the same edge.
+W.trigger_mode[2] = "Param Sync"
+W.load_waveform(1, 2 * np.sin(2 * np.pi * 20 * t))   # Waits for trigger channel 2's next rising edge
+W.trigger_mode[2] = "Gated"                          # Leaving param sync mode makes it current at once
 
 # Hold a channel at a fixed voltage until it is triggered or stopped
 W.set_fixed_voltage(3, 1.5)

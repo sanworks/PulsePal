@@ -33,9 +33,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testWavePalDevice(portString)
 tests = {@testConnectionAndDefaults, @testWaveformsPlayExactly, @testLoopDurationIsExactInSamples, ...
-    @testSamplingRateResendsLoopDurations, @testTriggerModes, @testOutputRangeChangeReloadsWaveforms, ...
-    @testEveryOutputRangePlays, @testFixedVoltageAndStop, @testScreenSaverAndExportParams, ...
-    @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
+    @testSamplingRateResendsLoopDurations, @testHalfwayValuesRoundAsInPython, @testTriggerModes, @testOneWaveformOnSeveralChannels, ...
+    @testCurrentWaveformChangesAtTheNextStart, @testParamSyncWaitsForAnEdge, ...
+    @testOutputRangeChangeReloadsWaveforms, @testEveryOutputRangePlays, @testFixedVoltageAndStop, ...
+    @testScreenSaverAndExportParams, @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
 rng(1);
 W = WavePalDevice(portString);
 nFailed = 0;
@@ -80,7 +81,10 @@ function testConnectionAndDefaults(W)
 assert(W.info.firmwareVersion == 1, 'firmware version');
 assert(W.info.hardwareVersion == 3, 'hardware version');
 assert(W.info.maxSamples == 1000000, 'maximum samples');
+assert(W.info.nWaveforms == 4 && isequal(W.waveforms, cell(1,4)), 'number of waveforms');
 assert(W.samplingRate == 10000 && strcmp(W.outputRange, '-10V:10V'), 'default sampling rate or range');
+assert(isequal(W.currentWaveform, zeros(1,4)), 'default current waveforms');
+assert(isequal(W.status().currentWaveform, zeros(1,4)), 'the device has current waveforms after connecting');
 assert(isequal(W.loopMode, false(1,4)) && isequal(W.loopDuration, zeros(1,4)), 'default loop settings');
 assert(isequal(W.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
 assert(isequal(W.linkTriggerChannel1, true(1,4)) && isequal(W.linkTriggerChannel2, false(1,4)), 'default links');
@@ -126,6 +130,28 @@ W.samplingRate = 44100;
 assert(abs(W.actualSamplingRate - 24e6/544) < 1e-9, 'actualSamplingRate at 44.1 kHz');
 end
 
+function testHalfwayValuesRoundAsInPython(W)
+% DAC codes and loop durations exactly halfway between two round to the even one, as in the Python class; MATLAB's
+% round() would take them up. The sample clock divider is the firmware's, which rounds up.
+W.samplingRate = 10000;
+W.outputRange = '-10V:10V';
+volts = [-9.501792935072862 -9.501182574196994 -9.500572213321126]; % Encode to 1632.5, 1634.5 and 1636.5
+codes = expectedCodes(volts, [-10 10]);
+assert(isequal(codes, [1632 1634 1636]), 'expectedCodes() does not round halfway values to even');
+W.loadWaveform(1, volts, 1);
+W.trigger(1);
+waitUntilStopped(W, 1, 1);
+checkPlayed(W, 1, codes, 3);
+cleanup = onCleanup(@() resetLoops(W));
+W.loopMode(1) = true;
+W.loopDuration(1) = 0.00025; % 2.5 samples at 10 kHz
+W.trigger(1);
+waitUntilStopped(W, 1, 1);
+checkPlayed(W, 1, codes, 2);
+W.samplingRate = 3072; % 24 MHz / 3072 Hz is 7812.5 cycles, which the firmware rounds up to 7813
+assert(abs(W.actualSamplingRate - 24e6/7813) < 1e-9, 'actualSamplingRate at 3072 Hz');
+end
+
 function testTriggerModes(W)
 % Trigger modes belong to the trigger channels, as in PulsePalDevice. Whatever the mode, a soft trigger starts an idle
 % channel and is ignored by a playing one. The modes' effect on TTL edges needs a TTL source: see
@@ -149,6 +175,71 @@ for mode = W.info.triggerModes
     W.stop(1);
     assert(isempty(W.status().playing), 'stop(1) did not stop channel 1');
 end
+end
+
+function testOneWaveformOnSeveralChannels(W)
+% A waveform loaded once plays on every channel it is given to
+W.samplingRate = 100000;
+codes = loadRandomWaveform(W, 2, 3*W.info.bufferSamples + 11, -10, 10, 1:4);
+assert(isequal(W.currentWaveform, [2 2 2 2]), 'currentWaveform after loadWaveform with channels');
+assert(isequal(W.status().currentWaveform, [2 2 2 2]), 'the device''s current waveforms');
+W.trigger(1:4);
+waitUntilStopped(W, 1:4, 3);
+for i = 1:4
+    checkPlayed(W, i, codes, numel(codes));
+end
+end
+
+function testCurrentWaveformChangesAtTheNextStart(W)
+% A channel that is playing finishes its waveform; the new current waveform plays from its next start. The playback
+% buffers then hold chunks of the first waveform, which must not be played as the second's.
+W.samplingRate = 100000;
+codes1 = loadRandomWaveform(W, 1, 5*W.info.bufferSamples, -10, 10, 1); % 0.8 s
+codes2 = loadRandomWaveform(W, 3, 4*W.info.bufferSamples + 3);
+W.trigger(1);
+pause(0.3);
+W.currentWaveform(1) = 3;
+waitUntilStopped(W, 1, 3);
+checkPlayed(W, 1, codes1, numel(codes1));
+W.trigger(1);
+waitUntilStopped(W, 1, 3);
+checkPlayed(W, 1, codes2, numel(codes2));
+end
+
+function testParamSyncWaitsForAnEdge(W)
+% In param sync mode, a load waits for an edge on the param sync channel; with nothing connected to it, the edge
+% never comes. Leaving the mode makes the stored load and current waveforms current, as an edge would.
+W.samplingRate = 100000;
+W.currentWaveform = zeros(1,4);
+cleanup = onCleanup(@() setNormalMode(W));
+oldCodes = loadRandomWaveform(W, 1, 3*W.info.bufferSamples, -10, 10, 1);
+W.triggerMode{2} = 'Param Sync';
+W.trigger(1);
+newVolts = -10 + 20*rand(1, 2*W.info.bufferSamples + 5);
+W.loadWaveform(1, newVolts, [1 2]);
+newCodes = expectedCodes(newVolts, [-10 10]);
+deviceStatus = W.status();
+assert(isequal(deviceStatus.playing, 1), 'a param sync load stopped the channel playing the old waveform');
+assert(isequal(deviceStatus.storedWaveforms, 1) && isequal(deviceStatus.storedCurrentWaveform, [1 1 0 0]), ...
+    'the load and current waveforms were not stored for an edge');
+assert(deviceStatus.samplesLoaded(1) == numel(oldCodes) && isequal(deviceStatus.currentWaveform, [1 0 0 0]), ...
+    'the stored load or current waveforms were applied without an edge');
+waitUntilStopped(W, 1, 3);
+checkPlayed(W, 1, oldCodes, numel(oldCodes));
+W.trigger(1);
+waitUntilStopped(W, 1, 3);
+checkPlayed(W, 1, oldCodes, numel(oldCodes)); % Until an edge, triggers play the old waveform
+expectError(@() setProperty(W, 'outputRange', '-5V:5V')); % It would reload the waveforms, which would wait too
+W.triggerMode{2} = 'Normal';
+deviceStatus = W.status();
+assert(isempty(deviceStatus.storedWaveforms) && isempty(deviceStatus.storedCurrentWaveform), ...
+    'leaving param sync mode left a load stored');
+assert(deviceStatus.samplesLoaded(1) == numel(newCodes) && isequal(deviceStatus.currentWaveform, [1 1 0 0]), ...
+    'leaving param sync mode did not make the stored load current');
+W.trigger([1 2]);
+waitUntilStopped(W, [1 2], 3);
+checkPlayed(W, 1, newCodes, numel(newCodes));
+checkPlayed(W, 2, newCodes, numel(newCodes));
 end
 
 function testOutputRangeChangeReloadsWaveforms(W)
@@ -204,22 +295,36 @@ W.loopDuration(2) = 0.5;
 params = W.exportParams();
 assert(isequal(params.loopMode, [false true false false]) && params.loopDuration(2) == 0.5, 'exported loop settings');
 assert(params.samplingRate == W.samplingRate && strcmp(params.outputRange, W.outputRange), 'exported device settings');
-assert(isequal(fieldnames(params)', {'samplingRate', 'outputRange', 'loopMode', 'loopDuration', 'triggerMode', ...
-    'linkTriggerChannel1', 'linkTriggerChannel2'}), 'exported fields');
+assert(isequal(fieldnames(params)', {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', ...
+    'triggerMode', 'linkTriggerChannel1', 'linkTriggerChannel2'}), 'exported fields');
+assert(isequal(params.currentWaveform, W.currentWaveform), 'exported current waveforms');
 W.loopMode(2) = false;
 W.loopDuration(2) = 0;
 end
 
 function testInvalidArgumentsAreRefused(W)
 % Each must raise an error without changing the setting
+W.loadWaveform(1, [1 2], 1);
+W.currentWaveform(2:4) = 0;
 expectError(@() W.loadWaveform(0, [1 2]));
 expectError(@() W.loadWaveform(5, [1 2]));
 expectError(@() W.loadWaveform(1, []));
 expectError(@() W.loadWaveform(1, [0 10.01])); % Outside -10 V to 10 V
 expectError(@() W.loadWaveform(1, [0 NaN]));
+expectError(@() W.loadWaveform(1, [1 2], [0 1]));
+expectError(@() W.loadWaveform(1, [1 2], 5));
 expectError(@() W.trigger([1 7]));
 expectError(@() W.trigger([]));
+expectError(@() W.trigger([1 2])); % Channel 2 has no waveform
 expectError(@() W.setFixedVoltage(1, 11));
+W.loadWaveform(4, 1);
+W.outputRange = '-10V:10V'; % Reloads nothing: the same range
+expectError(@() setProperty(W, 'currentWaveform', [1 5 0 0]));
+expectError(@() setProperty(W, 'currentWaveform', [1 -1 0 0]));
+expectError(@() setProperty(W, 'currentWaveform', [1 1.5 0 0]));
+expectError(@() setProperty(W, 'currentWaveform', 1)); % A single value does not say which channels it is meant for
+assert(isequal(W.currentWaveform, [1 0 0 0]) && isequal(W.status().currentWaveform, [1 0 0 0]), ...
+    'a refused currentWaveform was changed');
 expectError(@() setProperty(W, 'samplingRate', 100001));
 expectError(@() setProperty(W, 'samplingRate', 44100.5));
 expectError(@() setProperty(W, 'outputRange', '0V:12V'));
@@ -227,7 +332,6 @@ expectError(@() setProperty(W, 'loopMode', [true false]));
 expectError(@() setProperty(W, 'loopMode', [2 0 0 0]));
 expectError(@() setProperty(W, 'loopDuration', [-1 0 0 0]));
 expectError(@() setProperty(W, 'triggerMode', {'Restart', 'Normal'}));
-expectError(@() setProperty(W, 'triggerMode', {'Param Sync', 'Normal'})); % Pulse Pal firmware only
 % A single value does not say which channels it is meant for
 expectError(@() setProperty(W, 'loopMode', true));
 expectError(@() setProperty(W, 'loopDuration', 1));
@@ -246,7 +350,7 @@ function testFullLengthWaveform(W)
 W.samplingRate = 100000;
 volts = -10 + 20*rand(1, W.info.maxSamples);
 startTime = tic;
-W.loadWaveform(1, volts);
+W.loadWaveform(1, volts, 1);
 loadTime = toc(startTime);
 codes = expectedCodes(volts, [-10 10]);
 underrunsBefore = W.status().underruns;
@@ -270,13 +374,17 @@ end
 
 % --- Helpers ---
 
-function codes = loadRandomWaveform(W, channel, nSamples, low, high)
+function codes = loadRandomWaveform(W, waveformNumber, nSamples, low, high, channels)
+% Loads random voltages as a waveform, played by the channels given: by default, the channel of the same number
 if nargin < 4
     low = -10;
     high = 10;
 end
+if nargin < 6
+    channels = waveformNumber;
+end
 volts = low + (high - low)*rand(1, nSamples);
-W.loadWaveform(channel, volts);
+W.loadWaveform(waveformNumber, volts, channels);
 codes = expectedCodes(volts, rangeLimits(W.outputRange));
 end
 
@@ -295,8 +403,12 @@ end
 end
 
 function codes = expectedCodes(volts, limits)
-% The DAC codes the device should hold for these voltages, computed independently of WavePalDevice
-codes = round((volts - limits(1))/(limits(2) - limits(1))*65535);
+% The DAC codes the device should hold for these voltages, computed independently of WavePalDevice. Halfway values
+% round to the even code, as in the Python class (see /AGENTS.md).
+exact = (volts - limits(1))/(limits(2) - limits(1))*65535;
+codes = floor(exact + 0.5);
+halfway = exact - floor(exact) == 0.5;
+codes(halfway) = codes(halfway) - mod(codes(halfway), 2); % The odd code above becomes the even one below
 end
 
 function checkPlayed(W, channel, codes, nExpected)

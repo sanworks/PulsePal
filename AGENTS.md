@@ -87,7 +87,9 @@ share these conventions. Keep them in new code.
 - **Round halfway values to the even integer** when converting to timer cycles, DAC codes,
   microseconds or microvolts, as Python's `round()` and the C++ class do. MATLAB's `round()`
   and integer casts round halves away from zero, so the MATLAB classes call
-  `roundHalfEven()`.
+  `roundHalfEven()`. Where the firmware does the rounding and a class only predicts it, the class
+  copies the firmware's arithmetic instead: Wave Pal's sample clock divider rounds halves up
+  (`setSamplingRate()`), so at 3072 Hz the device plays 7813 cycles per sample, not 7812.
 - **Read every reply.** An unread reply is taken as the reply to the next command, and every
   reply after it is read one byte late. In MATLAB, `read()` returns `[]` with only a warning
   when a reply does not arrive, and `[] ~= 1` is false, so check `isempty()` first.

@@ -20,10 +20,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
-// Waveform playback: the sample clock interrupt, the trigger inputs, and starting and stopping output channels.
+// Waveform playback: the sample clock interrupt, the trigger inputs, param sync, and starting and stopping output
+// channels.
 //
 // Functions in this file:
 //   bufferForChunk()
+//   channelStartBlock()
 //   endPlayback()
 //   fetchNextSample()
 //   handler()
@@ -31,12 +33,46 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   startChannels()
 //   holdChannels()
 //   stopChannels()
+//   channelsPlayingBlock()
 //   softTrigger()
 //   releaseGatedChannels()
 //   trigger1ISR(), trigger2ISR()
+//   triggerInterrupt()
 //   handleTriggerLine()
 //   processTriggerEdge()
+//   anyParamSyncChannel()
+//   applyStoredSet()
 //   setSamplingRate()
+//
+// ---------------------------------------------------------------------------------------------------------------
+// WAVEFORMS
+//
+// The device stores N_WAVEFORMS waveforms, numbered 1-4 over USB (0-3 in arrays). Each output channel plays one of
+// them, its current waveform (currentWaveform[], set by op 67: 1-4, or 0 for none), so several channels can play the
+// same waveform. A channel with no current waveform, or whose current waveform is empty, ignores triggers.
+//
+// Each waveform has two memory blocks, each a pre-buffer in RAM (preBuffer[]) and a region of the data file on the
+// microSD card (see Storage.ino): waveform w has blocks 2w and 2w+1. One of them is the waveform's current block
+// (currentBlock[w]), which channels play. Op 76 loads the other, the unused block (loadWaveform() in USBOps.ino):
+//   - Outside param sync mode, loading a waveform stops the channels playing it, and empties its current block, so
+//     that triggers ignore it until the new samples are stored. The loaded block then becomes current.
+//   - In param sync mode, channels keep playing the current block, and triggers still start it. The loaded block is
+//     stored for the next param sync edge (loadStored[]), which makes it current. See "Param sync" below.
+// A channel chooses its memory block when it starts (playBlock[], startChannels()), and plays that block until it
+// stops, whatever changes meanwhile: its current waveform, or its waveform's current block. Loading a block stops the
+// channels still playing it, since its samples are about to be replaced. In param sync mode that is a channel that
+// started before the previous edge, and is still playing.
+//
+// Param sync. As in Pulse Pal and Synth Pal firmware, param sync mode (TRIGGER_MODE_PARAM_SYNC) lets what the next
+// trial plays be sent during the current one, and take effect the instant it starts. While a trigger channel is in
+// param sync mode, op 76 stores the waveform it loads in the waveform's unused block (loadStored[]), and op 67 stores
+// the current waveforms it sends (storedCurrentWaveform[]). A later op replaces what an earlier one stored. A rising
+// edge on a trigger channel in param sync mode makes what is stored current (applyStoredSet()). It starts and stops
+// nothing: its links are ignored, and channels that are playing finish the memory blocks they play. When the same TTL
+// also reaches the other trigger channel, the param sync edge is handled first (triggerInterrupt()), so the channels
+// the other edge starts play the new waveforms. When no trigger channel is left in param sync mode, what is stored
+// becomes current at once, as at an edge, so nothing is left stored for later. (Pulse Pal and Synth Pal firmware
+// discard a stored set then instead. Here the clients' record of the waveforms they loaded stays true.)
 //
 // ---------------------------------------------------------------------------------------------------------------
 // HOW PLAYBACK WORKS
@@ -57,13 +93,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // channel's mode, as in Pulse Pal firmware (processTriggerEdge()). Soft triggers from USB (op 80) start idle channels,
 // as in Pulse Pal firmware, whatever the modes (softTrigger()).
 //
-// Buffers. A waveform is played in blocks ("chunks") of BUFFER_SAMPLES samples. Chunk 0 is the pre-buffer, filled when
-// the waveform is loaded and kept in RAM, so a triggered waveform starts at once. Later chunks are read from the
-// microSD card by loop() (refillPlaybackBuffers() in Storage.ino) into the channel's two playback buffers: odd chunks
-// into buffer A (e.g. channel1BufferA), even chunks into buffer B, so consecutive chunks never share a buffer. While one
-// chunk plays, loop() reads the next one into the other buffer. In loop mode, the chunk after the last one is chunk 0.
-// bufferChunk[channel][buffer] says which chunk a buffer holds. loop() sets it to CHUNK_NONE before it reads into a
-// buffer, and to the chunk once the read has finished, so handler() never plays from a buffer being filled.
+// Buffers. A waveform is played in chunks of BUFFER_SAMPLES samples. Chunk 0 is in its memory block's pre-buffer,
+// filled when the waveform is loaded and kept in RAM, so a triggered waveform starts at once. Later chunks are read
+// from the microSD card by loop() (refillPlaybackBuffers() in Storage.ino) into the channel's two playback buffers:
+// odd chunks into buffer A (e.g. channel1BufferA), even chunks into buffer B, so consecutive chunks never share a
+// buffer. While one chunk plays, loop() reads the next one into the other buffer. In loop mode, the chunk after the
+// last one is chunk 0. bufferChunk[channel][buffer] and bufferBlock[channel][buffer] say which chunk of which memory
+// block a buffer holds: a channel can play another block from its next start, so the chunk alone does not say whether
+// a buffer holds what the channel needs. loop() sets bufferChunk to CHUNK_NONE before it reads into a buffer, and sets
+// both once the read has finished, so handler() never plays from a buffer being filled, nor a chunk of another block.
 //
 // Underruns. If handler() reaches a chunk that is not in its buffer yet, it holds the output at the last sample and
 // keeps counting samples, so the waveform keeps its timing; when the chunk arrives, playback continues from where the
@@ -86,6 +124,17 @@ static inline byte bufferForChunk(uint32_t chunk) {
   return (chunk & 1) ? 0 : 1;
 }
 
+// The memory block a channel plays if it starts now: its current waveform's current block. NO_BLOCK if the channel
+// has no current waveform, or that waveform is empty.
+byte channelStartBlock(byte channel) {
+  byte waveform = currentWaveform[channel];
+  if (waveform == 0) {
+    return NO_BLOCK;
+  }
+  byte block = currentBlock[waveform - 1];
+  return (nSamples[block] > 0) ? block : NO_BLOCK;
+}
+
 // The waveform on a channel has ended: fetch 0V, and stop the channel once handler() has written it
 static inline void endPlayback(byte channel) {
   dacValue[channel] = DACBits_ZeroVolts;
@@ -94,13 +143,15 @@ static inline void endPlayback(byte channel) {
 }
 
 // Fetches the next sample of a playing channel into dacValue[], for the next dacWrite(). Called from the playback
-// interrupts, or from loop() with interrupts disabled.
+// interrupts, or from loop() with interrupts disabled. The channel's memory block (playBlock[]) does not change while
+// it plays: loading a block stops the channels playing it first.
 static inline void fetchNextSample(byte channel) {
+  byte block = playBlock[channel];
   if (loopMode[channel] && (loopDuration[channel] > 0) && (samplesPlayed[channel] >= loopDuration[channel])) {
     endPlayback(channel); // The loop duration has elapsed
     return;
   }
-  if (wavePos[channel] >= nSamples[channel]) { // The last sample has been fetched
+  if (wavePos[channel] >= nSamples[block]) { // The last sample has been fetched
     if (!loopMode[channel]) {
       endPlayback(channel);
       return;
@@ -112,10 +163,10 @@ static inline void fetchNextSample(byte channel) {
   uint32_t chunk = playChunk[channel];
   uint32_t pos = chunkPos[channel];
   if (chunk == 0) {
-    dacValue[channel] = preBuffer[channel][pos];
+    dacValue[channel] = preBuffer[block][pos];
   } else {
     byte buffer = bufferForChunk(chunk);
-    if (bufferChunk[channel][buffer] == (int32_t)chunk) {
+    if ((bufferChunk[channel][buffer] == (int32_t)chunk) && (bufferBlock[channel][buffer] == block)) {
       dacValue[channel] = playbackBuffers[channel][buffer][pos];
     } else if (pos == 0) {
       underrunCount[channel]++; // The chunk has not been read yet: hold the last sample (dacValue is unchanged)
@@ -169,12 +220,14 @@ boolean anyChannelPlaying() {
   return false;
 }
 
-// Starts the waveforms of the selected channels (one bit per channel) from the first sample, restarting any that are
-// playing. Channels without a waveform are skipped. Interrupt context, or loop() with interrupts disabled.
+// Starts the selected channels (one bit per channel) from the first sample of their current waveform, restarting any
+// that are playing. Channels without a waveform are skipped. Interrupt context, or loop() with interrupts disabled.
 void startChannels(byte channelBits) {
   byte started = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
-    if (bitRead(channelBits, i) && (nSamples[i] > 0)) {
+    byte block = bitRead(channelBits, i) ? channelStartBlock(i) : NO_BLOCK;
+    if (block != NO_BLOCK) {
+      playBlock[i] = block; // Played until the channel stops, whatever is loaded or made current meanwhile
       wavePos[i] = 0;
       playChunk[i] = 0;
       chunkPos[i] = 0;
@@ -232,18 +285,29 @@ void stopChannels(byte channelBits) {
   holdChannels(channelBits, DACBits_ZeroVolts);
 }
 
+// The channels (one bit per channel) playing a memory block. Interrupt context, or loop() with interrupts disabled.
+byte channelsPlayingBlock(byte block) {
+  byte channelBits = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (playing[i] && (playBlock[i] == block)) {
+      bitSet(channelBits, i);
+    }
+  }
+  return channelBits;
+}
+
 // A channel is playing unless its waveform has just ended (stopAfterWrite), which counts as stopped
 static inline boolean isPlaying(byte channel) {
   return playing[channel] && !stopAfterWrite[channel];
 }
 
 // A soft trigger (op 80) on the selected output channels (one bit per channel): starts those that are idle, as in Pulse
-// Pal firmware. Channels that are playing ignore it, whatever the trigger modes, and channels without a waveform are
-// skipped. Interrupt context, or loop() with interrupts disabled.
+// Pal firmware. Channels that are playing ignore it, whatever the trigger modes, and startChannels() skips channels
+// without a waveform. Interrupt context, or loop() with interrupts disabled.
 void softTrigger(byte channelBits) {
   byte toStart = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
-    if (bitRead(channelBits, i) && (nSamples[i] > 0) && !isPlaying(i)) {
+    if (bitRead(channelBits, i) && !isPlaying(i)) {
       bitSet(toStart, i);
     }
   }
@@ -269,11 +333,32 @@ void releaseGatedChannels(byte triggerChannel) {
 
 // Pin interrupts for the trigger channels, on every edge. See setup() for their priority.
 void trigger1ISR() {
-  handleTriggerLine(0, digitalReadFast(TriggerLines[0]) == TriggerLevel);
+  triggerInterrupt(0);
 }
 
 void trigger2ISR() {
-  handleTriggerLine(1, digitalReadFast(TriggerLines[1]) == TriggerLevel);
+  triggerInterrupt(1);
+}
+
+// A trigger channel's (0 or 1) pin interrupt. When the same TTL reaches both trigger channels and one is in param sync
+// mode, either interrupt can run first: so if the other channel is in param sync mode and has just gone high, its edge
+// is handled first, and the stored waveforms become current before this edge starts anything (see "Param sync"
+// above). Its own interrupt then finds the edge handled. As in Synth Pal firmware.
+void triggerInterrupt(byte triggerChannel) {
+  byte otherChannel = 1 - triggerChannel;
+  boolean levels[2] = {digitalReadFast(TriggerLines[0]) == TriggerLevel, digitalReadFast(TriggerLines[1]) == TriggerLevel};
+  if ((triggerMode[otherChannel] == TRIGGER_MODE_PARAM_SYNC) && levels[otherChannel] &&
+      !triggerLineActive[otherChannel]) {
+    handleTriggerLine(otherChannel, true);
+    edgeHandledEarly[otherChannel] = true;
+  }
+  if (edgeHandledEarly[triggerChannel]) {
+    edgeHandledEarly[triggerChannel] = false;
+    if (levels[triggerChannel] == triggerLineActive[triggerChannel]) {
+      return; // The other channel's interrupt handled this edge, and the level has not changed since
+    }
+  }
+  handleTriggerLine(triggerChannel, levels[triggerChannel]);
 }
 
 // Handles a change on a trigger channel (0 or 1). isActive is its level now: true if the TTL is high.
@@ -295,10 +380,19 @@ void handleTriggerLine(byte triggerChannel, boolean isActive) {
 
 // An edge on a trigger channel (0 or 1). What it does to each linked output channel depends on the trigger channel's
 // mode, as in Pulse Pal firmware: a rising edge starts an idle channel in every mode, stops a playing one in toggle
-// mode, and restarts a playing one from its first sample in master mode. A falling edge stops a playing channel in
-// gated mode (releaseGatedChannels()). Channels without a waveform are skipped.
+// mode, and restarts a playing one from the first sample of its current waveform in master mode (or stops it, if it
+// has no current waveform now). A falling edge stops a playing channel in gated mode (releaseGatedChannels()).
+// startChannels() skips channels without a waveform. In param sync mode, a rising edge makes what op 76 and op 67
+// stored current, and starts and stops nothing: its links are ignored.
 void processTriggerEdge(byte triggerChannel, boolean isRisingEdge) {
   byte mode = triggerMode[triggerChannel];
+  if (mode == TRIGGER_MODE_PARAM_SYNC) {
+    if (isRisingEdge) {
+      screenSaverActivity = true;
+      applyStoredSet();
+    }
+    return;
+  }
   if (!isRisingEdge) {
     if (mode == TRIGGER_MODE_GATED) {
       releaseGatedChannels(triggerChannel);
@@ -309,17 +403,47 @@ void processTriggerEdge(byte triggerChannel, boolean isRisingEdge) {
   byte toStart = 0;
   byte toStop = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
-    if (!TriggerAddress[triggerChannel][i] || (nSamples[i] == 0)) {
+    if (!TriggerAddress[triggerChannel][i]) {
       continue;
     }
-    if (!isPlaying(i) || (mode == TRIGGER_MODE_MASTER)) {
-      bitSet(toStart, i); // startChannels() restarts a channel that is playing
+    if (!isPlaying(i)) {
+      bitSet(toStart, i);
     } else if (mode == TRIGGER_MODE_TOGGLE) {
       bitSet(toStop, i);
+    } else if (mode == TRIGGER_MODE_MASTER) {
+      if (channelStartBlock(i) != NO_BLOCK) {
+        bitSet(toStart, i); // startChannels() restarts a channel that is playing
+      } else {
+        bitSet(toStop, i); // Its current waveform is now none, or empty: there is nothing to restart it with
+      }
     }
   }
   stopChannels(toStop);
   startChannels(toStart);
+}
+
+// True if a trigger channel is in param sync mode. Op 76 and op 67 then store what they send for its next rising edge.
+boolean anyParamSyncChannel() {
+  return (triggerMode[0] == TRIGGER_MODE_PARAM_SYNC) || (triggerMode[1] == TRIGGER_MODE_PARAM_SYNC);
+}
+
+// A rising edge on a trigger channel in param sync mode, or the last trigger channel leaving the mode: the waveforms
+// and current waveforms that op 76 and op 67 stored become current (see "Param sync" above). Channels that are playing
+// finish the memory blocks they play. With nothing stored, it changes nothing. Playback interrupt context, or loop()
+// with interrupts disabled.
+void applyStoredSet() {
+  for (byte w = 0; w < N_WAVEFORMS; w++) {
+    if (loadStored[w]) {
+      currentBlock[w] ^= 1; // The waveform's other block, which holds the stored load
+      loadStored[w] = false;
+    }
+  }
+  if (currentWaveformsStored) {
+    for (byte i = 0; i < N_CHANNELS; i++) {
+      currentWaveform[i] = storedCurrentWaveform[i];
+    }
+    currentWaveformsStored = false;
+  }
 }
 
 // Sets the sampling rate of all channels, in Hz. It takes effect from the next sample, also during playback.

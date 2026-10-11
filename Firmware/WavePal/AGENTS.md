@@ -1,10 +1,12 @@
 # Working on the Wave Pal firmware
 
 Wave Pal is alternative firmware for Pulse Pal 3 hardware (Teensy 4.1): a four channel waveform
-player, ported from the WavePlayer firmware of the Bpod Analog Output Module. Each output
-channel plays one waveform of up to 1 million samples, streamed from the microSD card, when a
-TTL edge, a USB command or the joystick menu triggers it. The USB protocol is in `PROTOCOL.md`
-in this folder. Read this page before changing anything here.
+player, ported from the WavePlayer firmware of the Bpod Analog Output Module. It stores four
+waveforms of up to 1 million samples each, and each output channel plays one of them (its current
+waveform), streamed from the microSD card, when a TTL edge, a USB command or the joystick menu
+triggers it. Each waveform has two memory blocks, as in the Bpod AudioPlayer Live firmware, so
+that in param sync mode the next trial's waveform loads while the current one plays. The USB
+protocol is in `PROTOCOL.md` in this folder. Read this page before changing anything here.
 
 ## Where things are
 
@@ -15,8 +17,8 @@ The sketch is split into tabs. Arduino joins them into one file before compiling
 | Tab | Contents |
 |---|---|
 | `WavePal.ino` | Build configuration, pin map, named constants, global variables, `setup()`, `loop()` |
-| `Playback.ino` | `handler()` (the sample clock interrupt), the trigger interrupts, starting and stopping channels. "How playback works" at the top explains the buffering |
-| `Storage.ino` | The waveform data file, and `refillPlaybackBuffers()` |
+| `Playback.ino` | `handler()` (the sample clock interrupt), the trigger interrupts, param sync, starting and stopping channels. "Waveforms" at the top explains the waveforms, memory blocks and param sync, and "How playback works" the buffering |
+| `Storage.ino` | The waveform data file, `refillPlaybackBuffers()` and `forgetBufferedBlock()` |
 | `USBOps.ino` | Commands from the PC (`processUSBCommands()`), `loadWaveform()`, comm failure handling |
 | `Menu.ino` | Thumb joystick menu, with its map |
 | `Display.ino` | Screen output, the screen saver and the splash screen |
@@ -55,10 +57,14 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
    than one buffer's duration (164 ms at 100 kHz) causes underruns. The joystick menu runs
    during playback and must not use delays. Long ops call `refillPlaybackBuffers()` between
    blocks, as `loadWaveform()` does.
-4. **`handler()` must not read a playback buffer unless `bufferChunk[][]` says it holds the
-   chunk it wants.** `refillPlaybackBuffers()` sets `CHUNK_NONE` before a read and the chunk
-   after it, and only ever reads into the buffer that `handler()` is not playing. The
-   hardware test (below) checks every sample against this.
+4. **`handler()` must not read a playback buffer unless `bufferChunk[][]` and `bufferBlock[][]`
+   say it holds the chunk it wants, of the memory block it plays.** A channel can play another
+   memory block from its next start, so a chunk number alone does not identify the samples.
+   `refillPlaybackBuffers()` sets `CHUNK_NONE` before a read and both tags after it (with
+   interrupts off, since `handler()` checks both), and only ever reads into the buffer that
+   `handler()` is not playing. A trigger can restart the channel on another block during the
+   read: the tags then name the old block, so `handler()` does not play it. The hardware test
+   (below) checks every sample against this.
 5. **Do not write to the screen, wait, or use the microSD card or the EEPROM in an interrupt.**
    EEPROM writes stop all interrupts (about 20 µs per byte, and now and then tens of ms), so
    `updateScreenSaver()` saves the screen saver settings only while the sample clock is stopped.
@@ -82,22 +88,35 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
    range change was lost (the outputs stayed in the range the DAC was last left in, by Wave
    Pal or other firmware). Flashing the device does not reset the DAC, so a test right after
    flashing over other firmware cannot catch a fault in `setup()`.
+10. **A memory block must not change while a channel plays it.** A channel chooses its block
+    (`playBlock[]`) when it starts, and `fetchNextSample()` relies on that block's `nSamples`
+    and pre-buffer staying put until the channel stops. So anything that writes a block, or
+    empties it, first stops the channels playing it (`channelsPlayingBlock()`), and marks the
+    playback buffers holding its chunks empty (`forgetBufferedBlock()`), as `loadWaveform()` and
+    `unloadWaveforms()` do. Changing what a channel will play next (`currentWaveform[]`,
+    `currentBlock[]`) is safe at any time: it applies from the channel's next start.
 
 ## What runs in the playback interrupts
 
 | Interrupt | Entry point | When |
 |---|---|---|
 | Sample clock | `handler()` | Every sample period while a channel plays. `startChannels()` starts it, and it stops itself when no channel is playing |
-| Trigger channels | `trigger1ISR()`, `trigger2ISR()` | Every edge on the trigger inputs |
+| Trigger channels | `trigger1ISR()`, `trigger2ISR()`, both through `triggerInterrupt()` | Every edge on the trigger inputs |
 
 They call `startChannels()`, `stopChannels()`, `holdChannels()`, `processTriggerEdge()`,
-`releaseGatedChannels()`, `fetchNextSample()` and the DAC functions. Shared with `loop()`:
-the playback state (`playing`, `stopAfterWrite`, `playChunk`, ...), `bufferChunk`,
-`nSamples`, the settings (`loopMode`, `loopDuration`, `triggerMode`, `TriggerAddress`) and
-`dacValue`.
+`releaseGatedChannels()`, `applyStoredSet()` (a param sync edge), `fetchNextSample()` and the
+DAC functions. Shared with `loop()`: the playback state (`playing`, `stopAfterWrite`,
+`playBlock`, `playChunk`, ...), `bufferChunk` and `bufferBlock`, `nSamples`, the waveforms'
+`currentBlock`, the settings (`currentWaveform`, `loopMode`, `loopDuration`, `triggerMode`,
+`TriggerAddress`), what waits for a param sync edge (`loadStored`, `storedCurrentWaveform`,
+`currentWaveformsStored`) and `dacValue`.
 
-Measured on a Teensy 4.1 (op 71, `longest_interrupt_us`): `handler()` takes 1.7 µs with one
-channel playing and 5.4 µs with four, against a 10 µs sample period at 100 kHz. About 0.15 µs
+When the same TTL reaches both trigger channels and one is in param sync mode, either pin
+interrupt can run first. `triggerInterrupt()`, as in Synth Pal, handles the param sync channel's
+rising edge first in both orders, so the channels the other edge starts play the new waveforms.
+
+Measured on a Teensy 4.1 (op 71, `longest_interrupt_us`): `handler()` takes 1.8 µs with one
+channel playing and 5.5 µs with four, against a 10 µs sample period at 100 kHz. About 0.15 µs
 of that is the wait before the latch (rule 9).
 
 ## Checks
@@ -108,21 +127,31 @@ Without a device:
 cd /Python/PulsePal && uv run python tests/test_wavepal_protocol.py
 ```
 
-With a Wave Pal on a USB port (about 70 s; `--quick` skips the 1M sample tests):
+With a Wave Pal on a USB port (about 110 s; `--quick` skips the 1M sample tests):
 
 ```bash
 cd /Python/PulsePal && uv run python tests/wavepal_hardware_test.py COM3
 
-# With a Pulse Pal (Pulse Pal firmware) whose output 1 drives trigger channel 1, for the trigger mode tests
+# With a Pulse Pal (Pulse Pal firmware) whose outputs 1 and 2 drive trigger channels 1 and 2, for
+# the trigger mode and param sync tests
 cd /Python/PulsePal && uv run python tests/wavepal_hardware_test.py COM3 --driver COM4
 ```
 
 It checks every sample played against the waveforms it loaded, using op 90, including
 waveforms at the buffer size and one sample either side, loop wraps, restarts part way through
 a streamed waveform (master mode, with `--driver`), rate changes during playback, four channels
-streaming at 100 kHz, and a waveform loaded while three channels stream. With `--driver`, it also
-checks each trigger mode with TTL pulses. It also reports transfer speed, underruns and the
-longest sample clock interrupt.
+streaming at 100 kHz, one waveform streamed by all four channels, a channel switched to another
+waveform after its buffers hold chunks of the first, and a waveform loaded while three channels
+stream. In param sync mode, it loads four 1M sample waveforms while all four channels stream
+others at 100 kHz: the channels must play theirs to the end with no underrun, and the new ones,
+once an edge makes them current, must play whole and up to random points (a whole waveform's sum
+would not show chunks stored out of order). Without an edge, it checks that param sync mode
+stores loads and current waveforms, that leaving the mode applies them, and that a load into a
+block a channel still plays stops it. With `--driver`, it also checks each trigger mode with TTL
+pulses, and param sync edges: an edge applies the stored set and starts nothing, a playing
+channel finishes its waveform, and with the same TTL on both trigger channels (either one in
+param sync mode), the channel started plays the new waveform. It also reports transfer speed,
+underruns and the longest sample clock interrupt.
 
 The MATLAB class has its own test, in the same way (about 20 s, verified with R2020b and
 R2025b):
@@ -145,9 +174,12 @@ menu, check:
   gated mode with both trigger channels linked to one output. Gated mode with loop mode on plays
   for as long as the TTL is high. The trigger LEDs follow the TTL, and the output LEDs light while
   a channel plays.
+- Param sync, with the same TTL on both trigger channels: the new waveform starts with the usual
+  latency (a few µs from idle), on the scope.
 - The joystick menu: scroll through the channels, screen saver, device info, reboot and exit;
-  play and stop a channel from its item, and see the item change back when the waveform ends.
-  The splash screen shows the Wave Pal logo.
+  each channel's item says "Play waveform N" with its current waveform, or "No waveform"; play
+  and stop a channel from its item ("Stop waveform N" while it plays), and see the item change
+  back when the waveform ends. The splash screen shows the Wave Pal logo.
 - The screen saver: with a short timeout (`set_screen_saver(True, 10)`), the screen dims after
   10 s without activity, and a command, a TTL rising edge, or a joystick click or push brings it
   back; the click or push that wakes it does nothing else. Switch it off from the menu, power
@@ -161,5 +193,9 @@ menu, check:
 - A channel that starts while another plays starts on the next tick of the shared sample
   clock, so its onset can be up to one sample period late.
 - Waveforms are not kept through a restart: the data file is created again at startup.
+- Four waveforms, because RAM holds a pre-buffer of `BUFFER_SAMPLES` for each of their eight
+  memory blocks: 256 kB of RAM1, leaving about 156 kB for the stack. More waveforms would need
+  smaller pre-buffers, which leave less time for the card's first read after a trigger, and a
+  first chunk shorter than the others, which the chunk and file arithmetic does not allow now.
 - The zero code calibration is applied in the -10 V to 10 V range only, where it was measured.
 - Only built and tested with `PIN_MAP_VERSION 1`.

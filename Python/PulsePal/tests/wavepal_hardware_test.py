@@ -9,9 +9,10 @@ Run it after changing the Wave Pal firmware or pulsepal/wave_pal.py:
 The device must be a Pulse Pal 3 running Wave Pal firmware. Nothing needs to be
 connected to it, but the outputs play random waveforms of up to +/-10 V, so
 disconnect anything that should not receive them. With --driver, a Pulse Pal
-running Pulse Pal firmware, whose output channel 1 is wired to the Wave Pal's
-trigger channel 1, sends the TTL edges that the trigger mode tests need; without
-it, those tests are skipped.
+running Pulse Pal firmware, whose output channels 1 and 2 are wired to the Wave
+Pal's trigger channels 1 and 2, sends the TTL edges that the trigger mode and
+param sync tests need; without it, those tests are skipped. The driver's outputs
+pulse from 0 V to 4 V only: the trigger inputs take 3 to 5 V.
 
 Every sample the device plays is checked: its firmware sums the DAC codes each
 channel plays (op 90), and each test compares the sums with the waveforms it
@@ -70,9 +71,10 @@ def check_played(W, channel, codes, n_expected):
         f"channel {channel}: sum of the samples played is {sums[channel]}, expected {expected}")
 
 
-def load(W, channel, volts):
-    """Load a waveform and return its DAC codes, as the device stores them."""
-    W.load_waveform(channel, volts)
+def load(W, number, volts, channels="same"):
+    """Load waveform `number`, played by `channels`: by default, the channel of the same number;
+    None changes no channel. Returns its DAC codes, as the device stores them."""
+    W.load_waveform(number, volts, number if channels == "same" else channels)
     return W._volts_to_codes(volts)
 
 
@@ -80,8 +82,11 @@ def test_connection(W):
     assert W.info.firmware_version == 1
     assert W.info.hardware_version == 3
     assert W.info.max_samples == 1000000
+    assert W.info.n_waveforms == 4
     status = W.status()
     assert status.playing == [], status
+    assert status.current_waveform == [None, 0, 0, 0, 0], status
+    assert status.stored_waveforms == [] and status.stored_current_waveform is None, status
 
 
 def test_waveforms_play_exactly_once_around_the_buffer_size(W):
@@ -200,17 +205,261 @@ def test_loading_while_other_channels_play(W, report):
         W.loop_mode = [False] * 4
 
 
+def test_param_sync_loads_while_four_channels_play(W, D, report):
+    """The next trial's waveforms, 1M samples each (the maximum), are loaded in param sync mode while
+    all four channels stream different waveforms at 100 kHz. Playback must be undisturbed: each
+    channel plays its old waveform to the end, sample for sample, with no underrun, and the sample
+    clock interrupt stays within the sample period. Then the edge (from the driver's output 2, or,
+    without --driver, leaving param sync mode, which applies the stored loads the same way) makes the
+    new waveforms current, and each is checked as played: whole, and up to random points, so that
+    chunks stored out of order show too (a whole waveform's sum does not depend on their order)."""
+    W.sampling_rate = 100000
+    rate = W.actual_sampling_rate
+    max_samples = W.info.max_samples
+    old = {n: load(W, n, random_waveform(400000 + 1000 * n)) for n in (1, 2, 3, 4)}  # About 4 s each
+    W.loop_mode = [False] * 4
+    W.loop_duration = [0] * 4
+    W.trigger_mode[2] = "Param Sync"
+    try:
+        underruns_before = W.status().underruns
+        W.status()  # Reset the longest interrupt
+        W.trigger([1, 2, 3, 4])
+        time.sleep(0.2)
+        new = {}
+        start = time.perf_counter()
+        for n in (1, 2, 3, 4):
+            volts = random_waveform(max_samples)
+            W.load_waveform(n, volts)
+            new[n] = W._volts_to_codes(volts)
+        load_seconds = time.perf_counter() - start
+        status = W.status()
+        longest_during_loads = status.longest_interrupt_us
+        assert status.playing == [1, 2, 3, 4], f"a channel stopped during the loads: {status}"
+        assert status.stored_waveforms == [1, 2, 3, 4], status
+        assert status.samples_loaded[1:] == [old[n].size for n in (1, 2, 3, 4)], status
+        longest = max(longest_during_loads, wait_until_stopped(W, [1, 2, 3, 4], timeout=8))
+        for n in (1, 2, 3, 4):
+            check_played(W, n, old[n], old[n].size)
+        underruns = W.status().underruns
+        assert underruns == underruns_before, f"underruns: {underruns} (were {underruns_before})"
+        assert longest < 10, f"the interrupt took {longest:.2f} us, longer than the sample period"
+        report(f"4 x 1M samples loaded in param sync mode while 4 channels play at 100 kHz: {load_seconds:.2f} s; "
+               f"old waveforms played exactly, no underruns, longest interrupt {longest_during_loads:.2f} us "
+               "during the loads")
+
+        if D is not None:
+            driver_pulse(D, channels=(2,))
+        else:
+            W.trigger_mode[2] = "Normal"
+        status = W.status()
+        assert status.stored_waveforms == [] and status.samples_loaded[1:] == [max_samples] * 4, status
+        W.trigger([1, 2, 3, 4])
+        wait_until_stopped(W, [1, 2, 3, 4], timeout=12)
+        for n in (1, 2, 3, 4):
+            check_played(W, n, new[n], max_samples)
+        W.loop_mode = [True] * 4  # A loop duration shorter than the waveform plays exactly that many samples
+        for _ in range(2):
+            prefixes = RNG.integers(1, max_samples, 4)
+            W.loop_duration = [int(k) / rate for k in prefixes]
+            W.trigger([1, 2, 3, 4])
+            wait_until_stopped(W, [1, 2, 3, 4], timeout=12)
+            for n in (1, 2, 3, 4):
+                check_played(W, n, new[n], int(prefixes[n - 1]))
+        assert W.status().underruns == underruns_before, "underruns while the new waveforms played"
+    finally:
+        W.trigger_mode = ["Normal", "Normal"]
+        W.loop_mode = [False] * 4
+        W.loop_duration = [0] * 4
+        W.stop()
+
+
+def test_one_waveform_on_several_channels(W, report):
+    """A waveform loaded once plays on every channel it is given to: four channels stream the same
+    memory block from the card at 100 kHz, each reading it for itself."""
+    W.sampling_rate = 100000
+    codes = load(W, 2, random_waveform(20 * W.info.buffer_samples + 11), [1, 2, 3, 4])  # 3.3 s
+    assert W.current_waveform == [None, 2, 2, 2, 2]
+    assert W.status().current_waveform == [None, 2, 2, 2, 2]
+    underruns_before = W.status().underruns
+    W.status()  # Reset the longest interrupt
+    W.trigger([1, 2, 3, 4])
+    longest = wait_until_stopped(W, [1, 2, 3, 4], timeout=6)
+    for channel in (1, 2, 3, 4):
+        check_played(W, channel, codes, codes.size)
+    assert W.status().underruns == underruns_before, "underruns during playback"
+    report(f"one waveform on 4 channels at 100 kHz: longest interrupt {longest:.2f} us of 10 us, no underruns")
+
+
+def test_current_waveform_changes_at_the_next_start(W):
+    """A playing channel finishes its waveform; the new current waveform plays from its next start.
+    The playback buffers then hold chunks of the first waveform at the chunk numbers the second one
+    needs, which must not be played as the second's."""
+    W.sampling_rate = 100000
+    buffer = W.info.buffer_samples
+    codes1 = load(W, 1, random_waveform(5 * buffer))          # 0.8 s
+    codes3 = load(W, 3, random_waveform(4 * buffer + 3), None)  # Played by no channel yet
+    W.trigger(1)
+    time.sleep(0.3)
+    W.current_waveform[1] = 3
+    assert W.status().current_waveform[1] == 3
+    wait_until_stopped(W, [1], timeout=3)
+    check_played(W, 1, codes1, codes1.size)
+    for _ in range(2):
+        W.trigger(1)
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, codes3, codes3.size)
+    W.current_waveform[1] = 1  # And back: chunks of waveform 3 are now buffered
+    W.trigger(1)
+    wait_until_stopped(W, [1], timeout=3)
+    check_played(W, 1, codes1, codes1.size)
+
+
+def test_loading_stops_only_the_channels_playing_that_waveform(W):
+    """Outside param sync mode, loading a waveform stops the channels playing it. Others play on."""
+    W.sampling_rate = 10000
+    load(W, 1, random_waveform(50000), [1, 3])  # 5 s
+    load(W, 2, random_waveform(50000))
+    W.trigger([1, 2, 3])
+    time.sleep(0.2)
+    codes = load(W, 1, random_waveform(300), None)
+    assert W.status().playing == [2], W.status()
+    W.trigger([1, 3])
+    wait_until_stopped(W, [1, 3], timeout=1)
+    check_played(W, 1, codes, codes.size)
+    check_played(W, 3, codes, codes.size)
+    W.stop()
+
+
+def test_param_sync_without_an_edge(W):
+    """In param sync mode, loads and current waveforms wait for an edge, which never comes on an
+    unconnected trigger channel: channels play on, and triggers play, the old waveform. Leaving the
+    mode makes them current, as an edge would. A later load stops a channel still playing the memory
+    block it reuses."""
+    W.sampling_rate = 100000
+    buffer = W.info.buffer_samples
+    W.current_waveform = [0] * 4
+    old = load(W, 1, random_waveform(6 * buffer))  # 1 s
+    W.trigger_mode[2] = "Param Sync"
+    try:
+        W.trigger(1)
+        new = load(W, 1, random_waveform(3 * buffer + 1), [1, 2])
+        status = W.status()
+        assert status.playing == [1], f"a param sync load stopped the channel playing the old waveform: {status}"
+        assert status.stored_waveforms == [1] and status.stored_current_waveform == [None, 1, 1, 0, 0], status
+        assert status.samples_loaded[1] == old.size and status.current_waveform == [None, 1, 0, 0, 0], status
+        try:
+            W.output_range = "-5V:5V"
+            raise AssertionError("output_range changed in param sync mode")
+        except PulsePalError:
+            pass
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, old, old.size)
+        W.trigger(1)  # Until an edge, triggers play the old waveform
+        time.sleep(0.2)
+        W.trigger_mode[2] = "Normal"  # Leaving the mode makes the stored load current, as an edge would
+        status = W.status()
+        assert status.stored_waveforms == [] and status.stored_current_waveform is None, status
+        assert status.samples_loaded[1] == new.size and status.current_waveform == [None, 1, 1, 0, 0], status
+        assert status.playing == [1], f"the channel playing the old waveform was stopped: {status}"
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, old, old.size)
+
+        # Channel 1 plays the new waveform's memory block. Two loads later (one current, one stored)
+        # that block is reused, so the second load stops the channel.
+        W.trigger(1)
+        time.sleep(0.05)
+        W.trigger_mode[2] = "Param Sync"
+        newer = load(W, 1, random_waveform(2 * buffer), None)
+        W.trigger_mode[2] = "Normal"
+        assert W.status().playing == [1], "the channel playing the older block was stopped"
+        W.trigger_mode[2] = "Param Sync"
+        newest = load(W, 1, random_waveform(4 * buffer + 2), None)
+        assert W.status().playing == [], "a load into the block a channel plays did not stop it"
+        W.trigger_mode[2] = "Normal"
+        W.trigger([1, 2])
+        wait_until_stopped(W, [1, 2], timeout=3)
+        check_played(W, 1, newest, newest.size)
+        check_played(W, 2, newest, newest.size)
+        assert newer.size  # Replaced before it played
+    finally:
+        W.trigger_mode[2] = "Normal"
+        W.stop()
+
+
 class Skipped(Exception):
     """Raised by a test that needs something this run does not have."""
 
 
-def driver_pulse(D, width=0.001):
-    """A TTL pulse on the driver's output channel 1, 0 V to 4 V: the Wave Pal's trigger inputs take
-    3 to 5 V. Returns once it has ended."""
-    D.phase1_duration[1] = width
-    D.pulse_train_duration[1] = width
-    D.trigger(1)
+def driver_pulse(D, width=0.001, channels=(1,)):
+    """A TTL pulse on the driver's output channels (1, 2 or both, together), 0 V to 4 V: the Wave
+    Pal's trigger inputs take 3 to 5 V. Returns once it has ended."""
+    for channel in channels:
+        D.phase1_duration[channel] = width
+        D.pulse_train_duration[channel] = width
+    D.trigger(list(channels))
     time.sleep(width + 0.02)
+
+
+def test_param_sync_edges(W, D):
+    """Edges on trigger channel 2 in param sync mode, from the driver's output 2: an edge makes the
+    stored load and current waveforms current, starts nothing, and lets a playing channel finish.
+    With the same TTL on both trigger channels, the channels trigger channel 1 starts play the new
+    waveform, whichever trigger interrupt runs first."""
+    if D is None:
+        raise Skipped("needs --driver")
+    W.sampling_rate = 100000
+    buffer = W.info.buffer_samples
+    W.current_waveform = [0] * 4
+    first = load(W, 1, random_waveform(3 * buffer))
+    W.link_trigger_channel1 = [True, False, False, False]
+    W.link_trigger_channel2 = [False, False, True, False]  # Ignored in param sync mode
+    load(W, 3, random_waveform(1000))
+    W.trigger_mode[2] = "Param Sync"
+    try:
+        second = load(W, 1, random_waveform(2 * buffer + 9))
+        driver_pulse(D, channels=(2,))
+        status = W.status()
+        assert status.stored_waveforms == [] and status.samples_loaded[1] == second.size, status
+        assert status.playing == [], f"the param sync edge started a channel: {status}"
+        driver_pulse(D, channels=(1,))
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, second, second.size)
+
+        # A channel playing at the edge finishes its waveform, and plays the new one from its next start
+        long_one = load(W, 1, random_waveform(8 * buffer))  # 1.3 s
+        driver_pulse(D, channels=(2,))
+        W.trigger(1)
+        time.sleep(0.2)
+        third = load(W, 1, random_waveform(buffer + 1))
+        driver_pulse(D, channels=(2,))
+        assert W.status().playing == [1], "the param sync edge stopped the channel"
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, long_one, long_one.size)
+        W.trigger(1)
+        wait_until_stopped(W, [1], timeout=3)
+        check_played(W, 1, third, third.size)
+
+        # The same TTL on both trigger channels: the new waveform and current waveform apply first. Either
+        # trigger channel in param sync mode, so that either trigger interrupt is the one that runs first.
+        for sync_channel, start_channel in ((2, 1), (1, 2)):
+            W.trigger_mode = ["Normal", "Normal"]
+            W.current_waveform[1] = 1
+            W.link_trigger_channel1 = [start_channel == 1, False, False, False]
+            W.link_trigger_channel2 = [start_channel == 2, False, False, False]
+            W.trigger_mode[sync_channel] = "Param Sync"
+            for attempt in range(10):
+                codes = load(W, 2, random_waveform(2000 + attempt), 1)  # Channel 1 moves to waveform 2 at the edge
+                assert W.status().current_waveform[1] == 1
+                driver_pulse(D, channels=(1, 2))
+                wait_until_stopped(W, [1], timeout=1)
+                check_played(W, 1, codes, codes.size)
+                W.current_waveform[1] = 1  # Stored too: the next edge moves channel 1 back to waveform 1
+                driver_pulse(D, channels=(sync_channel,))
+    finally:
+        W.trigger_mode = ["Normal", "Normal"]
+        W.link_trigger_channel1 = [True] * 4
+        W.link_trigger_channel2 = [False] * 4
+        W.stop()
 
 
 def open_driver(port):
@@ -350,6 +599,7 @@ def test_screen_saver_and_export_params(W):
     params = W.export_params()
     assert params["loop_mode"] == [False, True, False, False] and params["loop_duration"][1] == 0.5, params
     assert params["sampling_rate"] == W.sampling_rate and params["output_range"] == W.output_range, params
+    assert params["current_waveform"] == W.status().current_waveform[1:], params
     W.loop_mode[2] = False
     W.loop_duration[2] = 0
 
@@ -406,7 +656,8 @@ def main():
     parser.add_argument("--quick", action="store_true",
                         help="Skip the tests that stream 1M sample waveforms")
     parser.add_argument("--driver", metavar="PORT",
-                        help="A Pulse Pal whose output 1 drives trigger channel 1, for the trigger mode tests")
+                        help="A Pulse Pal whose outputs 1 and 2 drive trigger channels 1 and 2, for the trigger "
+                             "mode and param sync tests")
     arguments = parser.parse_args()
     D = open_driver(arguments.driver) if arguments.driver else None
 
@@ -417,8 +668,13 @@ def main():
         test_loop_durations_wrap_exactly_around_the_buffer_size,
         test_loop_duration_is_exact_in_samples,
         test_soft_triggers_start_idle_channels_only,
+        lambda W: test_one_waveform_on_several_channels(W, notes.append),
+        test_current_waveform_changes_at_the_next_start,
+        test_loading_stops_only_the_channels_playing_that_waveform,
+        test_param_sync_without_an_edge,
         lambda W: test_trigger_modes(W, D),
         lambda W: test_restarts_part_way_through_a_streamed_waveform(W, D),
+        lambda W: test_param_sync_edges(W, D),
         test_sampling_rate_change_during_playback,
         test_channel_joining_a_running_clock_plays_exactly,
         test_fixed_voltage_and_stop,
@@ -431,6 +687,7 @@ def main():
             lambda W: test_full_length_waveform_transfer_and_playback(W, notes.append),
             lambda W: test_four_channels_at_100khz(W, notes.append),
             lambda W: test_loading_while_other_channels_play(W, notes.append),
+            lambda W: test_param_sync_loads_while_four_channels_play(W, D, notes.append),
         ]
     tests.append(test_pulse_pal_class_is_refused)  # Last: it closes the connection
 

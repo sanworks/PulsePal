@@ -16,7 +16,7 @@ starts with an example. Python has example scripts: `/Python/PulsePal/PulsePalEx
 | Firmware | Plays | Hardware | Class (Python and MATLAB) |
 |---|---|---|---|
 | Pulse Pal | Pulse trains: monophasic or biphasic pulses, bursts, and custom trains of up to 10000 pulses | Pulse Pal 2 and 3 | `PulsePalDevice` |
-| Wave Pal | One sampled waveform per channel, up to 1 million samples at up to 100 kHz | Pulse Pal 3 | `WavePalDevice` |
+| Wave Pal | Four sampled waveforms, each played on any channels, up to 1 million samples at up to 100 kHz | Pulse Pal 3 | `WavePalDevice` |
 | Synth Pal | Sine, triangle, square and sawtooth waves, white noise, and fixed voltages, 1 Hz to 20 kHz, with on and off ramps | Pulse Pal 3 | `SynthPalDevice` |
 
 A Pulse Pal 3 runs one firmware at a time. To change it, run `LoadPulsePalFirmware` in MATLAB
@@ -357,29 +357,32 @@ P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
 
 ## Wave Pal
 
-Wave Pal plays one sampled waveform per output channel, stored on the device's microSD card.
+Wave Pal stores four sampled waveforms on the device's microSD card, numbered 1-4, and each
+output channel plays one of them: its `current_waveform`, or none.
 
 ### Limits
 
 | | |
 |---|---|
-| Waveform length | 1 to 1,000,000 samples per channel |
+| Waveforms | 4, each played by any number of channels. A channel plays none until a script gives it one |
+| Waveform length | 1 to 1,000,000 samples per waveform |
 | Sampling rate | 1 Hz to 100 kHz, one rate for all four channels. The device divides a 24 MHz clock by a whole number, so the rate played (`actual_sampling_rate`) can differ slightly: 44100 Hz plays at 44117.6 Hz. Rates that divide 24 MHz, such as 10, 25 or 100 kHz, play exactly |
 | Output ranges | `"0V:5V"`, `"0V:10V"`, `"-5V:5V"`, `"-10V:10V"`, one for all channels. The smallest range that fits the waveforms gives the finest voltage steps |
-| Trigger modes | `"Normal"`, `"Toggle"`, `"Gated"`, as in Pulse Pal, and `"Master"`: a rising edge restarts channels that are playing. No param sync |
+| Trigger modes | `"Normal"`, `"Toggle"`, `"Gated"` and `"Param Sync"`, as in Pulse Pal, and `"Master"`: a rising edge restarts channels that are playing |
 
 ### Standard calls
 
 | Python | MATLAB | Does |
 |---|---|---|
-| `W = WavePalDevice("COM3")` | `W = WavePalDevice('COM3');` | Connects, stops playback, programs the defaults (10 kHz, -10 V to 10 V) |
+| `W = WavePalDevice("COM3")` | `W = WavePalDevice('COM3');` | Connects, stops playback, programs the defaults (10 kHz, -10 V to 10 V, no channel playing a waveform) |
 | `W.sampling_rate = 50000` | `W.samplingRate = 50000;` | Sets the sampling rate, Hz |
 | `W.output_range = "-5V:5V"` | `W.outputRange = '-5V:5V';` | Sets the output range |
-| `W.load_waveform(1, volts)` | `W.loadWaveform(1, volts);` | Loads a waveform onto a channel, in volts |
-| `W.loop_mode[1] = True`, `W.loop_duration[1] = 3` | `W.loopMode(1) = true; W.loopDuration(1) = 3;` | Loops the waveform, for 3 s after each trigger (0: until stopped) |
+| `W.load_waveform(1, volts, [1, 3])` | `W.loadWaveform(1, volts, [1 3]);` | Loads waveform 1, in volts, and has channels 1 and 3 play it. Without channels, no channel changes |
+| `W.current_waveform[2] = 1` | `W.currentWaveform(2) = 1;` | Channel 2 plays waveform 1 from its next start (0: none) |
+| `W.loop_mode[1] = True`, `W.loop_duration[1] = 3` | `W.loopMode(1) = true; W.loopDuration(1) = 3;` | Loops the channel's waveform, for 3 s after each trigger (0: until stopped) |
 | `W.trigger([1, 2])`, `W.stop()` | `W.trigger([1 2]);`, `W.stop();` | Starts, or stops, playback |
 | `W.set_fixed_voltage(3, 1.5)` | `W.setFixedVoltage(3, 1.5);` | Holds channels at a voltage |
-| `W.status()` | `W.status()` | Which channels are playing, and any underruns |
+| `W.status()` | `W.status()` | Which channels are playing, each channel's waveform, what waits for a param sync edge, and any underruns |
 | `W.export_params()` | `W.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data. Not the waveforms |
 | `W.set_screen_saver(True, 300)` | `W.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity. Kept on the device, shared with the other firmwares |
 
@@ -391,18 +394,57 @@ from pulsepal import WavePalDevice
 
 W = WavePalDevice("COM3")
 W.sampling_rate = 25000
-W.output_range = "-5V:5V"                             # finer steps than -10V:10V, for a waveform within +/-5 V
-t = np.arange(25000) / W.actual_sampling_rate          # 1 s
-W.load_waveform(1, 3 * np.sin(2 * np.pi * 8 * t))     # an 8 Hz sine, +/-3 V
-W.link_trigger_channel1[1] = True                     # the default: trigger channel 1 starts it
+W.output_range = "-5V:5V"                                  # finer steps than -10V:10V, for a waveform within +/-5 V
+t = np.arange(25000) / W.actual_sampling_rate               # 1 s
+W.load_waveform(1, 3 * np.sin(2 * np.pi * 8 * t), [1, 2])  # an 8 Hz sine, +/-3 V, on channels 1 and 2
+W.link_trigger_channel1[1:3] = [True, True]                # the default: trigger channel 1 starts them
+```
+
+### Recipe: a new waveform for each trial, with param sync
+
+Each trial's waveform is loaded during the trial before, and played from the instant the next
+one starts, as Pulse Pal's param sync does for parameters. Wire the trial-start TTL to **both**
+trigger channels: trigger channel 2, in param sync mode, makes the loaded waveform current, and
+trigger channel 1 starts it on the same edge (the param sync edge is handled first).
+
+```python
+W = WavePalDevice("COM3")
+W.load_waveform(1, first_trial_wave, 1)   # outside param sync mode: current at once
+W.trigger_mode[2] = "Param Sync"           # sent at once
+for wave in next_trial_waves:
+    W.load_waveform(1, wave)               # stored: channel 1 plays the current waveform 1 meanwhile
+    wait_for_end_of_trial()                # your code. The next TTL makes it current and plays it
+W.trigger_mode[2] = "Normal"               # leaving param sync mode makes anything still stored current
+```
+
+```matlab
+W.loadWaveform(1, firstTrialWave, 1);
+W.triggerMode{2} = 'Param Sync';
+for i = 1:nTrials
+    W.loadWaveform(1, nextTrialWaves{i});
+    waitForEndOfTrial();                   % your code
+end
+W.triggerMode{2} = 'Normal';
 ```
 
 ### Pitfalls
 
+- **A channel plays nothing until it is given a waveform:** pass channels to `load_waveform()`,
+  or set `current_waveform`. `trigger()` raises an error for a channel without one, but a TTL
+  edge is ignored without a word.
 - **Stopped channels output 0 V.** Wave Pal has no resting voltage.
 - **Changing the output range stops playback** and loads the waveforms again, encoded for the
-  new range. A waveform that does not fit the new range raises an error.
-- **Loading a waveform stops that channel.** Other channels keep playing.
+  new range. A waveform that does not fit the new range raises an error. The range cannot change
+  in param sync mode.
+- **Loading a waveform stops the channels playing it,** outside param sync mode. Other channels
+  keep playing. Every channel set to that waveform plays the new one from its next start.
+- **A channel that is playing finishes its waveform.** A new `current_waveform`, or a waveform
+  loaded in param sync mode, plays from its next start.
+- **In param sync mode, only `load_waveform()` and `current_waveform` wait for the edge.** Other
+  settings apply at once. The object holds what was sent, so until the edge, `waveforms` and
+  `current_waveform` show what the next trial will play; `status()` shows what the device plays
+  now. A second load of the same waveform before the edge replaces the first, and stops a channel
+  still playing that waveform from before the previous edge.
 - **Compute sample times from the rate the device plays,** `actual_sampling_rate`, when the
   waveform's frequency matters.
 - **The object knows only the waveforms it loaded.** `status()` shows what the device holds,
