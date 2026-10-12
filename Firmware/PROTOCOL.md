@@ -52,12 +52,13 @@ The Python, MATLAB and C++ classes connect in this order:
    arrived for 50 ms (at most 1 s), and take the last 5 bytes. This adds about 50 ms to
    connecting.
 2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
-3. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
+3. Op 100, on firmware v22 and newer: the [circuit board revision](#circuit-board-revision).
+4. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
    class leaves this to the program, which calls `setClientIDString()`.
-4. On Pulse Pal 3: set both trigger modes to normal, with op 74 (Python) or op 91 (MATLAB and
+5. On Pulse Pal 3: set both trigger modes to normal, with op 74 (Python) or op 91 (MATLAB and
    C++), so that a device left in [param sync mode](#param-sync-mode-pulse-pal-3-trigger-mode-3)
    runs the next step instead of storing it.
-5. Op 92, to program the client's default parameters.
+6. Op 92, to program the client's default parameters.
 
 ## Confirm bytes
 
@@ -111,6 +112,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 ignores it and does not reply) | none | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
 | 99 | Set the [screen saver](#screen-saver) | State (0 off, 1 on; Pulse Pal 2 accepts 0 only), timeout in seconds (uint16, 1-65535). Pulse Pal 3 keeps both in its EEPROM; a new device starts with the screen saver on and 1800 s. Used by the MATLAB and Python classes | 1 / 0 |
+| 100 | Send the [circuit board revision](#circuit-board-revision) | none | Revision (byte, 0-31), read at startup. Pulse Pal 2 sends 0 |
 
 ### Soft triggers and stops
 
@@ -143,6 +145,21 @@ playing: on a Teensy 4.1, interrupts are off while the EEPROM is written. That t
 in about 2000 changes tens of milliseconds, while a flash sector is erased, which would stop
 playback timing and delay a trigger. Change the setting before an experiment rather than during
 one.
+
+### Circuit board revision
+
+A Pulse Pal 3 circuit board encodes its revision in binary on Teensy pins 18-22
+(`pcbVersionMap`): a pin grounded on the board is a 1 bit, pin 18 the lowest. The firmware reads
+them once, in `setup()`, with the pins' pull-ups on, and then leaves them high impedance, so no
+current flows into the grounded pins. Op 100 returns the number, 0-31. A board that grounds none
+of the pins reports 0, as does Pulse Pal 2, whose board encodes no revision. The Bpod state
+machine encodes and reads its revision in the same way. Wave Pal and Synth Pal firmware have the
+same op 100.
+
+The Python and MATLAB classes read it when they connect, into `info.circuit_board_revision` /
+`info.circuitBoardRevision` (0 on firmware v21, which has no op 100), and the C++ class returns
+it from `getHardwareRevision()`. A script can copy it to its data, with the hardware version, to
+record exactly which hardware ran an experiment.
 
 ## Parameter codes (ops 74 and 91)
 
@@ -316,8 +333,8 @@ load on Pulse Pal 2.
 
 | Firmware | Notes |
 |---|---|
-| v22 | Current. Adds ops 91-99, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
-| v21 | No ops 91-98. Clients program parameters with ops 73 and 74, and custom trains with ops 75 and 76 |
+| v22 | Current. Adds ops 91-100, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
+| v21 | No ops 91-100. Clients program parameters with ops 73 and 74, and custom trains with ops 75 and 76 |
 
 Clients read the firmware version from the handshake (op 72), and the device properties from
 op 94.

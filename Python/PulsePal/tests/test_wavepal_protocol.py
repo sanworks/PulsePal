@@ -58,6 +58,7 @@ class FakeWavePal:
         self.handshake_reply = handshake_reply
         self.firmware_version = firmware_version
         self.ack = ack
+        self.circuit_board_revision = 5  # The circuit board revision op 100 reports
         self.range_index = 3  # -10 V to 10 V
         self.trigger_modes = [0, 0]
         self.loaded = {}  # waveform number -> DAC codes
@@ -88,7 +89,7 @@ class FakeWavePal:
         assert data[0] == OP_MENU_BYTE, f"command without the framing byte: {list(data)}"
         op = data[1]
         payload = data[2:]
-        expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, ord("N"): 0, ord("S"): 4, ord("R"): 1,
+        expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, 100: 0, ord("N"): 0, ord("S"): 4, ord("R"): 1,
                             ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4, ord("C"): 4,
                             ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
         if op == ord("L"):
@@ -111,6 +112,8 @@ class FakeWavePal:
             return bytes([self.handshake_reply]) + struct.pack("<I", self.firmware_version)
         if op == ord("N"):
             return struct.pack("<BBIIIIB", 3, 4, 1000000, 100000, BUFFER_SAMPLES, CLOCK_HZ, N_WAVEFORMS)
+        if op == 100:
+            return bytes([self.circuit_board_revision])
         if op in (ord("P"), ord("X"), 81, 89):
             return b""
         if op == ord("G"):
@@ -196,6 +199,7 @@ def test_connection_sequence_programs_the_defaults():
     assert fake.writes == [
         command(72),
         command("N"),
+        command(100),  # The circuit board revision
         command(89, b"PYTHON"),  # Shown on the device's screen as "PYTHON Connected"
         command("X", bytes([0x0F])),
         command("T", bytes(2)),  # First: a device left in param sync mode would store what follows
@@ -207,6 +211,7 @@ def test_connection_sequence_programs_the_defaults():
         command("C", bytes(4)),
     ], fake.ops()
     assert device.info.firmware_version == 1
+    assert device.info.hardware_version == 3 and device.info.circuit_board_revision == 5
     assert device.info.max_samples == 1000000
     assert device.info.buffer_samples == BUFFER_SAMPLES
     assert device.info.n_waveforms == N_WAVEFORMS

@@ -80,6 +80,7 @@ end
 function testConnectionAndDefaults(W)
 assert(W.info.firmwareVersion == 1, 'firmware version');
 assert(W.info.hardwareVersion == 3, 'hardware version');
+assert(W.info.circuitBoardRevision >= 0 && W.info.circuitBoardRevision <= 31, 'hardware revision');
 assert(W.info.maxSamples == 1000000, 'maximum samples');
 assert(W.info.nWaveforms == 4 && isequal(W.waveforms, cell(1,4)), 'number of waveforms');
 assert(W.samplingRate == 10000 && strcmp(W.outputRange, '-10V:10V'), 'default sampling rate or range');

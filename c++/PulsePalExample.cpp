@@ -50,6 +50,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     std::cout << "Connected to Pulse Pal " << PulsePalObject.getHardwareVersion()
+              << " (circuit board revision " << PulsePalObject.getHardwareRevision() << ")"
               << " with firmware v" << PulsePalObject.getFirmwareVersion() << std::endl;
     PulsePalObject.setClientIDString("C++App"); // A 6-character string specifying your app's name, that tops PulsePal's screen
 

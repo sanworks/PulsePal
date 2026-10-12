@@ -579,6 +579,10 @@ void processUSBCommands() {
           screenSaverSavePending = true;
           PPUSB.writeByte(1); // Send confirm byte. Like every command, this one wakes the screen if it is dimmed.
         } break;
+        case OP_SEND_HARDWARE_REVISION: { // Op 100. Send the circuit board revision, read at startup by readHardwareRevision()
+                                          // (Pulse Pal 3; Pulse Pal 2 sends 0). Used by the MATLAB, Python and C++ classes.
+          PPUSB.writeByte(hardwareRevision);
+        } break;
      }
     }
   }

@@ -204,7 +204,7 @@ static uint32_t readUint32(const uint8_t* bytes)
 }
 
 PulsePal::PulsePal() :
-    serial(NULL), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0),
+    serial(NULL), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0), hardwareRevision(0),
     cycleFrequency(20000), nCustomTrains(0), maxCustomPulses(0)
 {
     ownedSerial = new USBSerialPort();
@@ -213,7 +213,7 @@ PulsePal::PulsePal() :
 }
 
 PulsePal::PulsePal(SerialPort* port) :
-    serial(port), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0),
+    serial(port), ownedSerial(NULL), connected(false), firmwareVersion(0), hardwareVersion(0), hardwareRevision(0),
     cycleFrequency(20000), nCustomTrains(0), maxCustomPulses(0)
 {
     setDefaultParameters();
@@ -260,6 +260,7 @@ bool PulsePal::initialize(std::string portString)
     end(); // In case this object is already connected
     firmwareVersion = 0;
     hardwareVersion = 0;
+    hardwareRevision = 0;
 
     if (!serial->open(portString)) {
         reportError(serial->lastError() + ". Check the port name, and that no other program is using the port.");
@@ -330,8 +331,18 @@ bool PulsePal::initialize(std::string portString)
         cycleFrequency = 1000000.0 / cyclePeriod;
         nCustomTrains = info[5];
         maxCustomPulses = readUint32(info + 6);
+
+        // Op 100: the circuit board revision (byte), which the firmware reads at startup. Pulse Pal 2 replies 0.
+        const uint8_t revisionRequest[2] = {OpMenuByte, OP_SEND_HARDWARE_REVISION};
+        uint8_t revision = 0;
+        if (!serial->write(revisionRequest, 2) || (serial->read(&revision, 1, ReplyTimeoutMs) < 1)) {
+            reportError("Pulse Pal on port " + portString + " did not return its circuit board revision.");
+            serial->close();
+            return false;
+        }
+        hardwareRevision = revision;
     } else {
-        hardwareVersion = 2;
+        hardwareVersion = 2; // Firmware v21 runs only on Pulse Pal 2, whose circuit board encodes no revision
         cycleFrequency = 20000;
         nCustomTrains = 2;
         maxCustomPulses = 5000;
@@ -375,6 +386,11 @@ uint32_t PulsePal::getFirmwareVersion()
 uint32_t PulsePal::getHardwareVersion()
 {
     return hardwareVersion;
+}
+
+uint32_t PulsePal::getHardwareRevision()
+{
+    return hardwareRevision;
 }
 
 void PulsePal::disconnectClient()

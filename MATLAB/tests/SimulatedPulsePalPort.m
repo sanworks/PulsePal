@@ -1,6 +1,6 @@
 % SimulatedPulsePalPort stands in for a Pulse Pal's serial port in /MATLAB/tests/testPulsePalDeviceOffline.m. It records
-% every write, and replies as Pulse Pal firmware does (/Firmware/PROTOCOL.md): the handshake, the hardware info, a
-% confirm byte to each command that sends one, and the parameters of the last op 92 to op 93. It has the methods of
+% every write, and replies as Pulse Pal firmware does (/Firmware/PROTOCOL.md): the handshake, the hardware info, the
+% circuit board revision, a confirm byte to each command that sends one, and the parameters of the last op 92 to op 93. It has the methods of
 % pulsepal.DotNetSerialPort that PulsePalDevice uses, so P = PulsePalDevice(SimulatedPulsePalPort()) connects to it.
 
 %{
@@ -33,6 +33,7 @@ classdef SimulatedPulsePalPort < handle
         lastParams = uint8([]) % The parameters of the last op 92, which op 93 returns
         lateReply = uint8([]) % Sent before the reply to the next command, as the reply to a command an earlier session
                               % left queued on the device
+        circuitBoardRevision % The circuit board revision op 100 reports: 5 on Pulse Pal 3, 0 on Pulse Pal 2
     end
 
     properties (SetAccess = private)
@@ -57,6 +58,7 @@ classdef SimulatedPulsePalPort < handle
             end
             obj.hardwareVersion = hardwareVersion;
             obj.firmwareVersion = firmwareVersion;
+            obj.circuitBoardRevision = 5*(hardwareVersion > 2); % Pulse Pal 2 boards encode no revision
         end
 
         function n = get.NumBytesAvailable(obj)
@@ -125,6 +127,8 @@ classdef SimulatedPulsePalPort < handle
                     maxPulses = 5000 + 5000*(obj.hardwareVersion > 2);
                     obj.reply([obj.hardwareVersion typecast(uint32(50), 'uint8') nTrains ...
                                typecast(uint32(maxPulses), 'uint8')]);
+                case 100 % Circuit board revision
+                    obj.reply(obj.circuitBoardRevision);
                 case 92 % All parameters
                     obj.lastParams = bytes(3:end);
                     obj.reply(obj.ack);

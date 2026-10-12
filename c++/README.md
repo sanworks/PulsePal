@@ -104,11 +104,14 @@ faulty cable or hub, or a program that stopped mid-command). Click its joystick,
   them. This is how the next trial's parameters can be sent during the current trial. Only `syncAllParams()` is
   held back: every other method takes effect at once. See "Param sync mode" in
   [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
-- `getHardwareVersion()` returns 2 or 3.
+- `getHardwareVersion()` returns 2 or 3, and `getHardwareRevision()` the revision of the device's circuit board,
+  0-31 (0 on Pulse Pal 2, and on a board that encodes none). Save both with your data to record exactly which
+  hardware ran an experiment.
 
 ## Changes from the legacy class
 
-The methods and fields are the same as in [legacy/PulsePal.h](legacy/PulsePal.h), plus `getHardwareVersion()`.
+The methods and fields are the same as in [legacy/PulsePal.h](legacy/PulsePal.h), plus `getHardwareVersion()` and
+`getHardwareRevision()`.
 These changed:
 
 - Pulse Pal 1, and firmware older than v21, are not supported. Use the legacy class.

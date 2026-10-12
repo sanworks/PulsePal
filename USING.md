@@ -119,9 +119,11 @@ P.trigger([1 2]);
 | Wave Pal and Synth Pal firmware | No | Yes |
 
 `P.info` holds the connected device's hardware and firmware versions and its limits
-(`info.hardware_version`, `info.n_custom_pulse_trains`, `info.max_custom_pulses`, ...). Some
-features need firmware v22, the current version: continuous loop mode, stopping some channels
-only, reading the parameters back, and param sync.
+(`info.hardware_version`, `info.n_custom_pulse_trains`, `info.max_custom_pulses`, ...), and
+`info.circuit_board_revision`, the revision of its circuit board (0-31; 0 on Pulse Pal 2, and on
+a board that encodes none). Wave Pal and Synth Pal have the same two fields. Some features need
+firmware v22, the current version: continuous loop mode, stopping some channels only, reading
+the parameters back, and param sync.
 
 ### Parameters
 
@@ -301,6 +303,10 @@ with open("session_params.json", "w") as f:
 
 In MATLAB, `P.saveParameters('session.json')` saves them as a program file (below), or
 `params = P.exportParams(); save('session.mat', 'params')`.
+
+To record which hardware played them, save `P.info.hardware_version` and
+`P.info.circuit_board_revision` (MATLAB: `info.hardwareVersion`, `info.circuitBoardRevision`) with
+your data too. Program files hold them in `device_info`.
 
 **Program files.** The Python and MATLAB GUIs save and open the same `.json` program files, and
 MATLAB's `saveParameters()` and `loadParameters()` write and read them too. A program file holds

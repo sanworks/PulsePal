@@ -52,18 +52,20 @@ end
 end
 
 function testConnectionProgramsTheDefaults()
-% Connecting takes both trigger channels out of param sync mode (Pulse Pal 3), then sends the defaults in one op 92
+% Connecting reads the hardware info (op 94) and the circuit board revision (op 100), takes both trigger channels out
+% of param sync mode (Pulse Pal 3), then sends the defaults in one op 92
 port = SimulatedPulsePalPort();
 P = PulsePalDevice(port);
 w = port.writes;
-assert(isequal(w(1:4), {uint8([213 72]), uint8([213 94]), uint8([213 89 double('MATLAB')]), ...
+assert(isequal(w(1:5), {uint8([213 72]), uint8([213 94]), uint8([213 100]), uint8([213 89 double('MATLAB')]), ...
                         uint8([213 91 128 0 0])}), 'connection commands');
-assert(numel(w) == 5 && w{5}(2) == 92, 'the defaults are not one op 92');
+assert(numel(w) == 6 && w{6}(2) == 92, 'the defaults are not one op 92');
 assert(port.NumBytesAvailable == 0, 'a reply was left unread');
 % The fields of the Python class's DeviceInfo, in the same order
 assert(isequal(fieldnames(P.info)', {'outputParameterNames', 'triggerModes', ...
-    'customTrainTargets', 'firmwareVersion', 'hardwareVersion', 'maxCustomPulses', 'nCustomPulseTrains', ...
-    'cycleFrequency', 'cyclePeriod_us', 'minPulseWidth_us', 'maxTime'}), 'info fields');
+    'customTrainTargets', 'firmwareVersion', 'hardwareVersion', 'circuitBoardRevision', 'maxCustomPulses', ...
+    'nCustomPulseTrains', 'cycleFrequency', 'cyclePeriod_us', 'minPulseWidth_us', 'maxTime'}), 'info fields');
+assert(P.info.hardwareVersion == 3 && P.info.circuitBoardRevision == 5, 'hardware revision');
 assert(P.info.maxTime == 9999.9999 && P.info.minPulseWidth_us == 100, 'info limits');
 assert(isequal(P.phase1Voltage, [5 5 5 5]) && isequal(P.triggerMode, {'Normal', 'Normal'}), 'default values');
 delete(P);
@@ -323,13 +325,16 @@ end
 function testPulsePal2AndFirmwareV21()
 port = SimulatedPulsePalPort(2, 22);
 P = PulsePalDevice(port);
-assert(numel(port.writes) == 4 && port.writes{4}(2) == 92, 'Pulse Pal 2 has no param sync mode to leave');
+assert(numel(port.writes) == 5 && port.writes{5}(2) == 92, 'Pulse Pal 2 has no param sync mode to leave');
 assert(isequal(P.info.triggerModes, {'Normal', 'Toggle', 'Gated'}), 'Pulse Pal 2 trigger modes');
+assert(P.info.circuitBoardRevision == 0, 'Pulse Pal 2 hardware revision');
 port = SimulatedPulsePalPort(2, 21);
 P = []; % Assigned in evalc, which hides the warning that v22 is available
 evalc('P = PulsePalDevice(port);');
 assert(isequal(port.writes{end}(1:2), uint8([213 73])) && numel(port.writes{end}) == 2+128+24+16+8+2, ...
     'firmware v21 takes op 73');
+assert(P.info.circuitBoardRevision == 0 && ~any(cellfun(@(w) isequal(w, uint8([213 100])), port.writes)), ...
+    'firmware v21 has no op 100');
 port.clearWrites();
 P.restingVoltage(1) = 1;
 assert(numel(port.writes) == 4 && all(cellfun(@(w) isequal(w(1:3), uint8([213 74 17])), port.writes)), ...

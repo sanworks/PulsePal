@@ -100,7 +100,10 @@
 %                                        loadSettingsFile(fileName) and deleteSettingsFile(fileName)
 %   gui()                                Opens the parameter editor window
 %   setScreenSaver(enabled, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
-% info holds the connected device's hardware and firmware versions, and its limits.
+% info holds the connected device's hardware and firmware versions, and its limits. info.circuitBoardRevision is the
+% revision of its circuit board, 0-31: Pulse Pal 3 boards encode it on five pins, which the firmware reads at startup.
+% A board that encodes none, and Pulse Pal 2, report 0. To record exactly which hardware ran an experiment, copy
+% info.hardwareVersion and info.circuitBoardRevision to your data.
 %
 % The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
 % (/Python/PulsePal/pulsepal/pulse_pal.py), works the same way, with snake_case names.
@@ -287,8 +290,15 @@ classdef PulsePalDevice < handle
                     obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
                     obj.nCustomPulseTrains = obj.port.read(1, 'uint8');
                     obj.maxCustomPulses = obj.port.read(1, 'uint32');
+                    obj.port.write([obj.OpMenuByte 100], 'uint8'); % Request the circuit board revision
+                    circuitBoardRevision = obj.port.read(1, 'uint8');
+                    if isempty(circuitBoardRevision)
+                        obj.port = [];
+                        error(['The Pulse Pal at port ' portString ' did not report its circuit board revision.'])
+                    end
                 else
                     obj.hardwareVersion = 2;
+                    circuitBoardRevision = 0; % v21 has no op 100. It runs on Pulse Pal 2, which encodes no revision
                     obj.cyclePeriod = 50;
                     obj.cycleFrequency = 20000;
                     obj.nCustomPulseTrains = 2;
@@ -302,6 +312,7 @@ classdef PulsePalDevice < handle
                 obj.info.customTrainTargets = obj.CustomTrainTargetNames;
                 obj.info.firmwareVersion = obj.firmwareVersion;
                 obj.info.hardwareVersion = obj.hardwareVersion;
+                obj.info.circuitBoardRevision = circuitBoardRevision; % 0-31. 0 if the board encodes none
                 obj.info.maxCustomPulses = obj.maxCustomPulses;
                 obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
                 obj.info.cycleFrequency = obj.cycleFrequency;

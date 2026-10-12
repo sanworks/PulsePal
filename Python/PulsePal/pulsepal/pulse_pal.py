@@ -227,10 +227,20 @@ class DeviceInfo:
     """Firmware version running on the connected device."""
 
     hardware_version: int = None
-    """Hardware revision of the connected device, e.g. `2` or `3`.
+    """Hardware version of the connected device, e.g. `2` or `3`.
 
     Reported by the device on firmware v22 and newer; assumed to be `2`
     on older firmware.
+    """
+
+    circuit_board_revision: int = None
+    """Revision of the device's circuit board, 0-31.
+
+    A Pulse Pal 3 board encodes its revision on five pins, which the
+    firmware reads at startup. A board that encodes none reports `0`, as
+    does Pulse Pal 2; firmware older than v22 cannot report one, so it is
+    also `0` there. To record exactly which hardware ran an experiment,
+    copy `hardware_version` and `circuit_board_revision` to your data.
     """
 
     max_custom_pulses: int = None
@@ -629,8 +639,16 @@ class PulsePalDevice:
             )
             self.info.n_custom_pulse_trains = self._read_serial(1, "uint8")
             self.info.max_custom_pulses = self._read_serial(1, "uint32")
+            self._write_serial((self._OP_MENU_BYTE, 100), "uint8")  # Circuit board revision
+            revision = self.port.read(1)
+            if len(revision) < 1:
+                raise PulsePalError(
+                    f"The Pulse Pal on {port_name} did not report its circuit board revision."
+                )
+            self.info.circuit_board_revision = revision[0]
         else:
             self.info.hardware_version = 2
+            self.info.circuit_board_revision = 0
             self.info.cycle_period_us = 50
             self.info.cycle_frequency = 20000
             self.info.n_custom_pulse_trains = 2

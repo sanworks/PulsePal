@@ -20,7 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
-// Low level hardware access: DAC writes, the output range and software reset.
+// Low level hardware access: DAC writes, the output range, the board revision and software reset.
 //
 // Every function here that talks to the DAC uses the SPI bus, so after setup() it may only run in the playback
 // interrupts, or in loop() with interrupts disabled. See "Interrupt rules" in Playback.ino.
@@ -32,6 +32,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   dacWriteChannels()
 //   ProgramDAC()
 //   setOutputRange()
+//   readHardwareRevision()
 //   Software_Reset()
 
 static inline uint16_t clampU16(uint16_t value, int16_t offset)
@@ -113,6 +114,28 @@ void setOutputRange(byte newRange) {
   DACBits_ZeroVolts = (newRange >= RANGE_PLUS_MINUS_5V) ? 32768 : 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
     activeCalibration[i] = (newRange == RANGE_PLUS_MINUS_10V) ? ZeroCodeCalibration[i] : 0;
+  }
+}
+
+// Reads the circuit board revision into hardwareRevision (op 100), as Pulse Pal firmware does. The board encodes it in
+// binary by grounding some of the pins in pcbVersionMap: a grounded pin is a 1 bit, pcbVersionMap[0] the lowest, so a
+// board that grounds none reads 0. The pull-ups are on only for the read: the pins are left high impedance
+// (INPUT_DISABLE: no pull resistor and no keeper), so no current flows into the grounded ones. Startup only, so it
+// runs from flash (FLASHMEM).
+FLASHMEM void readHardwareRevision() {
+  for (unsigned int i = 0; i < sizeof(pcbVersionMap); i++) {
+    pinMode(pcbVersionMap[i], INPUT_PULLUP);
+  }
+  // Time for the pull-ups (about 22k) to raise the open pins: one read before its pull-up had raised it would be
+  // taken for a grounded pin. A margin: a Pulse Pal 3 read the same revision without it, as Bpod reads, 50 times out of
+  // 50.
+  delayMicroseconds(10);
+  hardwareRevision = 0;
+  for (unsigned int i = 0; i < sizeof(pcbVersionMap); i++) {
+    if (digitalRead(pcbVersionMap[i]) == LOW) {
+      bitSet(hardwareRevision, i);
+    }
+    pinMode(pcbVersionMap[i], INPUT_DISABLE);
   }
 }
 

@@ -44,8 +44,9 @@ Synth Pal builds for Teensy 4.1 only (`teensy:avr:teensy41`), with U8g2 (verifie
 v2.36.19), at the default 600 MHz: the DAC timing counts CPU cycles, and a `static_assert`
 stops the build at a CPU speed that is not a whole multiple of 24 MHz. `PIN_MAP_VERSION` at the
 top of `SynthPal.ino` selects the Pulse Pal 3 PCB, as in Pulse Pal firmware: 1 (the default)
-for PCB v3.0.5 and newer, 0 for v3.0.4 and older. A binary built for the wrong PCB drives the
-joystick button line as the DAC's SYNC output. Synth Pal needs no microSD card.
+for every Pulse Pal 3 in use. 0 is the pinout of a pre-release board variant that was scrapped,
+kept in case one is ever re-outfitted. A binary built for the wrong PCB drives the joystick
+button line as the DAC's SYNC output. Synth Pal needs no microSD card.
 
 ## Rules that are easy to break
 
@@ -243,4 +244,4 @@ triggers or the menu, check:
 - Editing a value with the joystick holds up USB commands until the edit is finished, as in
   Pulse Pal firmware.
 - The zero code calibration is applied in the -10 V to 10 V range only, where it was measured.
-- Only built and tested with `PIN_MAP_VERSION 1`.
+- Only built and tested with `PIN_MAP_VERSION 1`, the pin map of every Pulse Pal 3 in use.

@@ -44,6 +44,9 @@ byte. Its clients are `/Python/PulsePal/pulsepal/wave_pal.py` and `/MATLAB/@Wave
 does Synth Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients
 `/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
 bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is not its own.
+All three answer op 100 with the circuit board revision, which they read from five pins at
+startup (`readHardwareRevision()`). The Python and MATLAB classes read it into `info` when they
+connect, and the C++ class into `getHardwareRevision()`.
 
 Past bugs came from this coupling, so check both sides:
 

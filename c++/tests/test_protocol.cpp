@@ -80,7 +80,8 @@ public:
     size_t bytesWaiting() override { return std::min(waiting, replies.size()); }
     std::string lastError() const override { return "fake error"; }
 
-    // Queues the handshake reply, and the op 94 reply on firmware v22
+    // Queues the handshake reply, and on firmware v22 the replies to op 94 and op 100: a circuit board revision of 5
+    // on Pulse Pal 3, and 0 on Pulse Pal 2, which encodes none
     void queueConnectReplies(uint32_t firmwareVersion, uint8_t hardwareVersion)
     {
         uint8_t handshake[5] = {75, (uint8_t)firmwareVersion, 0, 0, 0};
@@ -90,6 +91,7 @@ public:
             uint8_t info[10] = {hardwareVersion, 50, 0, 0, 0, (uint8_t)((hardwareVersion > 2) ? 4 : 2),
                                 (uint8_t)maxPulses, (uint8_t)(maxPulses >> 8), 0, 0};
             replies.insert(replies.end(), info, info + 10);
+            replies.push_back((hardwareVersion > 2) ? 5 : 0);
         }
     }
 
@@ -254,17 +256,19 @@ static void test_connect_to_pulse_pal_3()
     CHECK(port.openedName == "COM7");
     CHECK(pulsePal.getFirmwareVersion() == 22);
     CHECK(pulsePal.getHardwareVersion() == 3);
-    // Handshake, hardware info, both trigger channels out of param sync mode (op 91), then defaults. No client name
-    // (op 89): the program sets that with setClientIDString()
-    CHECK(port.writes.size() == 4);
-    if (port.writes.size() == 4) {
+    CHECK(pulsePal.getHardwareRevision() == 5);
+    // Handshake, hardware info, circuit board revision, both trigger channels out of param sync mode (op 91), then
+    // defaults. No client name (op 89): the program sets that with setClientIDString()
+    CHECK(port.writes.size() == 5);
+    if (port.writes.size() == 5) {
         CHECK_BYTES(port.writes[0], bytes({213, 72}));
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
-        CHECK_BYTES(port.writes[2], bytes({213, 91, 128, 0, 0}));
-        CHECK_BYTES(port.writes[3], Bytes(PythonOp92Defaults, PythonOp92Defaults + 184));
+        CHECK_BYTES(port.writes[2], bytes({213, 100}));
+        CHECK_BYTES(port.writes[3], bytes({213, 91, 128, 0, 0}));
+        CHECK_BYTES(port.writes[4], Bytes(PythonOp92Defaults, PythonOp92Defaults + 184));
     }
-    // Handshake reply, hardware info, and the confirm bytes of ops 91 and 92
-    CHECK((port.reads == std::vector<size_t>{5, 10, 1, 1}));
+    // Handshake reply, hardware info, circuit board revision, and the confirm bytes of ops 91 and 92
+    CHECK((port.reads == std::vector<size_t>{5, 10, 1, 1, 1}));
     CHECK(port.replies.empty());
 }
 
@@ -275,11 +279,13 @@ static void test_connect_to_pulse_pal_2_on_firmware_v22()
     port.queueConnectReplies(22, 2);
     CHECK(pulsePal.initialize("COM1"));
     CHECK(pulsePal.getHardwareVersion() == 2);
+    CHECK(pulsePal.getHardwareRevision() == 0);
     // Pulse Pal 2 has no param sync mode, so there is no op 91
-    CHECK(port.writes.size() == 3);
-    if (port.writes.size() == 3) {
+    CHECK(port.writes.size() == 4);
+    if (port.writes.size() == 4) {
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
-        CHECK(port.writes[2][1] == 92);
+        CHECK_BYTES(port.writes[2], bytes({213, 100}));
+        CHECK(port.writes[3][1] == 92);
     }
 }
 
@@ -293,7 +299,8 @@ static void test_connect_to_firmware_v21()
     CHECK(contains(notice.text(), "v22 is available"));
     CHECK(pulsePal.getFirmwareVersion() == 21);
     CHECK(pulsePal.getHardwareVersion() == 2);
-    // No op 94 on firmware v21, and parameters are programmed with op 73
+    CHECK(pulsePal.getHardwareRevision() == 0);
+    // No op 94 or op 100 on firmware v21, and parameters are programmed with op 73
     CHECK(port.writes.size() == 2);
     if (port.writes.size() == 2) {
         CHECK_BYTES(port.writes[0], bytes({213, 72}));

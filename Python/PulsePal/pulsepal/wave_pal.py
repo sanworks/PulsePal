@@ -146,6 +146,15 @@ class DeviceInfo:
     hardware_version: int = None
     """Pulse Pal hardware version, e.g. `3`."""
 
+    circuit_board_revision: int = None
+    """Revision of the device's circuit board, 0-31.
+
+    The board encodes its revision on five pins, which the firmware reads
+    at startup. A board that encodes none reports `0`. To record exactly
+    which hardware ran an experiment, copy `hardware_version` and
+    `circuit_board_revision` to your data.
+    """
+
     n_channels: int = None
     """Number of output channels."""
 
@@ -274,6 +283,7 @@ class WavePalDevice:
     _OP_DISCONNECT = 81
     _OP_SET_CLIENT_NAME = 89
     _OP_SET_SCREEN_SAVER = 99
+    _OP_HARDWARE_REVISION = 100
     _OP_HARDWARE_INFO = ord("N")
     _OP_SET_SAMPLING_RATE = ord("S")
     _OP_SET_OUTPUT_RANGE = ord("R")
@@ -1003,6 +1013,8 @@ class WavePalDevice:
             self._HARDWARE_INFO_FORMAT,
             self._read_raw(struct.calcsize(self._HARDWARE_INFO_FORMAT)),
         )
+        self._write_command(self._OP_HARDWARE_REVISION)
+        self.info.circuit_board_revision = self._read_raw(1)[0]
 
     def _apply_current_waveform(self, values):
         waveform_numbers = []

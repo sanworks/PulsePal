@@ -25,6 +25,8 @@ from pulsepal import pulse_pal  # noqa: E402
 from pulsepal import PulsePalDevice, PulsePalError  # noqa: E402
 
 OP_MENU_BYTE = 213
+# The replies of a Pulse Pal 3 to op 94 (hardware info) and op 100 (circuit board revision, here 5)
+PULSE_PAL_3_INFO = struct.pack("<BIBI", 3, 50, 4, 10000) + bytes([5])
 
 
 class FakePort:
@@ -113,25 +115,28 @@ def test_parameter_names_match_parameter_codes():
 
 
 def test_connection_programs_the_defaults():
-    """Connecting takes both trigger channels out of param sync mode (Pulse Pal 3), then sends the
-    default parameters in one op 92."""
+    """Connecting reads the hardware info (op 94) and the circuit board revision (op 100), takes both
+    trigger channels out of param sync mode (Pulse Pal 3), then sends the default parameters in one
+    op 92."""
     port = ClosablePort()
-    port.response = bytearray([75]) + struct.pack("<I", 22) + struct.pack("<BIBI", 3, 50, 4, 10000)
+    port.response = bytearray([75]) + struct.pack("<I", 22) + PULSE_PAL_3_INFO
     original_serial = pulse_pal.serial.Serial
     pulse_pal.serial.Serial = lambda *args, **kwargs: port
     try:
         device = PulsePalDevice("COM9")
     finally:
         pulse_pal.serial.Serial = original_serial
-    assert port.writes[:4] == [
+    assert port.writes[:5] == [
         bytes([OP_MENU_BYTE, 72]),
         bytes([OP_MENU_BYTE, 94]),
+        bytes([OP_MENU_BYTE, 100]),
         bytes([OP_MENU_BYTE, 89]) + b"PYTHON",
         bytes([OP_MENU_BYTE, 91, 128, 0, 0]),
     ], port.writes
-    assert port.writes[4][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 5
+    assert port.writes[5][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 6
     assert port.resets == [0], "unread input was not discarded before the handshake"
     assert device.info.hardware_version == 3 and device.info.min_pulse_width_us == 100
+    assert device.info.circuit_board_revision == 5 and not port.response, "a reply was left unread"
     assert device.info.trigger_modes == ("Normal", "Toggle", "Gated", "Param Sync")
     assert device.is_biphasic == [None, False, False, False, False]
     assert device.phase1_voltage == [None, 5, 5, 5, 5]
@@ -156,13 +161,16 @@ def test_other_firmware_versions_warn():
     warns that an update is available. Neither prints."""
     for version, text in ((23, "newer than this pulsepal package knows"), (21, "v22 is available")):
         port = ClosablePort()
-        hardware = struct.pack("<BIBI", 3, 50, 4, 10000) if version > 21 else b""
+        hardware = PULSE_PAL_3_INFO if version > 21 else b""
         port.response = bytearray([75]) + struct.pack("<I", version) + hardware
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             device = connect_to(port)
         assert any(text in str(w.message) for w in caught), [str(w.message) for w in caught]
         assert device.info.firmware_version == version
+        # Firmware v21 has no op 100, and runs on Pulse Pal 2, whose circuit board encodes no revision
+        assert device.info.circuit_board_revision == (5 if version > 21 else 0)
+        assert (bytes([OP_MENU_BYTE, 100]) in port.writes) == (version > 21)
         device.close()
 
 
@@ -170,7 +178,7 @@ def test_the_public_surface_is_trimmed():
     """No baud rate (USB ignores it), a keyword-only timeout, close() without arguments, and no
     bytes_available()."""
     port = ClosablePort()
-    port.response = bytearray([75]) + struct.pack("<I", 22) + struct.pack("<BIBI", 3, 50, 4, 10000)
+    port.response = bytearray([75]) + struct.pack("<I", 22) + PULSE_PAL_3_INFO
     expect_error(connect_to, port, 12000000, error=TypeError)
     device = connect_to(port, timeout=2)
     expect_error(device.close, True, error=TypeError)
@@ -741,7 +749,7 @@ class LateReplyPort(ClosablePort):
     def __init__(self, late_reply):
         super().__init__()
         self.response = bytearray(late_reply) + bytearray([75]) + struct.pack("<I", 22) \
-            + struct.pack("<BIBI", 3, 50, 4, 10000)
+            + PULSE_PAL_3_INFO
         self.sent = len(late_reply) + 5  # The late reply and the handshake's: sent before anything is read
 
     @property

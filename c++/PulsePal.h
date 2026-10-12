@@ -68,6 +68,11 @@ public:
     void end(); // Disconnects (see disconnectClient()) and closes the serial port. Also called by the destructor
     uint32_t getFirmwareVersion(); // e.g. 22. Read by initialize(), and 0 before it has connected
     uint32_t getHardwareVersion(); // 2 for Pulse Pal 2, 3 for Pulse Pal 3. Read by initialize(), and 0 before it has connected
+    // The revision of the device's circuit board, 0-31. A Pulse Pal 3 board encodes it on five pins, which the firmware
+    // reads at startup. A board that encodes none reports 0, as does Pulse Pal 2; firmware v21 cannot report one, so it
+    // is 0 there too. Read by initialize(), and 0 before it has connected. To record exactly which hardware ran an
+    // experiment, save it with getHardwareVersion().
+    uint32_t getHardwareRevision();
     void disconnectClient(); // Stops all channels and restores the device's own screen. The port stays open
 
     // Resets the local copy of the parameters (currentOutputParams and currentInputParams) to the defaults: a 1ms,
@@ -166,7 +171,8 @@ private:
         OP_PROGRAM_PARAM_ALL_CHANNELS = 91, // Firmware v22
         OP_PROGRAM_ALL_PARAMS = 92,         // Firmware v22
         OP_SEND_HARDWARE_INFO = 94,         // Firmware v22
-        OP_LOAD_CUSTOM_TRAIN = 95           // Firmware v22
+        OP_LOAD_CUSTOM_TRAIN = 95,          // Firmware v22
+        OP_SEND_HARDWARE_REVISION = 100     // Firmware v22
     };
     enum ParamCode {
         PARAM_IS_BIPHASIC = 1,
@@ -207,6 +213,7 @@ private:
     bool connected;
     uint32_t firmwareVersion;
     uint32_t hardwareVersion;
+    uint32_t hardwareRevision; // Of the circuit board. See getHardwareRevision()
     double cycleFrequency;   // Hardware timer cycles per second
     uint8_t nCustomTrains;
     uint32_t maxCustomPulses;

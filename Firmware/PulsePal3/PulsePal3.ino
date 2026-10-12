@@ -64,7 +64,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 #ifndef PIN_MAP_VERSION
-  #define PIN_MAP_VERSION 1 // Hardware pin map. On hardware 3.X use 0 for PCB version 3.0.0 and 1 for 3.0.1+
+  #define PIN_MAP_VERSION 1 // Hardware pin map of Pulse Pal 3: 1 for every Pulse Pal 3 in use. 0 is the pinout of a
+                            // pre-release PCB variant that was scrapped, kept in case one of those boards is re-outfitted.
                             // PIN_MAP_VERSION Does not affect hardware v2.X.
 #endif
 
@@ -151,7 +152,8 @@ enum OpCode {
   OP_SET_ZERO_CODE_CALIBRATION = 96,  // Set DAC zero code calibration for one channel (stored in EEPROM on HW3)
   OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only)
   OP_ABORT_CHANNELS = 98,             // Stop playback on specific output channels (1 bit per channel)
-  OP_SET_SCREEN_SAVER = 99            // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
+  OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
+  OP_SEND_HARDWARE_REVISION = 100     // Return the circuit board revision read at startup (HW3; 0 on HW2)
 };
 
 // Parameter IDs used by ops 74 and 91. These match the parameter codes in the MATLAB and Python interfaces.
@@ -294,15 +296,15 @@ enum TriggerEventValue {
   byte InputLEDLines[2] = {1, 4}; // LEDs above trigger channels 1-2.
   byte ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
   byte ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
-  byte pcbVersionMap[5] = {18,19,20,21,22}; // Teensy pins that are grounded to encode the PCB minor version in binary
+  byte pcbVersionMap[5] = {18,19,20,21,22}; // Teensy pins that are grounded to encode the PCB revision in binary. See readHardwareRevision()
   byte dacMap[4] = {3,2,0,1}; // Mapping of DAC output pins to output BNC connectors from left to right
   
-  #if (PIN_MAP_VERSION == 0) // PP3 PCB v 3.0.0 and older
+  #if (PIN_MAP_VERSION == 0) // Scrapped pre-release PP3 PCB variant. Unused: kept in case one is re-outfitted
     byte OutputLEDLines[4] = {24,28,29,30}; // LEDs above output channels 1-4
     byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
     byte SyncPin=14; // AD5724 Pin 7 (Sync)
     byte LDACPin=39; // AD5724 Pin 10 (LDAC)
-  #elif (PIN_MAP_VERSION == 1) // PP3 PCB v 3.0.1 and newer
+  #elif (PIN_MAP_VERSION == 1) // Every PP3 PCB in use
     byte OutputLEDLines[4] = {24,32,33,35}; // LEDs above output channels 1-4
     byte ClickerButtonLine = 36; // Digital line that reports the thumb joystick click state
     byte SyncPin=34; // AD5724 Pin 7 (Sync)
@@ -617,6 +619,8 @@ union { // dacValue contains a single sample of raw 16-bit data to be written on
 } dacValue; // Union allows faster type conversion between 16-bit DAC values and bytes to write via SPI
 
 // Other variables
+byte hardwareRevision = 0; // Circuit board (PCB) revision, read from pcbVersionMap by readHardwareRevision() in setup(). Op 100
+                           // returns it. Pulse Pal 2 boards encode none, so it stays 0.
 unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_PERIOD
 void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
@@ -685,6 +689,10 @@ void setup() {
     pinMode(OutputLEDLines[i], OUTPUT); // Configure channel LED pins as outputs
     digitalWrite(OutputLEDLines[i], LOW); // Initialize channel LEDs to low (off)
   }
+
+  #if (HARDWARE_VERSION > 2)
+    readHardwareRevision(); // Leaves the revision pins high impedance
+  #endif
 
   // microSD setup
   #if (HARDWARE_VERSION == 2)

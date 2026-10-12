@@ -173,6 +173,7 @@ classdef SynthPalDevice < handle
         OpDisconnect = 81 % Shows the device's own name on its screen again
         OpSetClientName = 89 % Followed by 6 characters, shown as "NAME Connected"
         OpSetScreenSaver = 99
+        OpHardwareRevision = 100 % The circuit board revision, as Pulse Pal firmware's op 100
         OpHardwareInfo = 'N'
         OpSetFrequency = 'F'
         OpSetWaveform = 'W'
@@ -714,8 +715,13 @@ classdef SynthPalDevice < handle
         function readHardwareInfo(obj)
             obj.writeCommand(obj.OpHardwareInfo, []);
             reply = obj.readBytes(22, 'reading the hardware info');
+            obj.writeCommand(obj.OpHardwareRevision, []);
+            circuitBoardRevision = obj.readBytes(1, 'reading the circuit board revision');
             values = double(typecast(uint8(reply(3:end)), 'uint32'));
             obj.info.hardwareVersion = reply(1);
+            % 0-31: the board encodes its revision on five pins, which the firmware reads at startup. 0 if it encodes
+            % none. Copy it to your data, with hardwareVersion, to record exactly which hardware ran an experiment.
+            obj.info.circuitBoardRevision = circuitBoardRevision;
             obj.info.nChannels = reply(2);
             obj.info.minFrequency = values(1)/100; % Hz
             obj.info.maxFrequency = values(2)/100; % Hz

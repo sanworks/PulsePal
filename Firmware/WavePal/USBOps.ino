@@ -107,6 +107,10 @@ void processUSBCommands() {
       PPUSB.writeByte(1);
     } break;
 
+    case OP_SEND_HARDWARE_REVISION: { // Op 100, as in Pulse Pal firmware: the circuit board revision, read at startup
+      PPUSB.writeByte(hardwareRevision);
+    } break;
+
     case OP_HARDWARE_INFO: { // Op 78 ('N')
       PPUSB.writeByte(HARDWARE_VERSION);
       PPUSB.writeByte(N_CHANNELS);

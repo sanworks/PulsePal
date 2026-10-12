@@ -77,6 +77,7 @@ end
 function testConnectionAndDefaults(S)
 assert(S.info.firmwareVersion == 1, 'firmware version');
 assert(S.info.hardwareVersion == 3, 'hardware version');
+assert(S.info.circuitBoardRevision >= 0 && S.info.circuitBoardRevision <= 31, 'hardware revision');
 assert(S.info.minFrequency == 1 && S.info.maxFrequency == 20000, 'frequency limits');
 assert(S.info.maxPlayDuration == 3600, 'maximum play duration');
 assert(S.frequency == 100 && S.samplesPerCycle == 1000 && S.samplingRate == 100000, 'default frequency');

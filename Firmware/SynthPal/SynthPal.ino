@@ -54,7 +54,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // SETUP MACRO TO COMPILE FOR TARGET DEVICE:
 #ifndef PIN_MAP_VERSION
-  #define PIN_MAP_VERSION 1 // Hardware pin map. Use 0 for Pulse Pal PCB version < 3.0.4 and 1 for 3.0.5+
+  #define PIN_MAP_VERSION 1 // Hardware pin map, as in Pulse Pal firmware: 1 for every Pulse Pal 3 in use. 0 is the
+                            // pinout of a pre-release PCB variant that was scrapped, kept in case one is re-outfitted.
 #endif
 
 #if (PIN_MAP_VERSION < 0) || (PIN_MAP_VERSION > 1)
@@ -88,13 +89,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // protocol (PROTOCOL.md), so they must never be renumbered.
 // ---------------------------------------------------------------------------------------------------------------
 
-// USB op codes. Every command from the PC is: OpMenuByte (213), op code, then op-specific data. Ops 72, 81, 89 and 99
-// are those of Pulse Pal firmware. The others are ASCII letters, as in Wave Pal.
+// USB op codes. Every command from the PC is: OpMenuByte (213), op code, then op-specific data. Ops 72, 81, 89, 99
+// and 100 are those of Pulse Pal firmware. The others are ASCII letters, as in Wave Pal.
 enum OpCode {
   OP_HANDSHAKE = 72,                  // Returns HANDSHAKE_REPLY and the firmware version
   OP_DISCONNECT = 81,                 // The client is closing: stop playback, and show the device's own name again
   OP_SET_CLIENT_NAME = 89,            // Set the 6-character client name shown on the top screen, as "NAME Connected"
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM)
+  OP_SEND_HARDWARE_REVISION = 100,    // Returns the circuit board revision, read at startup
   OP_HARDWARE_INFO = 'N',             // 78. Returns the hardware properties and the limits of the settings
   OP_SET_FREQUENCY = 'F',             // 70. Frequency of all output channels, in hundredths of a Hz
   OP_SET_WAVEFORM = 'W',              // 87. Waveform of each output channel. See enum WaveformValue
@@ -282,12 +284,13 @@ constexpr byte InputLEDLines[2] = {1, 4}; // LEDs above trigger channels 1-2
 constexpr byte ClickerXLine = 41; // Analog line that reports the thumb joystick x axis
 constexpr byte ClickerYLine = 40; // Analog line that reports the thumb joystick y axis
 constexpr byte dacMap[4] = {3, 2, 0, 1}; // Mapping of DAC output pins to output BNC connectors from left to right
-#if (PIN_MAP_VERSION == 0) // PP3 PCB v 3.0.4 and older
+constexpr byte pcbVersionMap[5] = {18, 19, 20, 21, 22}; // Pins grounded to encode the PCB revision in binary. See readHardwareRevision()
+#if (PIN_MAP_VERSION == 0) // Scrapped pre-release PP3 PCB variant. Unused: kept in case one is re-outfitted
   constexpr byte OutputLEDLines[4] = {24, 28, 29, 30}; // LEDs above output channels 1-4
   constexpr byte ClickerButtonLine = 34; // Digital line that reports the thumb joystick click state
   constexpr byte SyncPin = 14; // AD5754R Pin 7 (Sync)
   constexpr byte LDACPin = 39; // AD5754R Pin 10 (LDAC)
-#else // PP3 PCB v 3.0.5 and newer
+#else // Every PP3 PCB in use
   constexpr byte OutputLEDLines[4] = {24, 32, 33, 35};
   constexpr byte ClickerButtonLine = 36;
   constexpr byte SyncPin = 34;
@@ -423,6 +426,9 @@ int16_t ZeroCodeCalibration[N_CHANNELS] = {0}; // Zero code calibration, stored 
 int16_t activeCalibration[N_CHANNELS] = {0}; // The calibration applied in each channel's range: see takePendingOutput()
 float sineTable[SINE_TABLE_SIZE + 1]; // sin(pi/2 * i / SINE_TABLE_SIZE): the first quarter of a sine wave, filled in setup()
 
+byte hardwareRevision = 0; // Circuit board (PCB) revision, read from pcbVersionMap by readHardwareRevision() in setup(). Op 100
+                           // returns it.
+
 // USB command parsing
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to the device. Reduces the probability of interference from port-scanning software
 byte CommandByte = 0;
@@ -510,6 +516,7 @@ void setup() {
     pinMode(OutputLEDLines[i], OUTPUT); // Configure channel LED pins as outputs
     digitalWrite(OutputLEDLines[i], LOW); // Initialize channel LEDs to low (off)
   }
+  readHardwareRevision(); // Leaves the revision pins high impedance
 
   // The sample clock. IntervalTimer attaches handler() to the PIT interrupt and takes a PIT channel, which is then
   // stopped until a channel plays. The long period means it cannot tick before it is stopped.

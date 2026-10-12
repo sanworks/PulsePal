@@ -270,6 +270,7 @@ def open_driver(port):
 def test_connection(S):
     assert S.info.firmware_version == 1
     assert S.info.hardware_version == 3
+    assert 0 <= S.info.circuit_board_revision <= 31
     assert S.info.n_channels == 4
     assert (S.info.min_frequency, S.info.max_frequency) == (1, 20000)
     assert S.info.max_sampling_rate == 100000

@@ -37,7 +37,8 @@ python ../tools/build_check.py --sketch wavepal --compare HEAD
 
 Wave Pal builds for Teensy 4.1 only (`teensy:avr:teensy41`), with U8g2 (verified with
 v2.36.19). `PIN_MAP_VERSION` at the top of `WavePal.ino` selects the Pulse Pal 3 PCB, as in
-Pulse Pal firmware: 1 (the default) for PCB v3.0.5 and newer, 0 for v3.0.4 and older. A binary
+Pulse Pal firmware: 1 (the default) for every Pulse Pal 3 in use. 0 is the pinout of a
+pre-release board variant that was scrapped, kept in case one is ever re-outfitted. A binary
 built for the wrong PCB drives the joystick button line as the DAC's SYNC output.
 
 ## Rules that are easy to break
@@ -198,4 +199,4 @@ menu, check:
   smaller pre-buffers, which leave less time for the card's first read after a trigger, and a
   first chunk shorter than the others, which the chunk and file arithmetic does not allow now.
 - The zero code calibration is applied in the -10 V to 10 V range only, where it was measured.
-- Only built and tested with `PIN_MAP_VERSION 1`.
+- Only built and tested with `PIN_MAP_VERSION 1`, the pin map of every Pulse Pal 3 in use.

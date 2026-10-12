@@ -81,6 +81,7 @@ def load(W, number, volts, channels="same"):
 def test_connection(W):
     assert W.info.firmware_version == 1
     assert W.info.hardware_version == 3
+    assert 0 <= W.info.circuit_board_revision <= 31
     assert W.info.max_samples == 1000000
     assert W.info.n_waveforms == 4
     status = W.status()

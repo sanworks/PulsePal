@@ -48,8 +48,9 @@ The Python and MATLAB classes connect in this order:
    before op 72, then read its reply until the device has been quiet for 50 ms and take the last
    5 bytes, which skips a reply to a command an earlier session left queued on the device.
 2. Op 78 ('N'): hardware properties and limits.
-3. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
-4. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 65, 87, 86,
+3. Op 100: the circuit board revision.
+4. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
+5. Op 88 ('X') with all four channel bits, then the default settings: ops 70, 77, 65, 87, 86,
    68, 66, 69, 84 and 73. In this order each is valid whatever the device holds (see
    [Levels](#levels)): a mean voltage of 0 V (op 77) goes with any amplitude, the default
    amplitude of 5 V (op 65) then goes with any waveform, a sine wave (op 87) then goes with both,
@@ -90,10 +91,14 @@ so that it is not taken for the next command.
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
 | 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
 | 99 | `c` | Set the screen saver | State (uint8: 0 off, 1 on), timeout in seconds (uint16, 1-65535) | 1 / 0 |
+| 100 | `d` | Send the circuit board revision | none | Revision (uint8, 0-31), read at startup |
 | 90 | `Z` | Playback checksums (testing) | none | For channels 1-4: samples played since the channel last started (4 uint32), then the sum of their DAC codes, modulo 2^32 (4 uint32) |
 
-Ops 72, 81, 89 and 99 are Pulse Pal's ops of the same numbers. Like Pulse Pal's op 81, Synth
-Pal's stops every channel, as op 88 does (over their off ramps), so that closing a client stops
+Ops 72, 81, 89, 99 and 100 are Pulse Pal's ops of the same numbers. Op 100 returns the revision
+the circuit board encodes on five pins, which the firmware reads at startup, as Pulse Pal firmware
+does (see its [circuit board revision](../PROTOCOL.md#circuit-board-revision) notes); the classes
+read it into `info.circuit_board_revision` / `info.circuitBoardRevision`. Like Pulse Pal's op 81,
+Synth Pal's stops every channel, as op 88 does (over their off ramps), so that closing a client stops
 its outputs on all three firmwares. The settings stay: TTL triggers still play the channels after
 the client closes. Op 99 works as in Pulse Pal firmware (see its
 [screen saver](../PROTOCOL.md#screen-saver) notes), with the settings at the same EEPROM

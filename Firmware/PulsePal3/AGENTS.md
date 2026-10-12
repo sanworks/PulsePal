@@ -40,8 +40,10 @@ python ../tools/build_check.py --compare HEAD --show handler
 docstring lists the details.
 
 - **Target.** Two macros at the top of `PulsePal3.ino` select the build: `HARDWARE_VERSION`
-  (2 or 3) and, on Pulse Pal 3, `PIN_MAP_VERSION` (0 for PCB v3.0.4 and older, 1 for v3.0.5
-  and newer). `build_check.py` sets `HARDWARE_VERSION` in a temporary copy of the sketch.
+  (2 or 3) and, on Pulse Pal 3, `PIN_MAP_VERSION`. Every Pulse Pal 3 in use takes pin map 1,
+  the default. Pin map 0 is the pinout of a pre-release board variant that was scrapped: it is
+  kept in case one of those boards is ever re-outfitted, and is otherwise unused and untested.
+  `build_check.py` sets `HARDWARE_VERSION` in a temporary copy of the sketch.
   A compiler flag (`-DHARDWARE_VERSION=2`) works only for Pulse Pal 2: the Teensy core has no
   `compiler.cpp.extra_flags`, so arduino-cli accepts the flag and silently drops it.
 - **Libraries.** Pulse Pal 2 needs SdFat v2 (verified with v2.1.2 and v2.3.0) and

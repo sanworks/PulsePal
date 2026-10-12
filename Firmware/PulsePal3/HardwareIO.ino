@@ -20,7 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
-// Low level hardware access: DAC writes, the hardware timer, fast digital I/O and software reset.
+// Low level hardware access: DAC writes, the hardware timer, fast digital I/O, the board revision and software reset.
 //
 // Functions in this file:
 //   setDAC()
@@ -38,6 +38,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   stopHardwareTimer()
 //   digitalWriteDirect()
 //   digitalReadDirect()
+//   readHardwareRevision()
 //   Software_Reset()
 
 // Stores a new 16-bit DAC value for an output channel (0-3). handler() writes it to the DAC at the start of its next
@@ -258,6 +259,30 @@ byte digitalReadDirect(int pin){
     return digitalReadFast(pin);
   #endif
 }
+
+#if (HARDWARE_VERSION > 2)
+  // Reads the circuit board revision into hardwareRevision (op 100). The board encodes it in binary by grounding some
+  // of the pins in pcbVersionMap: a grounded pin is a 1 bit, pcbVersionMap[0] the lowest, so a board that grounds none
+  // reads 0. The Bpod state machine reads its board revision the same way. The pull-ups are on only for the read: the
+  // pins are left high impedance (INPUT_DISABLE: no pull resistor and no keeper), so no current flows into the grounded
+  // ones. Startup only, so it runs from flash (FLASHMEM).
+  FLASHMEM void readHardwareRevision() {
+    for (unsigned int i = 0; i < sizeof(pcbVersionMap); i++) {
+      pinMode(pcbVersionMap[i], INPUT_PULLUP);
+    }
+    // Time for the pull-ups (about 22k) to raise the open pins: one read before its pull-up had raised it would be
+    // taken for a grounded pin. A margin: a Pulse Pal 3 read the same revision without it, as Bpod reads, 50 times out
+    // of 50.
+    delayMicroseconds(10);
+    hardwareRevision = 0;
+    for (unsigned int i = 0; i < sizeof(pcbVersionMap); i++) {
+      if (digitalRead(pcbVersionMap[i]) == LOW) {
+        bitSet(hardwareRevision, i);
+      }
+      pinMode(pcbVersionMap[i], INPUT_DISABLE);
+    }
+  }
+#endif
 
 void Software_Reset() {
   #if (HARDWARE_VERSION < 3)
