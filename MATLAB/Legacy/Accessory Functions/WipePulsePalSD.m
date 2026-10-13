@@ -43,7 +43,8 @@ if strcmpi(Response, 'y') && (PulsePalSystem.FirmwareVersion > 21)
         warning('Pulse Pal 2 cannot wipe its microSD card from MATLAB. Delete settings files with PulsePalSDSettings(FileName, ''delete'').');
         return
     end
-    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 97], 'uint8');
+    % Op 97 is followed by 'WIPE', so that two stray bytes can never format the card
+    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 97 double('WIPE')], 'uint8');
     Msg = [];
     LineEnd = [];
     tic;

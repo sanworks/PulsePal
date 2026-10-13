@@ -34,6 +34,7 @@ classdef SimulatedPulsePalPort < handle
         lateReply = uint8([]) % Sent before the reply to the next command, as the reply to a command an earlier session
                               % left queued on the device
         circuitBoardRevision % The circuit board revision op 100 reports: 5 on Pulse Pal 3, 0 on Pulse Pal 2
+        silent = false % true: reply to nothing, as a device showing COMM. FAILURE! until its joystick is clicked
     end
 
     properties (SetAccess = private)
@@ -116,7 +117,7 @@ classdef SimulatedPulsePalPort < handle
     methods (Access = private)
         function respond(obj, bytes)
             % Queues the firmware's reply to one command
-            if numel(bytes) < 2 || bytes(1) ~= 213
+            if numel(bytes) < 2 || bytes(1) ~= 213 || obj.silent
                 return
             end
             switch bytes(2)
@@ -141,8 +142,10 @@ classdef SimulatedPulsePalPort < handle
                     else
                         obj.reply(obj.ack);
                     end
-                case 97 % Format the microSD card: status text, then the confirm byte
-                    obj.reply([uint8(['SUCCESS: Card format complete!' 13 10]) obj.ack]);
+                case 97 % Format the microSD card, if the key follows: status text, then the confirm byte
+                    if isequal(bytes(3:end), uint8('WIPE'))
+                        obj.reply([uint8(['SUCCESS: Card format complete!' 13 10]) obj.ack]);
+                    end
                 case {73, 74, 75, 76, 79, 91, 95, 96, 99} % Commands that send a confirm byte
                     obj.reply(obj.ack);
             end % Ops 77, 80, 81, 89 and 98 send nothing

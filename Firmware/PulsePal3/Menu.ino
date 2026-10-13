@@ -66,7 +66,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            18    Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
 // MENU_OUTPUT_TRIGGER   SelectedStimMode     1     Single train
 //                                            2     Single pulse
-//                                            3     Continuous on/off
+//                                            3     Continuous on/off. On sets continuous loop mode, and starts
+//                                                  nothing: the next trigger plays the train until a stop (as op 82
+//                                                  does; firmware v21 started the train). Off stops the channel.
 //                                            4     Exit -> MENU_OUTPUT_CHANNEL
 // MENU_TRIGGER_CHANNEL  SelectedInputAction  1     Trigger linked output channels
 //                                            2     Edit trigger mode
@@ -284,7 +286,8 @@ void UpdateSettingsMenu() {
             if (validProgram != SETTINGS_FILE_END_MARKER) {
               write2Screen("!ERROR! INVALID ","SETTINGS FILE.");
               delayMicroseconds(1000000);
-              LoadDefaultParameters();
+              settingsFile.close(); // Nothing was loaded: the device keeps its parameters, and its settings file
+              settingsFile.open(currentSettingsFileNameChar, O_READ);
             } else {
               outputRestingVoltages();
               strcpy(currentSettingsFileNameChar, candidateSettingsFileChar);
@@ -408,9 +411,10 @@ void UpdateSettingsMenu() {
             }
             if (nameIsReserved) {
               write2Screen("Name reserved.", " ");
-            } else {
-              SaveCurrentProgram2SD();
+            } else if (SaveCurrentProgram2SD()) {
               write2Screen("Settings saved."," ");
+            } else {
+              write2Screen("!ERROR! SETTINGS","NOT SAVED.");
             }
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
@@ -428,10 +432,12 @@ void UpdateSettingsMenu() {
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
-            if (!isDefaultSettingsFile(candidateSettingsFileChar)) { // Selected in RefreshFileMenu(), which does not list the default file
-              sd.remove(candidateSettingsFileChar);
+            if (!isDefaultSettingsFile(candidateSettingsFileChar) && // Selected in RefreshFileMenu(), which does not list the default file
+                sd.remove(candidateSettingsFileChar)) {
+              write2Screen("Settings erased."," ");
+            } else {
+              write2Screen("!ERROR! SETTINGS","NOT ERASED.");
             }
-            write2Screen("Settings erased."," ");
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 9;

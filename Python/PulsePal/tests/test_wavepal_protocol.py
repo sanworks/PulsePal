@@ -290,6 +290,67 @@ def test_export_params_holds_every_setting():
     assert params["loop_mode"] == [False, True, False, False] and params["trigger_mode"] == ["Master", "Normal"]
 
 
+def test_import_params_programs_exported_settings():
+    """import_params() checks every setting before it sends any, then sends them in an order that lets each
+    take effect: a trigger channel leaving param sync mode first, one entering it last."""
+    import json
+    device, fake = connect()
+    device.sampling_rate = 25000
+    device.load_waveform(3, [1, 2], [2, 4])
+    device.loop_mode[2] = True
+    device.loop_duration[2] = 1.5
+    device.link_trigger_channel2[1] = True
+    device.trigger_mode = ["Master", "Param Sync"]
+    params = json.loads(json.dumps(device.export_params()))
+
+    other, other_fake = connect()
+    other.load_waveform(3, [1, 2])     # Waveforms are not settings: loaded first
+    other_fake.writes.clear()
+    other.import_params(params)
+    assert other.export_params() == params
+    # No trigger channel leaves param sync mode, so the trigger modes are sent last, entering it
+    assert other_fake.ops() == ["S", "D", "O", "D", "I", "C", "T"], other_fake.ops()
+    assert other_fake.writes[-1] == command("T", bytes([4, 3]))
+    assert other_fake.current_waveform == [0, 3, 0, 3]                 # Current at once, not stored for an edge
+
+    # Leaving param sync mode comes first, so that the current waveforms apply at once
+    params["trigger_mode"] = ["Normal", "Normal"]
+    params["current_waveform"] = [3, 0, 0, 0]
+    other_fake.writes.clear()
+    other.import_params(params)
+    assert other_fake.writes[0] == command("T", bytes([4, 0]))    # Trigger channel 2 leaves param sync mode first
+    assert other_fake.writes[-1] == command("T", bytes([0, 0]))
+    assert other_fake.current_waveform == [3, 0, 0, 0] and other_fake.stored_current_waveform is None
+
+    # A channel that stays in param sync mode: the current waveforms wait for its edge, as an assignment would
+    other.trigger_mode[2] = "Param Sync"
+    other.import_params({"current_waveform": [0, 3, 0, 0], "trigger_mode": ["Normal", "Param Sync"]})
+    assert other_fake.current_waveform == [3, 0, 0, 0] and other_fake.stored_current_waveform == [0, 3, 0, 0]
+
+
+def test_import_params_checks_every_setting_before_sending():
+    device, fake = connect()
+    device.load_waveform(1, [0, 8])
+    fake.writes.clear()
+    for params in ({"current_waveform": [2, 0, 0, 0], "loop_mode": [True] * 4},   # Waveform 2 is not loaded
+                   {"loop_duration": [0, -1, 0, 0]},
+                   {"loop_mode": [1, 0, 0, 0], "sampling_rate": 1.5},
+                   {"output_range": "0V:5V", "trigger_mode": ["Toggle", "Normal"]},   # Waveform 1 reaches 8 V
+                   {"trigger_mode": ["Normal", "Clock"]},
+                   {"link_trigger_channel1": True},                   # A single value for a whole setting
+                   {"sampling_rate": 1000, "loop_duration": [0, 5e6, 0, 0]}):   # Over 2^32 samples at 1 kHz
+        expect_error(device.import_params, params)
+    assert fake.writes == [], fake.ops()
+    device.trigger_mode[2] = "Param Sync"
+    expect_error(device.import_params, {"output_range": "-5V:5V"})   # Cannot change in param sync mode...
+    device.import_params({"output_range": "-10V:10V", "trigger_mode": ["Normal", "Normal"]})   # ...but can on leaving it
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.import_params({"loop_mode": [True] * 4, "a_future_setting": 1})
+    assert "a_future_setting" in str(caught[0].message) and device.loop_mode == [None, True, True, True, True]
+
+
 def test_the_public_surface_is_trimmed():
     device, fake = connect()
     expect_error(device.close, True, error=TypeError)

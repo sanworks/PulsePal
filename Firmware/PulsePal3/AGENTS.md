@@ -104,8 +104,9 @@ the `--show` output before concluding that a function really changed.
    `validateOutputParams()` in `USBOps.ino` do this. `validateParamBuffer()` applies the same
    rules to a parameter set still in `paramBuffer`, because op 92 must reply for a set that
    param sync mode loads later, in `handler()`, where nothing can be reported: change it and
-   `validateOutputParams()` together. `RestoreParametersFromSD()` rejects a settings file that
-   is missing, short, unterminated or fails `validateOutputParams()`.
+   `validateOutputParams()` together. `RestoreParametersFromSD()` reads a settings file into a
+   set in op 92's layout, and rejects it, changing nothing, if it is missing, short,
+   unterminated or fails `validateParamBuffer()`.
 6. **Anything except op 92 that sets `TriggerMode` must then call `updateParamSyncPending()`**
    (Pulse Pal 3). Otherwise a parameter set stored for param sync mode survives the channel
    leaving the mode, and loads at a later edge.
@@ -134,6 +135,23 @@ the `--show` output before concluding that a function really changed.
     `saveScreenSaverSettings()` does through `screenSaverSavePending`. Op 96 still writes the
     calibration at once. The layout is the `EEPROM_..._ADDRESS` constants in `PulsePal3.ino`;
     addresses are fixed, because the EEPROM keeps its contents through firmware updates.
+11. **Test a scheduled time with `timeReached()`, never `==`.** `handler()` makes a transition in
+    the first cycle at or after its time. With `SystemTime ==`, a time scheduled in the past was
+    never met, and the channel stayed "playing", at a pulse's voltage or at rest, ignoring
+    triggers until it was stopped: biphasic custom pulses longer than the gap to the next one,
+    custom bursts longer than the gap between burst onsets or of no duration, a delay shortened
+    during the delay. `timeReached()` also works across `SystemTime`'s wrap after 2^32 cycles
+    (59.6 hours); compare two times by their difference, as `pulseFitsInBurst()` does, for the
+    same reason.
+12. **Custom trains have memory blocks** (see "Custom train memory" in `PulsePal3.ino`). Pulse
+    Pal 3 keeps two per train, Pulse Pal 2 one. `handler()` reads a channel's train through
+    `customTrainPlayBlock`, chosen when the channel starts, never through the train number, and
+    `loadCustomPulseTrain()` writes only a block no channel plays: outside param sync mode it
+    stops the channels playing the train first, and in param sync mode it loads the other block,
+    which a param sync edge (`applyStoredCustomTrains()`) makes current. Writing a block a
+    channel was playing once left the channel "playing" at rest. An empty block
+    (`CustomTrainNpulses` 0) ends a train at once: on Pulse Pal 3 its memory is not zeroed at
+    startup.
 
 ## What runs in the timer interrupt
 
@@ -142,7 +160,8 @@ Pal 3, `IntervalTimer` calls it directly. On Pulse Pal 2 the timer interrupt has
 priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copies received bytes
 one at a time, and at equal priority it made the timer lose cycles. It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
-`digitalWriteDirect()`. On Pulse Pal 3 it also calls `startParamSync()` when a trigger
+`digitalWriteDirect()`, `timeReached()`, `startCustomPulse()` and `endCustomTrainPass()`. On
+Pulse Pal 3 it also calls `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
 
@@ -162,8 +181,9 @@ for a few instructions (op 77 schedules its channels' `SoftTriggerScheduled` fla
 so they start in the same cycle). A tick that arrives meanwhile runs as soon as interrupts
 are back on; only interrupts off for longer than a cycle lose one. Shared variables
 include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
-`SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, all output channel parameters and, on Pulse Pal 3,
-`paramBuffer`, `paramSyncPending` and `paramSyncChannelsWaiting`.
+`SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, all output channel parameters, the custom trains
+(`CustomPulseTimes`, `CustomVoltages`, `CustomTrainNpulses`, `currentCustomTrainBlock`) and, on Pulse Pal 3,
+`paramBuffer`, `paramSyncPending`, `paramSyncChannelsWaiting` and `customTrainLoadsStored`.
 
 ## Checklists
 
@@ -207,7 +227,10 @@ playback, the menu or the USB ops, ask the user to check:
   with the new parameters.
 - The joystick menu: edit a parameter; save, load and erase a settings file.
 - `stop()` during playback from Python, then trigger again.
-- Custom trains, including trains 3 and 4 on Pulse Pal 3.
+- Custom trains, including trains 3 and 4 on Pulse Pal 3: loading a train while a channel
+  plays it stops the channel, and the next trigger plays the new train; biphasic custom pulses
+  closer than their own length play whole, back to back; in param sync mode, a train loaded
+  during a train plays from the trigger after the next param sync edge.
 - After a change to serial code: USB latency and throughput, with
   `/Python/PulsePal/tests/benchmark_serial.py`, before and after the change. Also unplug the
   USB cable during a pulse: the device shows "COMM. FAILURE!" and the outputs return to their

@@ -32,6 +32,7 @@ tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testA
     @testDefaultParametersMessage, @testSingleValuesAreRefused, ...
     @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testCustomPulseTimesAreMultiplesOf100us, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
+    @testCustomBurstsNeedABurstDuration, @testAnEmptyCustomTrainIsRefused, @testANoReplyMentionsACommFailure, ...
     @testExportAndImportParams, @testProgramFiles, @testSyncFromDeviceStoresWhatTheDeviceHolds, ...
     @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testPulsePal2AndFirmwareV21};
 nFailed = 0;
@@ -111,7 +112,7 @@ function testDefaultParametersMessage()
 % The whole op 92 message, built from /Firmware/PROTOCOL.md: all four channels of each parameter in turn
 [P, port] = connect();
 P.syncToDevice();
-times = kron([20 20 20 200 0 0 20000 0], ones(1,4)); % Timer cycles of 50 us
+times = kron([2 2 2 20 0 0 20000 0], ones(1,4)); % Timer cycles of 50 us: the firmware's defaults
 voltages = kron([49151 16384 32768], ones(1,4)); % DAC codes of 5 V, -5 V and 0 V, halves to the even code
 singleBytes = [zeros(1,20) ones(1,4) zeros(1,4) 0 0]; % ... continuous loop, links to trigger 1 and 2, trigger modes
 expected = uint8([213 92 typecast(uint32(times), 'uint8') typecast(uint16(voltages), 'uint8') singleBytes]);
@@ -142,7 +143,7 @@ function testTimesHoldTheValueTheDevicePlays()
 P.phase1Duration(1) = 0.00012; % 2.4 cycles: plays 100 us
 P.pulseTrainDelay(2) = 0.000175; % 3.5 cycles: plays 200 us (halfway, to the even cycle)
 assert(P.phase1Duration(1) == 0.0001 && P.pulseTrainDelay(2) == 0.0002, 'the property does not hold the time played');
-assert(isequal(port.writes{1}, uint8([213 91 4 typecast(uint32([2 20 20 20]), 'uint8')])), 'op 91 message');
+assert(isequal(port.writes{1}, uint8([213 91 4 typecast(uint32([2 2 2 2]), 'uint8')])), 'op 91 message');
 end
 
 function testTimesAreAtMost9999s()
@@ -187,10 +188,18 @@ for name = {'Protocol1', 'Protocol1.pps.txt', 'ABCDEFGHIJKL.pps', '.pps', ['Pr' 
     expectError(@() P.saveSettingsFile(name{1}));
 end
 assert(isempty(port.writes), 'a refused file name was sent');
-% A failed load leaves the device on its defaults, which are read back before the error
+% A refused load changes nothing on the device, so nothing is read back; a refused save or deletion says so
+P.phase1Voltage(1) = 2.5;
+port.clearWrites();
 port.loadReply = 0;
-expectError(@() P.loadSettingsFile('MISSING.pps'));
-assert(isequal(port.writes{end}, uint8([213 93])), 'the parameters were not read back');
+message = expectError(@() P.loadSettingsFile('MISSING.pps'));
+assert(contains(message, 'no such file on its microSD card, or it is not a valid settings file'), message);
+assert(isscalar(port.writes) && P.phase1Voltage(1) == 2.5, 'a refused load changed the properties');
+port.ack = 0;
+message = expectError(@() P.saveSettingsFile('NEW.pps'));
+assert(contains(message, 'could not save NEW.pps'), message);
+message = expectError(@() P.deleteSettingsFile('MISSING.pps'));
+assert(contains(message, 'could not delete MISSING.pps'), message);
 end
 
 function testCalibrationNeedsPulsePal3()
@@ -207,12 +216,53 @@ function testFormatWithoutConfirmation()
 [P, port] = connect();
 evalc('formatted = P.formatMicroSD(''Confirm'', false);');
 assert(formatted, 'formatMicroSD did not return true');
-assert(isequal(port.writes{1}, uint8([213 97])), 'op 97');
+assert(isequal(port.writes{1}, uint8([213 97 double('WIPE')])), 'op 97 and its key');
 assert(port.writes{end}(2) == 92 && port.NumBytesAvailable == 0, 'the defaults were not programmed after formatting');
 expectError(@() P.formatMicroSD('Confirm', 2));
 expectError(@() P.formatMicroSD('Ask', false));
 P = connect(2, 22);
 expectError(@() P.formatMicroSD('Confirm', false)); % Pulse Pal 2 has no microSD card
+end
+
+function testCustomBurstsNeedABurstDuration()
+% A custom train whose times are burst onsets needs bursts that last. Assigned alone (autoSync on), each of the two
+% parameters is checked against the other; with autoSync off, both together by syncToDevice(). Nothing is sent when one
+% is refused.
+[P, port] = connect();
+message = expectError(@() setCell(P, 'customTrainTarget', 2, 'Bursts'));
+assert(contains(message, 'Output channel 2') && contains(message, 'burstDuration must be above 0'), message);
+P.burstDuration(2) = 0.05;
+P.customTrainTarget{2} = 'Bursts';
+expectError(@() setProperty(P, 'burstDuration', [0 0 0 0]));
+assert(P.burstDuration(2) == 0.05 && numel(port.writes) == 2, 'a refused value was sent');
+P.autoSync = false;
+P.customTrainTarget{3} = 'Bursts';
+expectError(@() P.syncToDevice());
+P.burstDuration(3) = 0.05;
+P.syncToDevice();
+assert(numel(port.writes) == 3 && port.writes{3}(2) == 92, 'op 92');
+end
+
+function testAnEmptyCustomTrainIsRefused()
+% The device refuses a train with no pulses too: it would have no pulse times to play
+[P, port] = connect();
+message = expectError(@() P.sendCustomPulseTrain(1, [], []));
+assert(contains(message, 'at least one pulse'), message);
+expectError(@() P.sendCustomWaveform(1, 0.001, []));
+assert(isempty(port.writes), 'an empty train was sent');
+end
+
+function testANoReplyMentionsACommFailure()
+% A device showing COMM. FAILURE! reads no command until its joystick is clicked, so every reply times out. The error
+% says what to do. (The simulated port does not wait for its Timeout.)
+[P, port] = connect();
+port.silent = true;
+message = expectError(@() quietly(@() setProperty(P, 'phase1Voltage', [1 1 1 1])));
+assert(contains(message, 'COMM. FAILURE!') && contains(message, 'click its joystick'), message);
+message = expectError(@() quietly(@() P.syncFromDevice()));
+assert(contains(message, 'COMM. FAILURE!'), message);
+message = expectError(@() quietly(@() PulsePalDevice(port)));
+assert(contains(message, 'No reply to the handshake') && contains(message, 'COMM. FAILURE!'), message);
 end
 
 function testExportAndImportParams()
@@ -371,4 +421,15 @@ end
 
 function setProperty(P, name, value)
 P.(name) = value;
+end
+
+function setCell(P, name, index, value)
+P.(name){index} = value;
+end
+
+function quietly(func)
+% Runs func without showing the warnings of the simulated port's short reads
+state = warning('off', 'SimulatedPulsePalPort:ReadTimeout');
+cleanup = onCleanup(@() warning(state));
+func();
 end

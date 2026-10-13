@@ -150,10 +150,16 @@ classdef WavePalDevice < handle
         PulsePalHandshakeReply = 75 % 'K': the device runs Pulse Pal firmware
         SynthPalHandshakeReply = 83 % 'S': the device runs Synth Pal firmware
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
+        SettingNames = {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', 'triggerMode', ...
+                        'linkTriggerChannel1', 'linkTriggerChannel2'} % The settings exportParams() returns, in order
         OutputRangeLimits = [0 5; 0 10; -5 5; -10 10] % Volts, one row per range
         TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync', 'Master'}
         TriggerModeCodes = [0 1 2 3 4] % Their codes on the device: Pulse Pal's, and 4
         DACBitMax = 65535
+        % Added to the error for a reply that does not arrive. After a comm failure the device reads no command until its
+        % joystick is clicked, and then loads its default settings. The same text as the Python classes'.
+        NoReplyHint = ['If the device''s screen shows COMM. FAILURE!, a command reached it only in part, and it ' ...
+                       'waits: click its joystick, then connect again. Otherwise, check the USB connection.']
     end
 
     methods
@@ -383,10 +389,84 @@ classdef WavePalDevice < handle
             %   save('Session3.mat', 'params');          % Or jsonencode(params), for a text file
             % The Python class's export_params() returns the same, with snake_case names.
             params = struct;
-            names = {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', 'triggerMode', ...
-                     'linkTriggerChannel1', 'linkTriggerChannel2'};
+            names = obj.SettingNames;
             for i = 1:numel(names)
                 params.(names{i}) = obj.(names{i});
+            end
+        end
+
+        function importParams(obj, params)
+            % Programs the device with settings exported by exportParams(): a struct with samplingRate, outputRange and
+            % the channel settings, each with one value per channel. All of them are checked first, and nothing is sent
+            % if one is invalid. They are then sent in an order that lets each take effect: a trigger channel leaving
+            % param sync mode first, then the sampling rate, the output range and the channel settings, and a trigger
+            % channel entering param sync mode last. So currentWaveform applies at once, unless a trigger channel was in
+            % param sync mode and stays in it: then it waits for the next edge, as an assignment would. Settings missing
+            % from params keep their values. Fields that are not settings, e.g. from a newer version's exportParams(),
+            % are skipped with a warning. The waveforms are not settings: load them with loadWaveform() first, since a
+            % current waveform must be a loaded one. Example:
+            %   W.importParams(jsondecode(fileread('Session3.json')));
+            % The Python class's import_params() does the same.
+            if ~isstruct(params) || ~isscalar(params)
+                error('importParams() takes a struct of settings, as exportParams() returns.')
+            end
+            unknown = setdiff(fieldnames(params), obj.SettingNames, 'stable');
+            if ~isempty(unknown)
+                warning('WavePalDevice:unknownParams', ['importParams(): skipped ' strjoin(unknown, ', ') ...
+                        ', which this version of WavePalDevice does not have.'])
+            end
+            has = @(name) isfield(params, name);
+            % Every setting is checked before any is sent
+            rate = obj.samplingRate;
+            if has('samplingRate')
+                rate = obj.checkSamplingRate(params.samplingRate);
+            end
+            modes = obj.triggerMode;
+            if has('triggerMode')
+                modes = obj.TriggerModeNames(obj.matchTriggerModes(params.triggerMode));
+            end
+            % The trigger modes the other settings are sent in: those of channels leaving param sync mode are sent
+            % first, those of channels entering it last
+            firstModes = obj.triggerMode;
+            leaving = strcmp(firstModes, 'Param Sync') & ~strcmp(modes, 'Param Sync');
+            firstModes(leaving) = modes(leaving);
+            rangeName = obj.outputRange;
+            if has('outputRange')
+                rangeName = obj.checkOutputRange(params.outputRange, firstModes);
+            end
+            durations = obj.loopDuration;
+            if has('loopDuration')
+                durations = obj.checkLoopDurations(params.loopDuration);
+            end
+            obj.durations2Samples(durations, rate); % They must fit at the new rate
+            if has('loopMode')
+                obj.checkLogical(params.loopMode, 'loopMode');
+            end
+            if has('currentWaveform')
+                obj.checkCurrentWaveform(params.currentWaveform);
+            end
+            for name = {'linkTriggerChannel1', 'linkTriggerChannel2'}
+                if has(name{1})
+                    obj.checkLogical(params.(name{1}), name{1});
+                end
+            end
+            % Then sent, in that order
+            if ~isequal(firstModes, obj.triggerMode)
+                obj.triggerMode = firstModes;
+            end
+            if rate ~= obj.samplingRate
+                obj.samplingRate = rate;
+            end
+            if ~strcmp(rangeName, obj.outputRange)
+                obj.outputRange = rangeName;
+            end
+            for name = {'loopMode', 'loopDuration', 'linkTriggerChannel1', 'linkTriggerChannel2', 'currentWaveform'}
+                if has(name{1})
+                    obj.(name{1}) = params.(name{1});
+                end
+            end
+            if ~isequal(modes, obj.triggerMode)
+                obj.triggerMode = modes;
             end
         end
 
@@ -400,9 +480,7 @@ classdef WavePalDevice < handle
             end
             rate = double(rate);
             if obj.initialized %#ok<MCSUP> The device must be connected
-                if rate > obj.info.maxSamplingRate %#ok<MCSUP>
-                    error(['samplingRate must be a whole number of Hz from 1 to ' num2str(obj.info.maxSamplingRate) '.']) %#ok<MCSUP>
-                end
+                rate = obj.checkSamplingRate(rate);
                 % Loop durations are sent in samples, so check that they still fit before anything is changed
                 loopSamples = obj.durations2Samples(obj.loopDuration, rate); %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetSamplingRate, typecast(uint32(rate), 'uint8'));
@@ -419,20 +497,7 @@ classdef WavePalDevice < handle
             [rangeName, rangeIndex] = obj.findRange(rangeName);
             rangeChanged = ~strcmp(rangeName, obj.outputRange);
             if obj.initialized %#ok<MCSUP>
-                limits = obj.OutputRangeLimits(rangeIndex, :);
-                for i = 1:numel(obj.waveforms) %#ok<MCSUP>
-                    wave = obj.waveforms{i}; %#ok<MCSUP>
-                    if ~isempty(wave) && (min(wave) < limits(1) || max(wave) > limits(2))
-                        error(['Waveform ' num2str(i) ' spans ' num2str(min(wave)) ' V to '...
-                               num2str(max(wave)) ' V, which does not fit the ' rangeName ' range. Load a new '...
-                               'waveform first, or choose a wider range.'])
-                    end
-                end
-                if rangeChanged && any(strcmp(obj.triggerMode, 'Param Sync')) %#ok<MCSUP>
-                    error(['outputRange cannot change while a trigger channel is in param sync mode: the waveforms '...
-                           'are loaded again for the new range, and in param sync mode they would wait for a TTL '...
-                           'edge. Set triggerMode to another mode first.'])
-                end
+                obj.checkOutputRange(rangeName, obj.triggerMode); %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetOutputRange, uint8(rangeIndex-1));
                 obj.confirmWrite('setting outputRange');
             end
@@ -454,19 +519,7 @@ classdef WavePalDevice < handle
         function set.currentWaveform(obj, waveformNumbers)
             waveformNumbers = obj.oneValuePerChannel(waveformNumbers, 4, 'currentWaveform', 'output channel');
             if obj.initialized %#ok<MCSUP>
-                nWaveforms = obj.info.nWaveforms; %#ok<MCSUP>
-                if ~isnumeric(waveformNumbers) || ~isreal(waveformNumbers) || ...
-                        any(~ismember(waveformNumbers, 0:nWaveforms))
-                    error(['currentWaveform values are waveform numbers, 1-' num2str(nWaveforms) ', or 0 for none.'])
-                end
-                % A channel left on a waveform whose load failed is not refused here: trigger() refuses it
-                changed = find(waveformNumbers ~= obj.currentWaveform & waveformNumbers > 0);
-                for channel = changed
-                    if isempty(obj.waveforms{waveformNumbers(channel)}) %#ok<MCSUP>
-                        error(['Waveform ' num2str(waveformNumbers(channel)) ' is not loaded. Load it with '...
-                               'loadWaveform(' num2str(waveformNumbers(channel)) ', waveform) first.'])
-                    end
-                end
+                waveformNumbers = obj.checkCurrentWaveform(waveformNumbers);
                 obj.writeCommand(obj.OpSetCurrentWaveforms, uint8(waveformNumbers));
                 obj.confirmWrite('setting currentWaveform');
             end
@@ -483,11 +536,7 @@ classdef WavePalDevice < handle
         end
 
         function set.loopDuration(obj, durations)
-            durations = obj.oneValuePerChannel(durations, 4, 'loopDuration', 'output channel');
-            if ~isnumeric(durations) || ~isreal(durations) || any(~isfinite(durations)) || any(durations < 0)
-                error('loopDuration must be 0 (loop until stopped) or a positive number of seconds.')
-            end
-            durations = double(durations);
+            durations = obj.checkLoopDurations(durations);
             if obj.initialized %#ok<MCSUP>
                 loopSamples = obj.durations2Samples(durations, obj.samplingRate); %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetLoopDuration, typecast(uint32(loopSamples), 'uint8'));
@@ -497,27 +546,7 @@ classdef WavePalDevice < handle
         end
 
         function set.triggerMode(obj, modes)
-            if ischar(modes) || (isstring(modes) && isscalar(modes))
-                obj.oneValuePerChannel({char(modes)}, 2, 'triggerMode', 'trigger channel'); % Raises the error
-            elseif isstring(modes)
-                modes = cellstr(modes);
-            end
-            if ~iscell(modes) || numel(modes) ~= 2
-                error(['triggerMode needs a 1x2 cell array with one mode per trigger channel, e.g. '...
-                       '{''Normal'', ''Toggle''}.'])
-            end
-            matches = zeros(1,2);
-            for i = 1:2
-                match = [];
-                if ischar(modes{i}) || (isstring(modes{i}) && isscalar(modes{i}))
-                    match = find(strcmpi(modes{i}, obj.TriggerModeNames));
-                end
-                if isempty(match)
-                    error(['Unknown trigger mode for trigger channel ' num2str(i) '. Valid modes are: '...
-                           strjoin(obj.TriggerModeNames, ', ') '.'])
-                end
-                matches(i) = match;
-            end
+            matches = obj.matchTriggerModes(modes);
             if obj.initialized %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetTriggerMode, uint8(obj.TriggerModeCodes(matches)));
                 obj.confirmWrite('setting triggerMode');
@@ -576,7 +605,8 @@ classdef WavePalDevice < handle
             reply = obj.readHandshakeReply(); % Skips the reply to a command an earlier session left queued
             obj.port.Timeout = 10;
             if numel(reply) < 5
-                error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Wave Pal firmware?'])
+                error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Wave Pal firmware? ' ...
+                       obj.NoReplyHint])
             end
             version = double(typecast(uint8(reply(2:5)), 'uint32'));
             reply = reply(1);
@@ -655,6 +685,86 @@ classdef WavePalDevice < handle
             % One command programs the links of both trigger channels
             obj.writeCommand(obj.OpSetTriggerLinks, uint8([links1 links2]));
             obj.confirmWrite('setting the trigger channel links');
+        end
+
+        function rate = checkSamplingRate(obj, rate)
+            % Checks a sampling rate, and returns it as a double
+            if ~isnumeric(rate) || ~isscalar(rate) || ~isreal(rate) || rate ~= round(rate) || ...
+                    rate < 1 || rate > obj.info.maxSamplingRate
+                error(['samplingRate must be a whole number of Hz from 1 to ' num2str(obj.info.maxSamplingRate) '.'])
+            end
+            rate = double(rate);
+        end
+
+        function rangeName = checkOutputRange(obj, rangeName, triggerModes)
+            % Checks that the output range can be set, with these trigger modes, and returns its canonical name
+            [rangeName, rangeIndex] = obj.findRange(rangeName);
+            limits = obj.OutputRangeLimits(rangeIndex, :);
+            for i = 1:numel(obj.waveforms)
+                wave = obj.waveforms{i};
+                if ~isempty(wave) && (min(wave) < limits(1) || max(wave) > limits(2))
+                    error(['Waveform ' num2str(i) ' spans ' num2str(min(wave)) ' V to '...
+                           num2str(max(wave)) ' V, which does not fit the ' rangeName ' range. Load a new '...
+                           'waveform first, or choose a wider range.'])
+                end
+            end
+            if ~strcmp(rangeName, obj.outputRange) && any(strcmp(triggerModes, 'Param Sync'))
+                error(['outputRange cannot change while a trigger channel is in param sync mode: the waveforms '...
+                       'are loaded again for the new range, and in param sync mode they would wait for a TTL '...
+                       'edge. Set triggerMode to another mode first.'])
+            end
+        end
+
+        function waveformNumbers = checkCurrentWaveform(obj, waveformNumbers)
+            % Checks new current waveforms, one per output channel, and returns them as a row
+            waveformNumbers = obj.oneValuePerChannel(waveformNumbers, 4, 'currentWaveform', 'output channel');
+            nWaveforms = obj.info.nWaveforms;
+            if ~isnumeric(waveformNumbers) || ~isreal(waveformNumbers) || ...
+                    any(~ismember(waveformNumbers, 0:nWaveforms))
+                error(['currentWaveform values are waveform numbers, 1-' num2str(nWaveforms) ', or 0 for none.'])
+            end
+            % A channel left on a waveform whose load failed is not refused here: trigger() refuses it
+            changed = find(waveformNumbers ~= obj.currentWaveform & waveformNumbers > 0);
+            for channel = changed
+                if isempty(obj.waveforms{waveformNumbers(channel)})
+                    error(['Waveform ' num2str(waveformNumbers(channel)) ' is not loaded. Load it with '...
+                           'loadWaveform(' num2str(waveformNumbers(channel)) ', waveform) first.'])
+                end
+            end
+        end
+
+        function durations = checkLoopDurations(obj, durations)
+            % Checks new loop durations, one per output channel, and returns them as a row of doubles
+            durations = obj.oneValuePerChannel(durations, 4, 'loopDuration', 'output channel');
+            if ~isnumeric(durations) || ~isreal(durations) || any(~isfinite(durations)) || any(durations < 0)
+                error('loopDuration must be 0 (loop until stopped) or a positive number of seconds.')
+            end
+            durations = double(durations);
+        end
+
+        function matches = matchTriggerModes(obj, modes)
+            % Returns the indices in TriggerModeNames of new trigger modes, one per trigger channel
+            if ischar(modes) || (isstring(modes) && isscalar(modes))
+                obj.oneValuePerChannel({char(modes)}, 2, 'triggerMode', 'trigger channel'); % Raises the error
+            elseif isstring(modes)
+                modes = cellstr(modes);
+            end
+            if ~iscell(modes) || numel(modes) ~= 2
+                error(['triggerMode needs a 1x2 cell array with one mode per trigger channel, e.g. '...
+                       '{''Normal'', ''Toggle''}.'])
+            end
+            matches = zeros(1,2);
+            for i = 1:2
+                match = [];
+                if ischar(modes{i}) || (isstring(modes{i}) && isscalar(modes{i}))
+                    match = find(strcmpi(modes{i}, obj.TriggerModeNames));
+                end
+                if isempty(match)
+                    error(['Unknown trigger mode for trigger channel ' num2str(i) '. Valid modes are: '...
+                           strjoin(obj.TriggerModeNames, ', ') '.'])
+                end
+                matches(i) = match;
+            end
         end
 
         function samples = durations2Samples(obj, durations, rate)
@@ -767,7 +877,7 @@ classdef WavePalDevice < handle
             data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Wave Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
-                       num2str(nBytes) ' byte(s) arrived.'])
+                       num2str(nBytes) ' byte(s) arrived. ' obj.NoReplyHint])
             end
         end
 
@@ -775,7 +885,8 @@ classdef WavePalDevice < handle
             % Reads the device's one byte confirmation: 1 if it executed the command, 0 if it rejected it
             reply = read(obj.port, 1, 'uint8');
             if isempty(reply)
-                error(['Wave Pal did not confirm ' context '.'])
+                error(['Wave Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
+                       ' s. ' obj.NoReplyHint])
             end
             if reply ~= 1
                 error(['Wave Pal rejected ' context '. A value was out of range, or a waveform could not be '...

@@ -199,6 +199,13 @@ classdef SynthPalDevice < handle
         TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync'} % In order of their code on the device
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
         MaxVoltage_uV = 10000000 % Every output voltage stays within +/-10 V
+        SettingNames = {'frequency', 'waveform', 'peakToPeak', 'fixedVoltage', 'meanVoltage', 'restingVoltage', ...
+                        'playDuration', 'onRampDuration', 'offRampDuration', 'triggerMode', 'linkTriggerChannel1', ...
+                        'linkTriggerChannel2'} % The settings exportParams() returns, in order
+        % Added to the error for a reply that does not arrive. After a comm failure the device reads no command until its
+        % joystick is clicked, and then loads its default settings. The same text as the Python classes'.
+        NoReplyHint = ['If the device''s screen shows COMM. FAILURE!, a command reached it only in part, and it ' ...
+                       'waits: click its joystick, then connect again. Otherwise, check the USB connection.']
     end
 
     methods
@@ -496,12 +503,62 @@ classdef SynthPalDevice < handle
             %   save('Trial12.mat', 'params');           % Or jsonencode(params), for a text file
             % The Python class's export_params() returns the same, with snake_case names.
             params = struct;
-            names = {'frequency', 'waveform', 'peakToPeak', 'fixedVoltage', 'meanVoltage', 'restingVoltage', ...
-                     'playDuration', 'onRampDuration', 'offRampDuration', 'triggerMode', 'linkTriggerChannel1', ...
-                     'linkTriggerChannel2'};
+            names = obj.SettingNames;
             for i = 1:numel(names)
                 params.(names{i}) = obj.(names{i});
             end
+        end
+
+        function importParams(obj, params)
+            % Programs the device with settings exported by exportParams(): a struct with frequency and the channel
+            % settings, each with one value per channel. All of them are checked first, the levels (waveform,
+            % peakToPeak, fixedVoltage, meanVoltage) together, so their order does not matter, and then sent in one
+            % command, as syncToDevice() sends them: in param sync mode, the device stores them for the next sync
+            % edge. Settings missing from params keep their values, and autoSync is left as it is. Fields that are not
+            % settings, e.g. from a newer version's exportParams(), are skipped with a warning. Raises an error, and
+            % changes and sends nothing, if a value is invalid. Example:
+            %   S.importParams(jsondecode(fileread('Trial12.json')));
+            % The Python class's import_params() does the same.
+            if ~isstruct(params) || ~isscalar(params)
+                error('importParams() takes a struct of settings, as exportParams() returns.')
+            end
+            unknown = setdiff(fieldnames(params), obj.SettingNames, 'stable');
+            if ~isempty(unknown)
+                warning('SynthPalDevice:unknownParams', ['importParams(): skipped ' strjoin(unknown, ', ') ...
+                        ', which this version of SynthPalDevice does not have.'])
+            end
+            snapshot = obj.exportParams();
+            autoSyncState = obj.autoSync;
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
+            obj.autoSync = false;
+            levelNames = {'waveform', 'peakToPeak', 'fixedVoltage', 'meanVoltage'};
+            try
+                % The levels are checked each alone, then together, and stored: an assignment would check each
+                % against the others' old values
+                levels = struct('waveform', {obj.waveform}, 'peakToPeak', obj.peakToPeak, 'fixedVoltage', ...
+                                obj.fixedVoltage, 'meanVoltage', obj.meanVoltage);
+                for i = 1:numel(levelNames)
+                    if isfield(params, levelNames{i})
+                        levels.(levelNames{i}) = obj.checkSetting(levelNames{i}, params.(levelNames{i}));
+                    end
+                end
+                obj.checkLevels(levels.peakToPeak, levels.meanVoltage, 'sync');
+                obj.storeLevels(levels.waveform, levels.peakToPeak, levels.fixedVoltage, levels.meanVoltage);
+                names = setdiff(intersect(fieldnames(params), obj.SettingNames, 'stable'), levelNames, 'stable');
+                for i = 1:numel(names)
+                    obj.(names{i}) = params.(names{i});
+                end
+            catch err
+                % Nothing has been sent, so the properties go back to what they were
+                obj.storeLevels(snapshot.waveform, snapshot.peakToPeak, snapshot.fixedVoltage, snapshot.meanVoltage);
+                names = setdiff(obj.SettingNames, levelNames, 'stable');
+                for i = 1:numel(names)
+                    obj.(names{i}) = snapshot.(names{i});
+                end
+                rethrow(err)
+            end
+            obj.syncToDevice();
+            clear cleanup
         end
 
         function rate = get.samplingRate(obj)
@@ -657,7 +714,8 @@ classdef SynthPalDevice < handle
             reply = obj.readHandshakeReply(); % Skips the reply to a command an earlier session left queued
             obj.port.Timeout = 10;
             if numel(reply) < 5
-                error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Synth Pal firmware?'])
+                error(['No reply from the device on ' char(portString) '. Is it a Pulse Pal 3 running Synth Pal firmware? ' ...
+                       obj.NoReplyHint])
             end
             version = double(typecast(uint8(reply(2:5)), 'uint32'));
             reply = reply(1);
@@ -1018,7 +1076,7 @@ classdef SynthPalDevice < handle
             data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Synth Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
-                       num2str(nBytes) ' byte(s) arrived.'])
+                       num2str(nBytes) ' byte(s) arrived. ' obj.NoReplyHint])
             end
         end
 
@@ -1027,7 +1085,8 @@ classdef SynthPalDevice < handle
             % nothing). A rejection has its own identifier, which sendLevels() recovers from.
             reply = read(obj.port, 1, 'uint8');
             if isempty(reply)
-                error(['Synth Pal did not confirm ' context '.'])
+                error(['Synth Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
+                       ' s. ' obj.NoReplyHint])
             end
             if reply ~= 1
                 error('SynthPalDevice:rejected', 'Synth Pal rejected %s. A value was out of range.', context)

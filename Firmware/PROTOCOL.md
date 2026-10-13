@@ -102,14 +102,14 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 86 | Write a pin (debugging) | Pin number, value | none |
 | 87 | Read a pin (debugging) | Pin number | Pin state (1 byte) |
 | 89 | Set the client name | 6 characters, shown as "NAME Connected" | none |
-| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0, after the file operation has finished |
+| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0, after the file operation has finished. 0 if the file could not be written, loaded or deleted (see [Settings file](#settings-file)) |
 | 91 | Program one parameter on all channels | Parameter code, then one value per output channel (4 values), or per trigger channel (2 values) for code 128 | 1 / 0 |
 | 92 | Program all parameters | 182 bytes, grouped by parameter: each array holds one parameter for output channels 1-4. 8 uint32 arrays (times), 3 uint16 arrays (voltages), then byte arrays: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
 | 93 | Send all parameters | none | 178 bytes, in op 92 order without the continuous loop bytes |
 | 94 | Send hardware info | none | Hardware version (byte), timer period in µs (uint32), number of custom trains (byte), maximum pulses per train (uint32) |
-| 95 | Load a custom train | Train index (0 = train 1), pulse count (uint32), that many uint32 times, that many uint16 voltages | 1 / 0 |
+| 95 | Load a custom train | Train index (0 = train 1), pulse count (uint32, 1 or more), that many uint32 times, that many uint16 voltages. See [Custom trains](#custom-trains) | 1 / 0 |
 | 96 | Set DAC calibration | Channel (0-3), zero-code offset (int16). Pulse Pal 3 keeps it through power cycles; Pulse Pal 2 does not | 1 / 0 |
-| 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 ignores it and does not reply) | none | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
+| 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 reads the key and does nothing more) | The 4 ASCII characters `WIPE`, so that two stray bytes can never erase the card. With any other 4 bytes, the op does nothing and sends nothing | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
 | 99 | Set the [screen saver](#screen-saver) | State (0 off, 1 on; Pulse Pal 2 accepts 0 only), timeout in seconds (uint16, 1-65535). Pulse Pal 3 keeps both in its EEPROM; a new device starts with the screen saver on and 1800 s. Used by the MATLAB and Python classes | 1 / 0 |
 | 100 | Send the [circuit board revision](#circuit-board-revision) | none | Revision (byte, 0-31), read at startup. Pulse Pal 2 sends 0 |
@@ -125,9 +125,42 @@ not started yet.
 ### Programming during playback
 
 Parameters programmed during playback (ops 73, 74, 91, 92, a settings file load) take effect at
-once, including in trains that are playing. A new resting voltage goes to an idle channel's
-output at once. A channel playing a pulse train is not interrupted: it moves to the new resting
-voltage at its next transition to rest.
+once, including in trains that are playing, except a train's duration: its end is set when it
+starts, so a new pulse train duration applies from the next train. A new resting voltage goes to
+an idle channel's output at once. A channel playing a pulse train is not interrupted: it moves to
+the new resting voltage at its next transition to rest. A custom train load (op 95) stops the
+channels playing that train, outside param sync mode (see [Custom trains](#custom-trains)).
+
+Transitions are scheduled in timer cycles, and a channel makes each one in the first cycle at
+or after its time. A time that has already passed when it is scheduled (for example, a delay
+shortened during the delay, or a custom burst longer than the gap to the next burst onset) is
+made late, in the next cycle, rather than missed.
+
+### Custom trains
+
+A custom train (op 95) lists pulse onset times and voltages. A channel whose custom train ID
+names it plays it, with the channel's own phase durations. A train needs at least one pulse:
+op 95 refuses an empty one, and a channel set to a train that holds none (one never loaded since
+power-up) ends at once when it is triggered.
+
+On Pulse Pal 3 each custom train has two memory blocks, as each Wave Pal waveform has: its
+current block, which channels play, and another, which op 95 loads. A channel chooses its block
+when it is triggered, and plays it to the end of its train.
+
+- **Outside param sync mode**, op 95 stops the channels playing the train, and the train is
+  empty while it loads, so a trigger meanwhile plays nothing. Once the train has arrived, it is
+  current. Pulse Pal 2, which has one block per train, does the same.
+- **In param sync mode**, channels go on playing the current block, and triggers still start it.
+  Once the train has arrived, it waits for the next param sync edge, which makes it current (see
+  [Param sync mode](#param-sync-mode-pulse-pal-3-trigger-mode-3)). A later op 95 for the same
+  train before the edge replaces the stored one. A channel still playing the train from before
+  the previous edge is stopped first, since its block is the one being loaded.
+- A train whose data does not all arrive (a comm failure) is not stored: outside param sync
+  mode it is left empty, and in param sync mode the current block plays on.
+
+A biphasic custom pulse always plays whole. If it lasts longer than the gap to the next pulse's
+time, the next pulse starts as it ends. A monophasic pulse whose next pulse starts no later than
+its phase 1 would end is a sample of a custom waveform: it holds until the next pulse's time.
 
 ### Screen saver
 
@@ -212,7 +245,8 @@ value back as it is (op 93).
 | Times | 0 to 9999.9999 s, rounded to the nearest 50 µs cycle (a halfway value to the even cycle). 9999.9999 s (199999998 cycles) is the longest time the joystick menu shows and edits: four digits before the point. The Python and MATLAB classes hold the rounded time, as the device plays it |
 | Phase 1 and 2 durations, inter-pulse interval, pulse train duration | At least 2 cycles (100 µs). A trigger channel reads its input once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse a trigger channel detects reliably |
 | Custom pulse times, and a custom waveform's sampling period | Multiples of 2 cycles (100 µs), up to 9999.9999 s, each later than the one before. A time between two steps is refused, not rounded, so that a train plays as written |
-| Pulses per custom train | 5000 on Pulse Pal 2, 10000 on Pulse Pal 3 (op 94 reports it) |
+| Pulses per custom train | 1 to 5000 on Pulse Pal 2, 1 to 10000 on Pulse Pal 3 (op 94 reports the maximum) |
+| Custom train target "Bursts" (1) | Needs a burst duration above 0 on that channel. The classes check it whenever either is sent: a parameter assigned alone against the other as the device holds it, a whole set as a whole |
 | Custom train ID | 0 to 2 on Pulse Pal 2, 0 to 4 on Pulse Pal 3 |
 | Trigger mode | 0 to 2 on Pulse Pal 2; 3 (param sync) on Pulse Pal 3 only |
 | Zero code calibration (op 96) | -0.1 to 0.1 V, on Pulse Pal 3 only: its EEPROM stores it |
@@ -237,19 +271,21 @@ was in range, because values are checked when they arrive. A later op 92 replace
 set, so only the most recent one is ever loaded. An op 92 whose data does not all arrive is
 not stored.
 
-**Only op 92 is delayed.** Ops 73, 74 and 91 program the device immediately, in param sync
-mode as in any other. In the clients, only `sync_to_device()` (Python, also at the end of a
-`batch()` block), `syncToDevice()` (MATLAB) and `syncAllParams()` (C++) store a set; assigning a
-parameter with `auto_sync` / `autoSync` on, and the C++ class's methods that set one parameter,
-take effect at once.
+**Only ops 92 and 95 are delayed.** Ops 73, 74 and 91 program the device immediately, in param
+sync mode as in any other. In the clients, only `sync_to_device()` (Python, also at the end of a
+`batch()` block), `syncToDevice()` (MATLAB) and `syncAllParams()` (C++) store a set, and the
+custom train loads store a train (see [Custom trains](#custom-trains)); assigning a parameter
+with `auto_sync` / `autoSync` on, and the C++ class's methods that set one parameter, take effect
+at once.
 
-**At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set.
-With nothing stored, it does nothing.
+**At the edge.** A rising edge on a trigger channel in param sync mode loads the stored set,
+and makes the custom trains stored since the last edge current. With nothing stored, it does
+nothing.
 
 - An idle output channel takes its new parameters in the timer cycle the edge is detected,
   and moves to its new resting voltage.
-- An output channel **playing a pulse train** finishes it on the parameters it started with,
-  and takes the new ones in the cycle the train ends. So a train that crosses into the next
+- An output channel **playing a pulse train** finishes it on the parameters, and the custom
+  train memory block, it started with, and takes the new ones in the cycle the train ends. So a train that crosses into the next
   trial keeps one shape throughout, and the next trigger plays a whole train with the new
   parameters.
 - A channel in continuous loop mode has no train end, so it waits until something stops it.
@@ -276,11 +312,26 @@ the rest of the set, and takes effect only at a sync edge. When the last trigger
 leaves the mode, by any route, the stored set is discarded, so putting a channel back into
 the mode cannot load a set sent long before. The routes are ops 73, 74 and 91, the joystick
 menu, loading a settings file, and the default parameters loaded after a comm failure or an
-op 97 format.
+op 97 format. Stored custom trains are not discarded but made current, as Wave Pal does with its
+waveforms: a load replaces its train, and the clients keep no other.
 
 The Python, MATLAB and C++ classes take both trigger channels out of param sync mode when
 they connect, before programming their default parameters. Otherwise a device left in the
 mode by an earlier session would store those defaults instead of running them.
+
+## Default parameters
+
+The device loads its default parameters at startup, after a comm failure and after op 97
+formats its card, and writes them to `default.pps` at startup: on every output channel,
+monophasic pulses of 5 V (DAC code 49152) lasting 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for
+a pulse train of 20000 cycles (1 s), with no delay and no bursts, resting at 0 V; for biphasic
+pulses, an inter-phase interval of 2 cycles and a phase 2 of -5 V lasting 2 cycles; no custom
+train, and continuous loop mode off. Every output channel is linked to trigger channel 1 and not
+to trigger channel 2, and both trigger channels are in normal mode. The Python and MATLAB
+classes program the same defaults when they connect (`set_default_params()` /
+`setDefaultParams()`), so the device plays the same program whichever way it got its defaults.
+The legacy MATLAB functions use the same values; the C++ class and the legacy Python classes keep
+their own (1 ms pulses, 10 ms apart).
 
 ## Settings file
 
@@ -301,17 +352,21 @@ End marker: 252                                                            uint8
 Continuous loop mode is not saved. The device writes `default.pps` with the default
 parameters at startup, and the joystick menu cannot overwrite or erase it.
 
-A load (op 90 or the joystick menu) fails, and the device loads the default parameters
-instead, if the file:
+The device reads and checks the whole file before it loads anything. A load (op 90 or the
+joystick menu) fails, and the device keeps its parameters and its current settings file, if the
+file:
 
 - is missing, or shorter than 179 bytes;
 - lacks the end marker;
 - or holds a value the device cannot play: a custom train ID above the device's number of
-  custom trains, a biphasic, custom train target or custom train loop byte above 1, or a
-  trigger mode the device does not have.
+  custom trains, a biphasic, custom train target or custom train loop byte above 1, a phase or
+  monophasic inter-pulse interval of 0, or a trigger mode the device does not have.
 
 So a file saved on Pulse Pal 3 that uses custom train 3 or 4, or param sync mode, does not
-load on Pulse Pal 2.
+load on Pulse Pal 2. A valid file is loaded at once, as op 92 loads a set outside param sync
+mode; each channel keeps its continuous loop mode. Op 90 replies 0 to a failed load, to a save
+the card did not take, and to the deletion of a file that does not exist. Deleting the current
+settings file makes `default.pps` current.
 
 ## Timeouts and error handling
 
@@ -321,8 +376,10 @@ load on Pulse Pal 2.
   split a command.
 - On a timeout the device stops all playback, returns the outputs to their resting voltages,
   shows "COMM. FAILURE!", and waits for a joystick click. Until then it reads no commands and
-  ignores triggers. After the click it loads the default parameters. A timeout usually means
-  a faulty cable, hub or client.
+  ignores triggers. After the click it loads the default parameters, and discards the bytes
+  it receives until the port has been quiet for 100 ms: the rest of the broken command, whose
+  data could otherwise be read as commands. A timeout usually means a faulty cable, hub or
+  client.
 - The interrupted op still sends its reply, if it has one, and that reply can be 1. A confirm
   byte therefore does not reveal a timeout.
 - Replies are buffered and sent as one USB packet when the command finishes, so a reply means

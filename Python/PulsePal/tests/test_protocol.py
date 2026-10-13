@@ -222,7 +222,8 @@ def test_auto_sync_off_keeps_assignments_until_sync_to_device():
     device = make_device()
     device.auto_sync = False
     device.phase1_voltage[1] = 2.5
-    device.custom_train_target[2] = "Bursts"
+    device.custom_train_target[2] = "Bursts"     # Before its burst duration: checked by sync_to_device()
+    device.burst_duration[2] = 0.5
     device.trigger_mode = ["Gated", "Gated"]
     assert device.port.writes == []
     device.sync_to_device()
@@ -279,6 +280,7 @@ def test_parameters_take_names_and_booleans():
     device = make_device()
     device.trigger_mode[1] = "param sync"
     device.trigger_mode[2] = 2                     # The integer codes still work
+    device.burst_duration[1:3] = [0.1, 0.1]        # Custom train times that are burst onsets need bursts
     device.custom_train_target[1] = "bursts"
     device.custom_train_target[2] = 1
     device.is_biphasic[1] = 1
@@ -335,7 +337,7 @@ def test_times_hold_the_value_the_device_plays():
     assert device.phase1_duration[1] == 0.0001
     assert device.pulse_train_delay[2] == 0.0002
     assert device.burst_duration[3] == 1.00005
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 20, 20, 20)
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 2, 2, 2)
 
 
 def test_times_are_at_most_9999_9999_seconds():
@@ -427,7 +429,7 @@ def test_custom_train_rejects_times_that_do_not_increase():
 
     device = make_device()
     error = expect_error(device.send_custom_waveform, 1, 0, [1, 2, 3])
-    assert "must increase" in str(error)
+    assert "positive multiple of 100 us" in str(error), error
     assert device.port.writes == []
 
 
@@ -578,7 +580,7 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     device.info.min_pulse_width_us = 50
     device.phase1_duration[1] = 0.00005  # 2 cycles of 25 us
     device.send_custom_waveform(1, 0.00005, [1, 2, 3])
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 40, 40, 40)
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 4, 4, 4)
     error = expect_error(device.phase1_duration.__setitem__, 1, 0.000025)
     assert "at least 5e-05 s (2 cycles of the device's 25 us timer)" in str(error), error
 
@@ -590,7 +592,7 @@ def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
     device.phase1_duration[1] = 0.000125
     device.phase1_voltage[1] = 4
     assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 20, 20, 20),
+        bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 2, 2, 2),
         bytes([OP_MENU_BYTE, 91, 2]) + struct.pack("<4H", 45874, *[volts_to_bits(5)] * 3),
     ]
 
@@ -624,13 +626,20 @@ def test_a_refused_value_is_read_back_from_the_device():
     assert device.custom_train_loop == [None, False, False, False, False]
 
 
-def test_a_refused_settings_load_reads_the_parameters_back():
-    """A failed load leaves the device on its own defaults, so the local copy is read back."""
-    device = make_device()
-    device.port.response = bytearray(bytes([0]) + parameter_message(cycles=2))
-    expect_error(device.load_settings_file, "MISSING.pps")
-    assert device.port.writes[-1] == bytes([OP_MENU_BYTE, 93])
-    assert device.phase1_duration[1:5] == [0.0001] * 4
+def test_a_refused_settings_file_operation_says_what_failed():
+    """The device refuses a load of a missing or invalid file and keeps its parameters, so nothing is read
+    back; and it refuses a save it could not write, and the deletion of a missing file."""
+    for call, text in ((lambda d: d.load_settings_file("MISSING.pps"), "no such file on its microSD card, or it is"),
+                       (lambda d: d.save_settings_file("NEW.pps"), "could not save 'NEW.pps'"),
+                       (lambda d: d.delete_settings_file("MISSING.pps"), "could not delete 'MISSING.pps'")):
+        device = make_device()
+        device.phase1_voltage[1] = 2.5
+        device.port.writes.clear()
+        device.port.ack = 0
+        error = expect_error(call, device)
+        assert text in str(error), error
+        assert len(device.port.writes) == 1 and device.port.writes[0][1] == 90, device.port.writes
+        assert device.phase1_voltage[1] == 2.5
 
 
 def test_sync_from_device_reads_the_message_in_one_read():
@@ -724,6 +733,111 @@ def test_export_and_import_params():
         other.import_params({"phase1_voltage": [1] * 4, "a_future_parameter": [0] * 4})
     assert "a_future_parameter" in str(caught[0].message)
     assert other.phase1_voltage[1:5] == [1] * 4 and len(other.port.writes) == n_writes + 1
+
+
+def test_the_defaults_are_the_firmware_defaults():
+    """The class programs the defaults the device loads itself (LoadDefaultParameters() in the firmware), so
+    the device plays the same program after a comm failure or a format as after connecting: monophasic 5 V
+    pulses of 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for 20000 cycles (1 s)."""
+    device = make_device()
+    device.set_default_params()
+    message = device.port.writes[-1][2:]
+    times = struct.unpack("<32I", message[:128])
+    assert times == (2,) * 4 + (2,) * 4 + (2,) * 4 + (20,) * 4 + (0,) * 8 + (20000,) * 4 + (0,) * 4, times
+    voltages = struct.unpack("<12H", message[128:152])
+    assert voltages == (volts_to_bits(5),) * 4 + (volts_to_bits(-5),) * 4 + (32768,) * 4, voltages
+
+
+def test_custom_bursts_need_a_burst_duration():
+    """A custom train whose times are burst onsets needs bursts that last. Assigned alone (auto_sync on), each
+    of the two parameters is checked against the other; in a batch or a sync, together. Nothing is sent when
+    one is refused."""
+    device = make_device()
+    error = expect_error(device.custom_train_target.__setitem__, 2, "Bursts")
+    assert "Output channel 2" in str(error) and "burst_duration must be above 0" in str(error), error
+    device.burst_duration[2] = 0.05
+    device.custom_train_target[2] = "Bursts"
+    expect_error(device.burst_duration.__setitem__, 2, 0)
+    expect_error(device.burst_duration.__setitem__, 2, 0.00002)   # Rounds to 0 cycles
+    assert device.burst_duration[2] == 0.05 and len(device.port.writes) == 2
+
+    device = make_device()
+    try:
+        with device.batch():
+            device.custom_train_target[3] = "Bursts"
+        raise AssertionError("the batch was sent")
+    except PulsePalError:
+        pass
+    assert device.port.writes == [] and device.custom_train_target[3] == "Pulses"
+    with device.batch():
+        device.custom_train_target[3] = "Bursts"
+        device.burst_duration[3] = 0.05
+    assert len(device.port.writes) == 1
+    expect_error(device.import_params, {"burst_duration": [0, 0, 0, 0]})
+
+
+def test_an_empty_custom_train_is_refused():
+    """The device refuses a train with no pulses too: it would have no pulse times to play."""
+    for call in (lambda d: d.send_custom_pulse_train(1, [], []),
+                 lambda d: d.send_custom_pulse_train(1, np.array([]), np.array([])),
+                 lambda d: d.send_custom_waveform(1, 0.001, [])):
+        device = make_device()
+        error = expect_error(call, device)
+        assert "at least one pulse" in str(error), error
+        assert device.port.writes == []
+
+
+def test_custom_trains_convert_as_each_value_alone_would():
+    """Custom trains are converted all at once, with NumPy. The result must be what the conversion of each
+    value alone gives, halfway values included, whatever holds the values: a list, a tuple, or a NumPy array
+    of floats or integers."""
+    device = make_device()
+    rng = np.random.default_rng(1)
+    steps = np.sort(rng.choice(np.arange(0, 200000), size=4000, replace=False)) * 2 + 2  # Multiples of 2 cycles
+    times = list(steps * 50e-6)
+    volts = list(rng.uniform(-10, 10, size=4000))
+    volts[:6] = [4, -4, 10, -10, 0, 9.999847412109375]   # 4 V is code 45874.5: halfway, to the even code
+    expected_cycles = [device._custom_time_cycles(t, "t") for t in times]
+    expected_bits = [device._volts_to_bits(v) for v in volts]
+    for container in (list, tuple, np.array, lambda x: np.array(x, dtype=object)):
+        assert list(device._custom_times_to_cycles(container(times), "t")) == expected_cycles, container
+        assert list(device._volts_array_to_bits(container(volts), "v")) == expected_bits, container
+    assert list(device._custom_times_to_cycles(np.arange(5) * 2, "t")) == [0, 40000, 80000, 120000, 160000]
+    device.send_custom_pulse_train(1, times, volts)
+    sent = device.port.writes[-1]
+    assert sent == (bytes([OP_MENU_BYTE, 95, 0]) + struct.pack("<I", 4000) + struct.pack("<4000I", *expected_cycles)
+                    + struct.pack("<4000H", *expected_bits))
+    for bad_times, bad_volts, text in (([0, True], [1, 1], "Received True"),
+                                       ([0, "0.1"], [1, 1], "Received '0.1'"),
+                                       ([0, None], [1, 1], "Received None"),
+                                       ([0, -0.1], [1, 1], "Received -0.1"),
+                                       ([0, float("inf")], [1, 1], "Received inf"),
+                                       ([0, 10000], [1, 1], "at most 9999.9999 s"),
+                                       ([0, 0.00015], [1, 1], "Received 0.00015"),
+                                       ([0, 0.1], [1, np.bool_(True)], "Received np.True_"),
+                                       ([0, 0.1], [1, -10.5], "Received -10.5"),
+                                       (np.array([0, 0.1]), np.array([1, np.nan]), "Received nan"),
+                                       ([0, 0.1], np.array([True, False]), "Received True")):
+        device = make_device()
+        error = expect_error(device.send_custom_pulse_train, 1, bad_times, bad_volts)
+        assert text in str(error), (text, str(error))
+        assert device.port.writes == []
+
+
+def test_a_reply_that_does_not_arrive_mentions_a_comm_failure():
+    """A device showing COMM. FAILURE! reads no command until its joystick is clicked, so every reply times
+    out. The error says what to do."""
+    class SilentPort(FakePort):
+        timeout = 10
+
+        def read(self, n):
+            return b""
+
+    device = make_device()
+    device.port = SilentPort()
+    for call in (lambda d: d.phase1_voltage.__setitem__(1, 1), lambda d: d.sync_from_device()):
+        error = expect_error(call, device)
+        assert "COMM. FAILURE!" in str(error) and "click its joystick" in str(error), error
 
 
 class ClosablePort(FakePort):
@@ -868,7 +982,11 @@ def test_format_microsd_reads_the_confirm_byte_sent_after_the_text():
         b"SUCCESS: Card format complete!\r\n",
         b"\x01",
     ])
-    assert device.port.writes == [bytes([OP_MENU_BYTE, 97])]
+    # Op 97 with its key, then the default parameters, as after connecting: the device keeps no record of
+    # this object's other changes, such as continuous loop mode
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 97]) + b"WIPE"
+    assert device.port.writes[1:] == [bytes([OP_MENU_BYTE, 91, 128, 0, 0]), device.port.writes[2]]
+    assert device.port.writes[2][:2] == bytes([OP_MENU_BYTE, 92])
     assert device.port.chunks == [], "the confirm byte was left unread"
 
     # The confirm byte can also arrive with the text
@@ -893,7 +1011,7 @@ def test_format_microsd_without_confirmation_does_not_wait_for_input():
     pulse_pal.input = no_input
     try:
         assert device.format_microsd(confirm=False) is True
-        assert device.port.writes == [bytes([OP_MENU_BYTE, 97])]
+        assert device.port.writes[0] == bytes([OP_MENU_BYTE, 97]) + b"WIPE"
         device = make_device()
         pulse_pal.input = lambda prompt="": "n"
         assert device.format_microsd() is False

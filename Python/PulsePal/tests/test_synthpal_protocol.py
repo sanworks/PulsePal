@@ -328,6 +328,39 @@ def test_export_params_holds_every_setting():
     assert params["fixed_voltage"] == [5, -2.5, 5, 5]
 
 
+def test_import_params_programs_exported_settings_in_one_command():
+    """import_params() checks every setting, the levels together whatever their order, then sends them in one
+    op 85, as a batch() block does."""
+    import json
+    device, fake = connect()
+    device.frequency = 440
+    device.configure(1, mean_voltage=7, peak_to_peak=6)
+    device.configure(2, waveform="Fixed Voltage", fixed_voltage=-2.5)
+    device.trigger_mode[2] = "Toggle"
+    params = json.loads(json.dumps(device.export_params()))
+
+    other, other_fake = connect()
+    other.configure(1, mean_voltage=-1, peak_to_peak=18)
+    other_fake.writes.clear()
+    # Assigned one at a time, the mean of 7 V would not suit the 18 V peak to peak the object holds
+    other.import_params(dict(reversed(list(params.items()))))
+    assert other_fake.ops() == ["U"], other_fake.ops()
+    assert other.export_params() == params
+    assert other_fake.centihz == 44000 and other_fake.amplitude[:2] == [6_000_000, -2_500_000]
+
+    # A bad value, or levels that do not fit together, change and send nothing
+    other_fake.writes.clear()
+    for bad in ({"frequency": 30000}, {"mean_voltage": [9, 0, 0, 0]}, {"waveform": ["Sine", "Sine", "Sine", "Saw"]},
+                {"play_duration": [-1, 0, 0, 0]}, {"trigger_mode": "Normal"}):
+        expect_error(other.import_params, bad)
+    assert other_fake.writes == [] and other.export_params() == params
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        other.import_params({"resting_voltage": [1, 0, 0, 0], "a_future_setting": [0] * 4})
+    assert "a_future_setting" in str(caught[0].message) and other.resting_voltage[1] == 1
+
+
 def test_sync_from_device_reads_every_setting():
     """As after the joystick changed them: op 82 ('R') returns op 85's layout."""
     device, fake = connect()

@@ -150,11 +150,15 @@ enum OpCode {
   OP_SEND_HARDWARE_INFO = 94,         // Return hardware version, timer period and custom train limits
   OP_LOAD_CUSTOM_TRAIN = 95,          // Load a custom pulse train
   OP_SET_ZERO_CODE_CALIBRATION = 96,  // Set DAC zero code calibration for one channel (stored in EEPROM on HW3)
-  OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only)
+  OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only). Followed by FORMAT_SD_CARD_KEY
   OP_ABORT_CHANNELS = 98,             // Stop playback on specific output channels (1 bit per channel)
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
   OP_SEND_HARDWARE_REVISION = 100     // Return the circuit board revision read at startup (HW3; 0 on HW2)
 };
+
+// The 4 bytes that must follow op 97 for it to format the card, so that two stray bytes, e.g. 213 and 97 in the data of
+// a command that was not read as a whole, can never erase the settings files
+#define FORMAT_SD_CARD_KEY "WIPE"
 
 // Parameter IDs used by ops 74 and 91. These match the parameter codes in the MATLAB and Python interfaces.
 enum ParamID {
@@ -365,7 +369,8 @@ uint8_t TriggerMode[2] = {0}; // Normal, toggle, pulse gated or param sync mode.
 
 // A complete parameter set, as it arrives from the PC in op 92. processUSBCommands() reads the op's 182 bytes into
 // this buffer with one call to PPUSB.readBlock(), and loadParamsFromBuffer() in USBOps.ino copies them into the
-// parameter arrays above. Keeping the two steps separate lets the copy happen at a chosen moment: with a trigger
+// parameter arrays above. RestoreParametersFromSD() rearranges a settings file into this layout too, in a buffer of
+// its own, to check it whole before loading it. Keeping the two steps separate lets the copy happen at a chosen moment: with a trigger
 // channel in param sync mode, op 92 leaves the set here and handler() loads it on the next rising edge of that
 // channel, so the parameters of a trial can be sent during the trial before it and applied at its onset.
 #define PARAM_BUFFER_N_BYTES 182 // 8 uint32 arrays of 4, 3 uint16 arrays of 4, 5 byte arrays of 4, 8 + 2 trigger bytes
@@ -486,9 +491,31 @@ const byte MENU_ACTION_EXIT = MENU_ACTION_FIRST_PARAM + sizeof(menuActionParams)
 const byte MENU_ITEM_RESET = MENU_ITEM_DEVICE_INFO + 1;
 const byte MENU_ITEM_EXIT = MENU_ITEM_RESET + 1; // The last item
 
+// Custom train memory. Each custom train has memory blocks in CustomPulseTimes and CustomVoltages, as each Wave Pal
+// waveform has. On Pulse Pal 3 a train has two: its current block, which channels play, and another, which op 95 loads.
+// Outside param sync mode the loaded block becomes current at once. In param sync mode it waits for the next param
+// sync edge, while channels go on playing the current block, so the custom trains of the next trial can be loaded
+// during the current one. A channel chooses its block when it starts (customTrainPlayBlock), and plays it to the end
+// of its train. Pulse Pal 2 has no param sync mode, and no room for a second block: each train has one.
+// Train t's blocks are t and t + N_CUSTOM_PULSE_TRAINS (trains and blocks numbered from 0). See loadCustomPulseTrain().
+#if (HARDWARE_VERSION > 2)
+  #define CUSTOM_TRAIN_BLOCKS_PER_TRAIN 2
+#else
+  #define CUSTOM_TRAIN_BLOCKS_PER_TRAIN 1
+#endif
+#define N_CUSTOM_TRAIN_BLOCKS (N_CUSTOM_PULSE_TRAINS * CUSTOM_TRAIN_BLOCKS_PER_TRAIN)
+#define ANY_CUSTOM_TRAIN_BLOCK 255 // For stopCustomTrainChannels(): channels playing a train from either of its blocks
+
 // Variables used in programming
 byte OpMenuByte = 213; // This byte must be the first byte in any serial transmission to Pulse Pal. Reduces the probability of interference from port-scanning software
-unsigned long CustomTrainNpulses[N_CUSTOM_PULSE_TRAINS] = {0}; // Stores the total number of pulses in the custom pulse train
+unsigned long CustomTrainNpulses[N_CUSTOM_TRAIN_BLOCKS] = {0}; // The number of pulses in each custom train memory block. 0 = empty
+byte currentCustomTrainBlock[N_CUSTOM_PULSE_TRAINS] = {0}; // The block each custom train plays from. Set in setup()
+byte customTrainPlayID[4] = {0}; // The custom train each output channel is playing (1-N_CUSTOM_PULSE_TRAINS), or 0. See handler()
+byte customTrainPlayBlock[4] = {0}; // The block it plays it from, chosen when the channel started
+#if (HARDWARE_VERSION > 2)
+  volatile byte customTrainLoadsStored = 0; // One bit per custom train (bit 0 = train 1): op 95 loaded the train's other block
+                                            // in param sync mode, and the next param sync edge makes it current
+#endif
 int SerialCurrentTime = 0; // Current time (millis), used while flashing the LEDs of a comm failure
 int SerialReadStartTime = 0; // Time the comm failure message started
 
@@ -503,12 +530,14 @@ unsigned long PulseTrainTimestamps[4] = {0};
 unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pulse-low timestamp for each channel
 unsigned long NextBurstTransitionTime[4] = {0}; // Stores next burst-on or burst-off timestamp for each channel
 unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is supposed to end
+// Pulse times and voltages of the custom train memory blocks (see "Custom train memory" above). On Pulse Pal 3, DMAMEM
+// is not zeroed at startup: a block holds pulses only up to CustomTrainNpulses.
 #if (HARDWARE_VERSION == 2)
-  uint32_t CustomPulseTimes[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
-  uint16_t CustomVoltages[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
+  uint32_t CustomPulseTimes[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
+  uint16_t CustomVoltages[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
 #else
-  DMAMEM uint32_t CustomPulseTimes[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
-  DMAMEM uint16_t CustomVoltages[N_CUSTOM_PULSE_TRAINS][MAX_CUSTOM_PULSES+1] = {0};
+  DMAMEM uint32_t CustomPulseTimes[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
+  DMAMEM uint16_t CustomVoltages[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
 #endif
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
 byte PulseStatus[4] = {0}; // Phase of the current pulse on each channel. See enum PulseStatusValue
@@ -714,6 +743,9 @@ void setup() {
   if (!root.open("/Pulse_Pal")) { // The file lists in the joystick menus are read from this directory handle
     write2Screen("Startup Error:"," Need SD Format");
   }
+  for (int i = 0; i < N_CUSTOM_PULSE_TRAINS; i++) {
+    currentCustomTrainBlock[i] = i; // Each custom train starts on its first block, empty (see "Custom train memory" above)
+  }
   // Start with default parameters, and write them to the default settings file. The joystick menu cannot overwrite
   // or erase this file, so the default parameters can always be loaded from it.
   LoadDefaultParameters();
@@ -757,7 +789,10 @@ void loop() {
     DACFlag = 0;
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
     screenSaverActivity = true; // The click that ended the message. The screen saver's idle time starts again here.
-    PPUSB.clearTimedOut();
+    PPUSB.clearTimedOut(); // First: until it is cleared, reads return at once without taking any bytes
+    // The rest of the failed message may still be arriving. It must not be read as commands: in a custom train's data,
+    // 213 followed by an op code is likely, and would run that op.
+    discardUntilQuiet();
     startHardwareTimer();
   }
 }

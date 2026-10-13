@@ -73,7 +73,10 @@ share these conventions. Keep them in new code.
   `sync_to_device()` / `syncToDevice()`, which works whatever auto_sync is; Python's `batch()`
   block does both. `trigger(channels)` and `stop(channels)` take one channel number or several
   as the language's array (a list, tuple or NumPy array; `[1 3]`), nothing else.
-  `set_default_params()` / `setDefaultParams()` programs the defaults, whatever auto_sync is.
+  `set_default_params()` / `setDefaultParams()` programs the defaults, whatever auto_sync is
+  (Pulse Pal's are the firmware's own, which it loads at startup and after a comm failure).
+  `export_params()` / `exportParams()` return every setting, and `import_params()` /
+  `importParams()` check all of them before they program any.
   Modes are names (case-insensitive) and on/off settings are booleans; Pulse Pal's classes also
   take the integer codes of older clients. `info` has the same fields in both languages. Methods
   that program the device return nothing: a failure raises an error. Closing a connection stops

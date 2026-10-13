@@ -145,7 +145,7 @@ def build(arduino_cli, sketch_dir, hardware_version, build_dir, real_libraries):
     print(f"Building {board['name']} ...")
     result = subprocess.run(command, capture_output=True, text=True)
     for line in (result.stdout + result.stderr).splitlines():
-        if re.search(r"error|warning: .*\.ino|FLASH:|RAM1:|Sketch uses", line, re.I):
+        if re.search(r"error|warning: .*\.ino|FLASH:|RAM1:|RAM2:|Sketch uses", line, re.I):
             print("  " + line.strip())
     if result.returncode != 0:
         print(f"  BUILD FAILED for {board['name']}")

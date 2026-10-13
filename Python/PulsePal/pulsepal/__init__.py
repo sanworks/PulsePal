@@ -15,14 +15,15 @@ with PulsePalDevice("COM3") as P:   # Replace COM3 with Pulse Pal's port
 |---|---|---|
 | Pulse Pal: pulse trains | `PulsePalDevice` | `pulsepal.pulse_pal` |
 | Wave Pal: sampled waveforms, streamed from the microSD card | `WavePalDevice` | `pulsepal.wave_pal` |
-| Synth Pal: sine, triangle, square and sawtooth waves, and fixed voltages | `SynthPalDevice` | `pulsepal.synth_pal` |
+| Synth Pal: sine, triangle, square and sawtooth waves, white noise, and fixed voltages | `SynthPalDevice` | `pulsepal.synth_pal` |
 
 The three classes work the same way. Settings are lists indexed by
 channel number (index 0 is unused), and assigning to one programs the
 device at once; `trigger()` starts channels and `stop()` stops them;
-`set_default_params()` programs the defaults; `print(device)` shows every
-setting; and they raise `PulsePalError` when something fails. Each class
-names the firmware a device runs when it is not its own.
+`set_default_params()` programs the defaults; `export_params()` and
+`import_params()` record and restore every setting; `print(device)` shows
+every setting; and they raise `PulsePalError` when something fails. Each
+class names the firmware a device runs when it is not its own.
 
 `PulsePalDevice.serialportlist()` lists the USB serial ports, to find the
 device's.

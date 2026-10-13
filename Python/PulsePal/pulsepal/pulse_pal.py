@@ -166,20 +166,26 @@ _OUTPUT_PARAMETERS = {
 _OUTPUT_PARAMETER_CODES = {name: code for code, (name, _) in _OUTPUT_PARAMETERS.items()}
 _TRIGGER_MODE_CODE = 128  # The one trigger channel parameter
 _CONTINUOUS_LOOP_CODE = 18  # Not in ops 73 and 93, or settings files
+_BURST_DURATION_CODE = 8  # These two are checked together: see PulsePalDevice._check_custom_bursts()
+_CUSTOM_TRAIN_TARGET_CODE = 15
+_FORMAT_KEY = b"WIPE"  # Follows op 97, so that two stray bytes cannot format the card (FORMAT_SD_CARD_KEY in the firmware)
 
 # The parameters that ops 73, 92 and 93 carry in each block, in order
 _TIME_PARAMETERS = ("phase1_duration", "inter_phase_interval", "phase2_duration", "inter_pulse_interval",
                     "burst_duration", "inter_burst_interval", "pulse_train_duration", "pulse_train_delay")
 _VOLTAGE_PARAMETERS = ("phase1_voltage", "phase2_voltage", "resting_voltage")
 
+# The default parameters: the device's own (LoadDefaultParameters() in /Firmware/PulsePal3/SDSettings.ino), which it
+# loads at startup, after a comm failure and after formatting its microSD card, so that it plays the same program
+# whichever way it got its defaults. The MATLAB class has the same; the legacy clients keep their own.
 _DEFAULT_OUTPUT_VALUES = {
     "is_biphasic": False,
     "phase1_voltage": 5.0,
     "phase2_voltage": -5.0,
-    "phase1_duration": 0.001,
-    "inter_phase_interval": 0.001,
-    "phase2_duration": 0.001,
-    "inter_pulse_interval": 0.01,
+    "phase1_duration": 0.0001,
+    "inter_phase_interval": 0.0001,
+    "phase2_duration": 0.0001,
+    "inter_pulse_interval": 0.001,
     "burst_duration": 0.0,
     "inter_burst_interval": 0.0,
     "pulse_train_duration": 1.0,
@@ -397,7 +403,8 @@ class PulsePalDevice:
     At least `DeviceInfo.min_pulse_width_us`. The end of the train cuts
     short a monophasic pulse still playing. A biphasic pulse starts only
     if it can end by the end of the train, so that it keeps its second
-    phase.
+    phase. A train's end is set when it starts: a new duration applies
+    from the next train.
     """)
 
     pulse_train_delay = _channel_setting("pulse_train_delay", """Delay from the trigger to the onset of the pulse train, in
@@ -427,7 +434,10 @@ class PulsePalDevice:
     custom_train_target = _channel_setting("custom_train_target", """What the times of a custom train mark.
 
     `"Pulses"` if each time is the onset of a pulse, `"Bursts"` if each
-    time is the onset of a burst of pulses.
+    time is the onset of a burst of pulses, which lasts
+    `PulsePalDevice.burst_duration`. `"Bursts"` needs a burst duration
+    above 0: with `PulsePalDevice.auto_sync` on, set the burst duration
+    first, or set both in a `PulsePalDevice.batch` block.
     """)
 
     custom_train_loop = _channel_setting("custom_train_loop", """Whether a custom train repeats.
@@ -459,8 +469,9 @@ class PulsePalDevice:
     - `"Param Sync"` (Pulse Pal 3 only): a TTL rising edge starts and
       stops nothing. It loads the parameters most recently sent by
       `PulsePalDevice.sync_to_device` (or at the end of a
-      `PulsePalDevice.batch` block). This is how the next trial's
-      parameters are sent during the current trial and applied the
+      `PulsePalDevice.batch` block), and the custom trains loaded since
+      the previous edge. This is how the next trial's parameters and
+      custom trains are sent during the current trial and applied the
       instant it starts.
 
     The integer codes 0-3 are accepted too.
@@ -475,12 +486,18 @@ class PulsePalDevice:
     until something stops it.
 
     While either trigger channel is in param sync mode, **only
-    `PulsePalDevice.sync_to_device` is held back** (and the end of a
-    `PulsePalDevice.batch` block): with `PulsePalDevice.auto_sync` on,
-    every assignment still programs the device immediately. So leaving
-    param sync mode means assigning `trigger_mode` with `auto_sync` on; a
-    trigger mode sent by `PulsePalDevice.sync_to_device` does not take
-    effect until a sync edge arrives.
+    `PulsePalDevice.sync_to_device` (and the end of a
+    `PulsePalDevice.batch` block) and the custom train loads are held
+    back**: with `PulsePalDevice.auto_sync` on, every assignment still
+    programs the device immediately. So leaving param sync mode means
+    assigning `trigger_mode` with `auto_sync` on; a trigger mode sent by
+    `PulsePalDevice.sync_to_device` does not take effect until a sync
+    edge arrives. A custom train loaded in param sync mode
+    (`PulsePalDevice.send_custom_pulse_train`) replaces the old one at
+    the edge: channels playing the old one at the edge finish their
+    trains on it. Leaving param sync mode discards parameters still
+    waiting for an edge, but makes a custom train still waiting current
+    at once.
 
     A param sync channel's links to output channels are ignored. To
     start a pulse train on the same edge, wire the TTL to the other
@@ -601,7 +618,8 @@ class PulsePalDevice:
         reply = _common.read_handshake_reply(self.port)
         if reply is None:
             raise PulsePalError(
-                f"No reply to the handshake from the device on {port_name}. Is it a Pulse Pal?"
+                f"No reply to the handshake from the device on {port_name}. Is it a Pulse Pal? "
+                f"{_common.NO_REPLY_HINT}"
             )
         handshake, firmware_version = reply
         if handshake != self._HANDSHAKE_RESPONSE:
@@ -792,11 +810,15 @@ class PulsePalDevice:
     def set_default_params(self):
         """Program the device with the default parameters.
 
-        The defaults are monophasic +5 V pulses of 1 ms, 10 ms apart, for
-        1 second, resting at 0 V, on all four output channels, linked to
-        trigger channel 1, with both trigger channels in normal mode.
-        They are sent at once, also while `PulsePalDevice.auto_sync` is
-        off. The constructor calls it.
+        The defaults are monophasic +5 V pulses of 0.1 ms, 1 ms apart
+        (about 909 a second), for 1 second, resting at 0 V, on all four
+        output channels, linked to trigger channel 1, with both trigger
+        channels in normal mode; for biphasic pulses, a phase 2 of -5 V
+        and 0.1 ms after 0.1 ms at rest. They are the device's own
+        defaults, which it also loads at startup, after a comm failure
+        and after formatting its microSD card. They are sent at once,
+        also while `PulsePalDevice.auto_sync` is off. The constructor
+        calls it.
         """
         for name, value in _DEFAULT_OUTPUT_VALUES.items():
             getattr(self, name)._store([value] * 4)
@@ -1007,7 +1029,9 @@ class PulsePalDevice:
         timing. Set `PulsePalDevice.custom_train_id` on an output channel
         to play the train there. Each pulse takes the channel's own phase
         durations; a biphasic pulse's second phase is its voltage with the
-        sign reversed.
+        sign reversed. A biphasic pulse always plays whole: if it lasts
+        longer than the gap to the next pulse, the next pulse starts as it
+        ends, late.
 
         ```python
         P.send_custom_pulse_train(
@@ -1015,6 +1039,18 @@ class PulsePalDevice:
         )
         P.custom_train_id[1] = 2
         ```
+
+        Loading a train stops the output channels playing it, and their
+        next trigger plays the new train. On Pulse Pal 3, while a trigger
+        channel is in param sync mode (see `PulsePalDevice.trigger_mode`),
+        the device stores the train instead, as it stores the parameters
+        `PulsePalDevice.sync_to_device` sends: channels go on playing the
+        old train, and the next rising edge on the param sync channel
+        makes the new one current. A channel playing the old train at that
+        edge finishes it, and plays the new one from its next trigger. So
+        the next trial's custom trains can be loaded during the current
+        trial. Leaving param sync mode makes a stored train current at
+        once.
 
         Args:
             custom_train_id: Custom train to load, from 1 to
@@ -1030,28 +1066,18 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If `custom_train_id` is out of range,
                 `pulse_times` and `voltages` differ in length,
-                there are more pulses than
+                there are no pulses, or more than
                 `DeviceInfo.max_custom_pulses`, a pulse time is not a
                 multiple of `DeviceInfo.min_pulse_width_us`, is out of
                 range or is not later than the one before it, or the
                 device does not acknowledge the command.
         """
-        pulse_times = self._as_list(pulse_times)
-        voltages = self._as_list(voltages)
-        if len(pulse_times) != len(voltages):
+        pulse_times_cycles = self._custom_times_to_cycles(pulse_times, "pulse_times")
+        pulse_voltage_bits = self._volts_array_to_bits(voltages, "voltages")
+        if len(pulse_times_cycles) != len(pulse_voltage_bits):
             raise PulsePalError(
                 "pulse_times and voltages must be the same length."
             )
-
-        pulse_times_cycles = [
-            self._custom_time_cycles(pulse_time, "pulse_times")
-            for pulse_time in pulse_times
-        ]
-        pulse_voltage_bits = [
-            self._volts_to_bits(voltage, "voltages")
-            for voltage in voltages
-        ]
-
         self._send_custom_train(
             custom_train_id,
             pulse_times_cycles,
@@ -1070,7 +1096,9 @@ class PulsePalDevice:
         A convenience shorthand for
         `PulsePalDevice.send_custom_pulse_train` with evenly spaced,
         adjoining pulses, so that `voltages` is played as a waveform
-        sampled every `sampling_period` seconds.
+        sampled every `sampling_period` seconds. It is loaded as a custom
+        train is: see `PulsePalDevice.send_custom_pulse_train` for what
+        happens to channels playing it, and in param sync mode.
 
         Set the channel's `PulsePalDevice.phase1_duration` to
         `sampling_period` as well, so that each sample is held for the
@@ -1097,20 +1125,20 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
-                are more samples than `DeviceInfo.max_custom_pulses`,
-                `sampling_period` is not a positive multiple of
-                `DeviceInfo.min_pulse_width_us`, the last sample would
-                start after `MAX_TIME`, or the device does not
-                acknowledge the command.
+                are no samples, or more than
+                `DeviceInfo.max_custom_pulses`, `sampling_period` is not a
+                positive multiple of `DeviceInfo.min_pulse_width_us`, the
+                last sample would start after `MAX_TIME`, or the device
+                does not acknowledge the command.
         """
-        voltages = self._as_list(voltages)
+        pulse_voltage_bits = self._volts_array_to_bits(voltages, "voltages")
         period_cycles = self._custom_time_cycles(sampling_period, "sampling_period")
-        pulse_times = [period_cycles * i for i in range(len(voltages))]
-        pulse_voltage_bits = [
-            self._volts_to_bits(voltage, "voltages")
-            for voltage in voltages
-        ]
-
+        if period_cycles == 0:
+            raise PulsePalError(
+                f"sampling_period must be a positive multiple of {self.info.min_pulse_width_us:g} us. "
+                f"Received {sampling_period!r}."
+            )
+        pulse_times = period_cycles * np.arange(len(pulse_voltage_bits), dtype=np.int64)
         self._send_custom_train(
             custom_train_id,
             pulse_times,
@@ -1188,8 +1216,8 @@ class PulsePalDevice:
             file_name: At most 15 ASCII characters, ending in `.pps`.
 
         Raises:
-            PulsePalError: If the file name is invalid, or the device does
-                not acknowledge the command.
+            PulsePalError: If the file name is invalid, or the device could
+                not write the file to its microSD card.
         """
         self._settings_file_op(file_name, 1, "save_settings_file()")
 
@@ -1198,6 +1226,8 @@ class PulsePalDevice:
 
         The device plays the program in the file, and the parameters are
         read back into this object (see `PulsePalDevice.sync_from_device`).
+        The file's trigger modes take effect too, and the program is loaded
+        at once, also in param sync mode.
 
         Args:
             file_name: The file's name, ending in `.pps`, as saved by
@@ -1205,10 +1235,9 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the file name is invalid, or the device could
-                not load the file. A load that fails leaves the device on
-                its own default parameters (not the ones
-                `set_default_params` sets), and they are read back into
-                this object before the error is raised.
+                not load the file: there is no such file on its microSD
+                card, or it is not a valid settings file. The device then
+                keeps its parameters, and so does this object.
         """
         self._settings_file_op(file_name, 2, "load_settings_file()")
 
@@ -1219,8 +1248,8 @@ class PulsePalDevice:
             file_name: The file's name, ending in `.pps`.
 
         Raises:
-            PulsePalError: If the file name is invalid, or the device does
-                not acknowledge the command.
+            PulsePalError: If the file name is invalid, or the device could
+                not delete the file, e.g. because there is no such file.
         """
         self._settings_file_op(file_name, 3, "delete_settings_file()")
 
@@ -1245,9 +1274,14 @@ class PulsePalDevice:
             "uint8",
         )
         if self.info.firmware_version > 21:
-            # Sent after the file operation has finished. A refused load leaves the device on
-            # its default parameters, so the local copy is read back first.
-            self._read_ack(context, on_refusal=self.sync_from_device if op_byte == 2 else None)
+            # Sent after the file operation has finished. A refused load changes nothing on the device.
+            refusal = {
+                1: f"Pulse Pal could not save {file_name!r} to its microSD card. Is the card in place?",
+                2: f"Pulse Pal could not load {file_name!r}: there is no such file on its microSD card, or it is not "
+                   "a valid settings file. The device keeps its parameters.",
+                3: f"Pulse Pal could not delete {file_name!r}: there is no such file on its microSD card.",
+            }[op_byte]
+            self._read_ack(context, refusal_message=refusal)
         elif op_byte == 2:
             time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
         if op_byte == 2:
@@ -1293,7 +1327,7 @@ class PulsePalDevice:
                 print("Choice confirmed - microSD Card NOT formatted.")
                 return False
 
-        self._write_serial((self._OP_MENU_BYTE, 97), "uint8")
+        self._write_serial((self._OP_MENU_BYTE, 97), "uint8", list(_FORMAT_KEY), "uint8")
 
         # The device replies with lines of status text, the last of which
         # contains "!", and then a confirm byte (1 if the card was formatted,
@@ -1320,7 +1354,7 @@ class PulsePalDevice:
         if line_end < 0 or len(message) <= line_end + 1:
             raise PulsePalError(
                 "Pulse Pal did not report the result of formatting "
-                f"its microSD card within {timeout} s."
+                f"its microSD card within {timeout} s. {_common.NO_REPLY_HINT}"
             )
         confirm_byte = message[line_end + 1]
 
@@ -1330,10 +1364,10 @@ class PulsePalDevice:
         if text:
             print(text)
 
-        # The device has loaded its own defaults, which are this class's
-        for name, value in _DEFAULT_OUTPUT_VALUES.items():
-            getattr(self, name)._store([value] * 4)
-        self._trigger_mode._store(["Normal"] * 2)
+        # The device has loaded its own defaults. They are this class's, but the device keeps no record of
+        # this object's other changes (continuous loop mode, for one), so the defaults are programmed, as the
+        # MATLAB class does, and this object describes the device again.
+        self.set_default_params()
         if confirm_byte != 1:
             raise PulsePalError(
                 "Pulse Pal could not format its microSD card."
@@ -1524,6 +1558,12 @@ class PulsePalDevice:
         program them. Returns them as the parameter's list holds them."""
         values = [self._normalize_output_value(code, v, ch) for ch, v in enumerate(values, start=1)]
         if self._auto_sync:
+            if code in (_BURST_DURATION_CODE, _CUSTOM_TRAIN_TARGET_CODE):
+                # Sent alone, so it must suit the other parameter as the device holds it. In a batch() block, or
+                # with auto_sync off, both are checked together by sync_to_device().
+                new = {_OUTPUT_PARAMETERS[code][0]: values}
+                self._check_custom_bursts(new.get("custom_train_target", list(self._custom_train_target)[1:]),
+                                          new.get("burst_duration", list(self._burst_duration)[1:]))
             if self.info.firmware_version > 21:
                 self._send_output_param(code, values, f"setting {_OUTPUT_PARAMETERS[code][0]}")
             else:
@@ -1580,6 +1620,23 @@ class PulsePalDevice:
                 self._normalize_output_value(code, values[ch], ch)
         for ch in (1, 2):
             self._normalize_trigger_mode(self._trigger_mode[ch])
+        self._check_custom_bursts(list(self._custom_train_target)[1:], list(self._burst_duration)[1:])
+
+    @staticmethod
+    def _check_custom_bursts(targets, burst_durations):
+        """Refuse a custom train targeting bursts on a channel with no burst duration.
+
+        Its times are burst onsets, and a burst of no duration plays one 50 us cycle of a pulse at each: a
+        program that cannot be what was meant. (The device once played one pulse and then left the channel
+        "playing", ignoring triggers until it was stopped.)
+        """
+        for channel, (target, burst) in enumerate(zip(targets, burst_durations), start=1):
+            if target == "Bursts" and burst == 0:
+                raise PulsePalError(
+                    f"Output channel {channel}: custom_train_target 'Bursts' makes the custom train's times burst "
+                    "onsets, so burst_duration must be above 0. Set burst_duration first, or set both in a batch() "
+                    "block."
+                )
 
     def _send_sync(self):
         """Send every parameter in one command: op 92 on firmware v22 or newer, op 73 on v21."""
@@ -1754,7 +1811,7 @@ class PulsePalDevice:
 
     def _send_custom_train(self, custom_train_id, pulse_times_cycles,
                            pulse_voltage_bits, context):
-        """Send a custom pulse train, already converted to device units.
+        """Send a custom pulse train, already converted to device units (NumPy integer arrays).
 
         Uses op 95 on firmware v22 or newer, and the legacy ops 75 and 76
         (trains 1 and 2 only) on firmware v21.
@@ -1772,50 +1829,112 @@ class PulsePalDevice:
             )
         train_id = int(custom_train_id)
         n_pulses = len(pulse_times_cycles)
+        if n_pulses == 0:
+            # The device refuses an empty train too: it would hold no pulse times to play
+            raise PulsePalError(
+                f"{context}: a custom train needs at least one pulse. To play nothing on a channel, set its "
+                "custom_train_id to a train that holds what it should play, or do not trigger it."
+            )
         if n_pulses > self.info.max_custom_pulses:
             raise PulsePalError(
                 f"{context}: {n_pulses} pulses were given. Pulse Pal can "
                 f"store up to {self.info.max_custom_pulses} pulses per "
                 "custom train."
             )
-        # The device plays each pulse until the next one's time, so a time
-        # that is not later than the one before it would freeze the output
-        # for the rest of the train. Times are multiples of _MIN_PULSE_CYCLES
-        # (see _custom_time_cycles()), so increasing times are far enough
-        # apart for a trigger channel to detect each pulse.
-        for i in range(1, n_pulses):
-            if (pulse_times_cycles[i] - pulse_times_cycles[i - 1]
-                    < self._MIN_PULSE_CYCLES):
-                raise PulsePalError(
-                    f"{context}: pulse times must increase, by at least "
-                    f"{self._min_pulse_seconds()} s ({self._MIN_PULSE_CYCLES} "
-                    f"cycles of the device's {self.info.cycle_period_us} us "
-                    f"timer). Pulse {i + 1} is at "
-                    f"{self._cycles_to_seconds(pulse_times_cycles[i])} s, "
-                    f"and pulse {i} is at "
-                    f"{self._cycles_to_seconds(pulse_times_cycles[i - 1])} s."
-                )
-        if n_pulses and pulse_times_cycles[-1] > self._max_time_cycles():
+        # Times are multiples of _MIN_PULSE_CYCLES (see _custom_times_to_cycles()), so increasing times are far
+        # enough apart for a trigger channel to detect each pulse.
+        too_close = np.flatnonzero(np.diff(pulse_times_cycles) < self._MIN_PULSE_CYCLES)
+        if too_close.size:
+            i = int(too_close[0]) + 1
+            raise PulsePalError(
+                f"{context}: pulse times must increase, by at least "
+                f"{self._min_pulse_seconds()} s ({self._MIN_PULSE_CYCLES} "
+                f"cycles of the device's {self.info.cycle_period_us} us "
+                f"timer). Pulse {i + 1} is at "
+                f"{self._cycles_to_seconds(pulse_times_cycles[i])} s, "
+                f"and pulse {i} is at "
+                f"{self._cycles_to_seconds(pulse_times_cycles[i - 1])} s."
+            )
+        if pulse_times_cycles[-1] > self._max_time_cycles():
             raise PulsePalError(
                 f"{context}: the last pulse starts at {self._cycles_to_seconds(pulse_times_cycles[-1])} s. "
                 f"Pulse times must be at most {self.info.max_time} s."
             )
 
         if self.info.firmware_version > 21:
-            header = (self._OP_MENU_BYTE, 95, train_id - 1)
+            header = bytes([self._OP_MENU_BYTE, 95, train_id - 1])
         else:
-            header = (self._OP_MENU_BYTE, 74 + train_id)
-        self._write_serial(
-            header,
-            "uint8",
-            n_pulses,
-            "uint32",
-            pulse_times_cycles,
-            "uint32",
-            pulse_voltage_bits,
-            "uint16",
+            header = bytes([self._OP_MENU_BYTE, 74 + train_id])
+        self._write_raw(
+            header + struct.pack("<I", n_pulses)
+            + np.asarray(pulse_times_cycles).astype("<u4").tobytes()
+            + np.asarray(pulse_voltage_bits).astype("<u2").tobytes()
         )
         self._read_ack(context)
+
+    def _number_array(self, values, name, description):
+        """Return values (a scalar, a list, a tuple or a NumPy array) as a flat float64 array, refusing booleans,
+        strings and anything else that is not a number, as the scalar conversions do."""
+        if isinstance(values, np.ndarray) and values.dtype.kind in "iuf":
+            return values.ravel().astype(float)
+        items = self._as_list(values)
+        refused_types = tuple(kind for kind in {type(item) for item in items}  # Each type once: fast for long lists
+                              if issubclass(kind, (bool, np.bool_, str, bytes)))
+        if refused_types:
+            item = next(item for item in items if isinstance(item, refused_types))
+            raise PulsePalError(f"{name} must be {description}. Received {item!r}.")
+        try:
+            return np.asarray(items, dtype=float).ravel()
+        except (TypeError, ValueError):
+            for item in items:
+                try:
+                    float(item)
+                except (TypeError, ValueError):
+                    raise PulsePalError(f"{name} must be {description}. Received {item!r}.") from None
+            raise
+
+    @staticmethod
+    def _first(values, refused):
+        """The first value at a True position of the boolean array `refused`, for an error message."""
+        i = int(np.flatnonzero(refused)[0])
+        item = values.ravel()[i] if isinstance(values, np.ndarray) else PulsePalDevice._as_list(values)[i]
+        return item.item() if isinstance(item, np.generic) else item
+
+    def _custom_times_to_cycles(self, values, name):
+        """Convert custom pulse times to timer cycles, all at once: _custom_time_cycles() for each of them.
+
+        Each must be a time the device can play, and a whole number of DeviceInfo.min_pulse_width_us (100 us) to
+        the nearest microsecond, as in the MATLAB class. Returns an int64 array.
+        """
+        seconds = self._number_array(values, name, "a time of 0 s or more")
+        refused = ~(np.isfinite(seconds) & (seconds >= 0))
+        if refused.any():
+            raise PulsePalError(f"{name} must be a time of 0 s or more. Received {self._first(values, refused)!r}.")
+        # The same arithmetic as _seconds_to_cycles() and _custom_time_cycles(): NumPy's round() also takes a
+        # halfway value to the even integer
+        refused = np.round(seconds * float(self.info.cycle_frequency)) > self._max_time_cycles()
+        if refused.any():
+            raise PulsePalError(
+                f"{name} must be at most {self.info.max_time} s, the longest time the device's screen "
+                f"shows. Received {self._first(values, refused)!r}."
+            )
+        microseconds = np.round(seconds * 1e6)
+        step_us = int(self.info.min_pulse_width_us)
+        refused = np.mod(microseconds, step_us) != 0
+        if refused.any():
+            raise PulsePalError(
+                f"{name} must be multiples of {step_us} us ({step_us / 1e6:g} s). "
+                f"Received {self._first(values, refused)!r}."
+            )
+        return (microseconds // int(self.info.cycle_period_us)).astype(np.int64)
+
+    def _volts_array_to_bits(self, values, name):
+        """Convert voltages to DAC codes, all at once: _volts_to_bits() for each of them. Returns an int64 array."""
+        volts = self._number_array(values, name, "in [-10, 10] V")
+        refused = ~((volts >= -10) & (volts <= 10))  # Also refuses NaN
+        if refused.any():
+            raise PulsePalError(f"{name} must be in [-10, 10] V. Received {self._first(values, refused)!r}.")
+        return np.round((volts + 10) / 20 * self._DAC_BITMAX).astype(np.int64)
 
     # ------------------------------------------------------------------
     # Internals: serial port and units
@@ -1831,8 +1950,11 @@ class PulsePalDevice:
         payload = bytearray()
         for i in range(0, len(args), 2):
             payload.extend(self._pack_values(args[i], args[i + 1]))
+        self._write_raw(bytes(payload))
 
-        bytes_written = self.port.write(bytes(payload))
+    def _write_raw(self, payload):
+        """Write bytes to the serial port, in one write."""
+        bytes_written = self.port.write(payload)
         if bytes_written != len(payload):
             raise PulsePalError(
                 f"Wrote {bytes_written} byte(s), expected to write "
@@ -1844,9 +1966,8 @@ class PulsePalDevice:
         message_bytes = self.port.read(n_bytes)
         if len(message_bytes) < n_bytes:
             raise PulsePalError(
-                f"Serial port timed out. "
-                f"{len(message_bytes)} byte(s) read. "
-                f"Expected {n_bytes} byte(s)."
+                f"Pulse Pal sent {len(message_bytes)} of the {n_bytes} byte(s) of its reply within "
+                f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
         return message_bytes
 
@@ -1865,23 +1986,26 @@ class PulsePalDevice:
             return values[0]
         return list(values)
 
-    def _read_ack(self, context, on_refusal=None):
+    def _read_ack(self, context, on_refusal=None, refusal_message=None):
         """Read a one-byte acknowledgement from the device.
 
         The device replies 1 if it executed the command, or 0 if it rejected
         the command because a value was out of range. On a 0, on_refusal()
         is called before the error is raised: the device resets a value it
         refuses, so callers use it to read the value back into the local copy.
+        refusal_message replaces the error's usual message, for a command
+        refused for another reason.
         """
         try:
             acknowledgement = self._read_serial(1, "uint8")
         except PulsePalError as exc:
             raise PulsePalError(
-                "Pulse Pal did not return an acknowledgement byte "
-                f"after {context}."
+                f"Pulse Pal did not confirm {context}: no reply arrived within {self.port.timeout} s. "
+                f"{_common.NO_REPLY_HINT}"
             ) from exc
         if acknowledgement != 1:
             refusal = PulsePalError(
+                refusal_message or
                 f"Pulse Pal rejected the command sent by {context}. "
                 "This usually means that a channel number, parameter code or "
                 "value was out of range for the connected device."

@@ -38,8 +38,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Loads the default parameters, sets the outputs to their resting voltage, and makes the default settings file the current
 // settings file. It does not write to the microSD card: setup() and op 97 write the default settings file with SaveCurrentProgram2SD().
+// The MATLAB and Python classes' default parameters are the same (set_default_params()), so after a comm failure or a
+// format the device plays what a client that just connected programs. Continuous loop mode goes off, and a channel
+// playing in continuous loop mode stops, as op 92 stops it.
 void LoadDefaultParameters() {
   for (int x = 0; x < 4; x++) {
+      if (ContinuousLoopMode[x]) {
+        ContinuousLoopMode[x] = 0;
+        killChannel(x);
+      }
       Phase1Duration[x] = 2;
       InterPhaseInterval[x] = 2;
       Phase2Duration[x] = 2;
@@ -123,10 +130,13 @@ byte readByteFromSD() {
 // Note: ops 73, 92 and 93 send parameters in a different order, with each parameter grouped across all channels.
 // If this layout changes, update SaveCurrentProgram2SD(), RestoreParametersFromSD() and the constants above.
 // ---------------------------------------------------------------------------------------------------------------
-void SaveCurrentProgram2SD() {
+// Saves all parameters to the current settings file (currentSettingsFileNameChar), using the settings file layout
+// above. Returns true if the file was written, or false if it could not be (no card, or the card refused the write).
+FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from flash (see FLASHMEM in PulsePal3.ino)
   settingsFile.close();
-  settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR);
-  // This function saves all parameters to the SD card, using the settings file layout above
+  if (!settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR)) {
+    return false;
+  }
   for (int chan = 0; chan < 4; chan++) {
     writeLongToSD(Phase1Duration[chan]);
     writeLongToSD(InterPhaseInterval[chan]);
@@ -152,51 +162,64 @@ void SaveCurrentProgram2SD() {
     settingsFile.write(TriggerAddress[chan][3]);
   }
   settingsFile.write(SETTINGS_FILE_END_MARKER);
-  settingsFile.close();
+  bool written = !settingsFile.getWriteError();
+  written = settingsFile.close() && written; // close() writes what is still cached, and reports whether it could
   settingsFile.open(currentSettingsFileNameChar, O_READ);
+  return written;
 }
 
-// Reads parameters from the current settings file. Returns SETTINGS_FILE_END_MARKER if the file is valid, or 0 if it
-// is missing, too short, has no end marker, or holds a value that would make handler() read outside its arrays
-// (e.g. custom train 3 in a file saved on Pulse Pal 3 and loaded on Pulse Pal 2).
-// If the file is invalid, the caller must load valid parameters (e.g. with LoadDefaultParameters()).
-byte RestoreParametersFromSD() {
+// Loads the parameters in the current settings file (settingsFile). Returns SETTINGS_FILE_END_MARKER if the file is
+// valid, or 0 if it is missing, too short, has no end marker, or holds a value the device cannot play (e.g. custom
+// train 3, in a file saved on Pulse Pal 3 and loaded on Pulse Pal 2). The whole file is read into a parameter set in
+// op 92's layout, and checked, before anything is loaded: an invalid file changes nothing, and the device keeps its
+// parameters. A valid one is loaded as op 92 loads a set (applyParamBuffer()), at once, also in param sync mode.
+// Continuous loop mode is not in the file, so each channel keeps its own.
+FLASHMEM byte RestoreParametersFromSD() { // microSD speed limits it: run from flash
   if (!settingsFile.isOpen() || (settingsFile.fileSize() < SETTINGS_FILE_N_PARAM_BYTES + 1)) {
     return 0; // The file did not open (e.g. no file of that name), or is too short to hold a program
   }
   settingsFile.rewind();
+  // The set's layout, as in loadChannelParamsFromBuffer() in USBOps.ino: each parameter's array, for output channels 1-4
+  uint8_t set[PARAM_BUFFER_N_BYTES];
+  uint8_t *times = set; // The 8 time arrays, in the order the file holds them for each channel
+  uint8_t *voltages = times + 8 * sizeof(Phase1Duration); // Phase 1, phase 2 and resting voltages
+  uint8_t *isBiphasic = voltages + 3 * sizeof(Phase1Voltage);
+  uint8_t *customTrainID = isBiphasic + sizeof(IsBiphasic);
+  uint8_t *customTrainTarget = customTrainID + sizeof(CustomTrainID);
+  uint8_t *customTrainLoop = customTrainTarget + sizeof(CustomTrainTarget);
+  uint8_t *continuousLoop = customTrainLoop + sizeof(CustomTrainLoop);
+  uint8_t *triggerLinks = continuousLoop + sizeof(ContinuousLoopMode);
+  uint8_t *triggerModes = triggerLinks + sizeof(TriggerAddress);
   for (int chan = 0; chan < 4; chan++) {
-    Phase1Duration[chan] = readLongFromSD();
-    InterPhaseInterval[chan] = readLongFromSD();
-    Phase2Duration[chan] = readLongFromSD();
-    InterPulseInterval[chan] = readLongFromSD();
-    BurstDuration[chan] = readLongFromSD();
-    BurstInterval[chan] = readLongFromSD();
-    PulseTrainDuration[chan] = readLongFromSD();
-    PulseTrainDelay[chan] = readLongFromSD();
-    IsBiphasic[chan] = readByteFromSD();
-    Phase1Voltage[chan] = readShortFromSD();
-    Phase2Voltage[chan] = readShortFromSD();
-    RestingVoltage[chan] = readShortFromSD();
-    CustomTrainID[chan] =  readByteFromSD();
-    CustomTrainTarget[chan] = readByteFromSD();
-    CustomTrainLoop[chan] = readByteFromSD();
-    updateUsesBursts(chan);
+    for (int i = 0; i < 8; i++) {
+      uint32_t cycles = readLongFromSD();
+      memcpy(times + i * sizeof(Phase1Duration) + chan * sizeof(cycles), &cycles, sizeof(cycles));
+    }
+    isBiphasic[chan] = readByteFromSD();
+    for (int i = 0; i < 3; i++) {
+      uint16_t code = readShortFromSD();
+      memcpy(voltages + i * sizeof(Phase1Voltage) + chan * sizeof(code), &code, sizeof(code));
+    }
+    customTrainID[chan] = readByteFromSD();
+    customTrainTarget[chan] = readByteFromSD();
+    customTrainLoop[chan] = readByteFromSD();
+    continuousLoop[chan] = ContinuousLoopMode[chan];
   }
   for (int chan = 0; chan < 2; chan++) {
-    TriggerMode[chan] = readByteFromSD();
-    settingsFile.read(buf4, sizeof(buf4));
-    TriggerAddress[chan][0] = buf4[0];
-    TriggerAddress[chan][1] = buf4[1];
-    TriggerAddress[chan][2] = buf4[2];
-    TriggerAddress[chan][3] = buf4[3];
+    triggerModes[chan] = readByteFromSD();
+    for (int i = 0; i < 4; i++) {
+      triggerLinks[chan * 4 + i] = readByteFromSD();
+    }
   }
-  byte isValidProgram = readByteFromSD();
-  if (!validateOutputParams()) { // Resets out of range values; the caller then loads defaults in any case
-    isValidProgram = 0;
+  if (readByteFromSD() != SETTINGS_FILE_END_MARKER) {
+    return 0;
   }
+  if (!validateParamBuffer(set)) { // It corrects out of range values in the set, which is then not loaded
+    return 0;
+  }
+  applyParamBuffer(set);
   updateParamSyncPending(); // The file may have taken a trigger channel out of param sync mode
-  return isValidProgram;
+  return SETTINGS_FILE_END_MARKER;
 }
 
 void rewindDirectory() {
@@ -238,7 +261,7 @@ bool findListedFile(uint16_t position, bool includeDefault) {
 }
 
 #if (HARDWARE_VERSION == 3)
-  bool formatCard() {
+  FLASHMEM bool formatCard() { // Run from flash: rarely used, and limited by the card
     if (candidateSettingsFile) {
       candidateSettingsFile.close();
     }

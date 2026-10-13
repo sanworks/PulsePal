@@ -32,6 +32,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   requireNonZeroCycles()
 //   paramSyncEnabled()
 //   updateParamSyncPending()
+//   otherCustomTrainBlock()
 //   discardBytes()
 //   discardUntilQuiet()
 //   processUSBCommands()
@@ -41,6 +42,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   applyParamBuffer()
 //   startParamSync()
 //   loadWaitingParamSyncChannels()
+//   applyStoredCustomTrains()
 //   sendCurrentParams()
 //   loadCustomPulseTrain()
 //
@@ -100,13 +102,14 @@ byte validateOutputParams() {
   return allValid;
 }
 
-// The same checks as validateOutputParams(), applied to a parameter set in paramBuffer and correcting it in place,
-// so that op 92 can answer for a set it has not loaded yet. A set in param sync mode is loaded by handler(), which
-// has no way to report a bad value, so it is checked here instead and is known to be safe by the time it is loaded.
-// The walk below matches loadParamsFromBuffer(), so the fields it skips are the ones no check applies to.
-byte validateParamBuffer() {
+// The same checks as validateOutputParams(), applied to a parameter set in op 92's layout (in paramBuffer, or a
+// settings file rearranged by RestoreParametersFromSD()) and correcting it in place, so that op 92 can answer for a
+// set it has not loaded yet. A set in param sync mode is loaded by handler(), which has no way to report a bad value,
+// so it is checked here instead and is known to be safe by the time it is loaded. The walk below matches
+// loadChannelParamsFromBuffer(), so the fields it skips are the ones no check applies to.
+byte validateParamBuffer(uint8_t *buffer) {
   byte allValid = 1;
-  uint8_t *nextByte = paramBuffer;
+  uint8_t *nextByte = buffer;
   uint8_t *phase1Duration = nextByte;     nextByte += sizeof(Phase1Duration);
   nextByte += sizeof(InterPhaseInterval);
   uint8_t *phase2Duration = nextByte;     nextByte += sizeof(Phase2Duration);
@@ -156,16 +159,31 @@ byte requireNonZeroCycles(uint8_t *timeArray, int channel) {
   }
 #endif
 
-// Discards a parameter set waiting in paramBuffer once no trigger channel is left in param sync mode. Everything
-// that sets TriggerMode other than op 92 calls this once the trigger modes are final: ops 73, 74 and 91 after
-// validating, LoadDefaultParameters(), RestoreParametersFromSD() and the joystick menu. Without it, a channel taken
-// out of param sync mode and later put back would load a set sent long before, instead of waiting for a new one.
-// Op 92 clears the flag itself. Pulse Pal 2 has no param sync mode and nothing to discard.
+// Discards a parameter set waiting in paramBuffer once no trigger channel is left in param sync mode, and makes the
+// custom trains loaded for the next param sync edge current at once. Everything that sets TriggerMode other than op 92
+// calls this once the trigger modes are final: ops 73, 74 and 91 after validating, LoadDefaultParameters(),
+// RestoreParametersFromSD() and the joystick menu. Without it, a channel taken out of param sync mode and later put
+// back would load a set sent long before, instead of waiting for a new one. A custom train load is not discarded but
+// applied, as Wave Pal applies its waveform loads: op 95 replaced the train, and the client knows no other.
+// Op 92 clears the flag itself. Pulse Pal 2 has no param sync mode and nothing to discard. Call from loop() only.
 void updateParamSyncPending() {
   #if (HARDWARE_VERSION > 2)
     if (!paramSyncEnabled()) {
       paramSyncPending = false;
+      noInterrupts(); // handler() reads the trains' current blocks when it starts a channel
+      applyStoredCustomTrains();
+      interrupts();
     }
+  #endif
+}
+
+// Train t's memory block that is not its current block (see "Custom train memory" in PulsePal3.ino). On Pulse Pal 2,
+// which has one block per train, the current block.
+byte otherCustomTrainBlock(byte train) {
+  #if (HARDWARE_VERSION > 2)
+    return (currentCustomTrainBlock[train] == train) ? train + N_CUSTOM_PULSE_TRAINS : train;
+  #else
+    return currentCustomTrainBlock[train];
   #endif
 }
 
@@ -427,24 +445,34 @@ void processUSBCommands() {
             PPUSB.writeByte(0); // Unknown file operation, or empty file name
             break;
           }
+          // The settings file the device had, to keep if this op does not make another one current
+          char previousFileName[sizeof(currentSettingsFileNameChar)];
+          strcpy(previousFileName, currentSettingsFileNameChar);
           settingsFile.close();
           currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
-          if (settingsOp == 1) { // Save
-            SaveCurrentProgram2SD();
+          if (settingsOp == 1) { // Save. The saved file becomes the current settings file
+            confirmBit = SaveCurrentProgram2SD();
           } else if (settingsOp == 2) { // Load
             settingsFile.open(currentSettingsFileNameChar, O_READ);
             validProgram = RestoreParametersFromSD();
-            if (validProgram != SETTINGS_FILE_END_MARKER) { // If load failed, load defaults and report error
-              LoadDefaultParameters();
+            if (validProgram != SETTINGS_FILE_END_MARKER) {
+              // No such file, or not a valid one. Nothing was loaded: the device keeps its parameters, and its settings file
               confirmBit = 0;
-            } else {
-              outputRestingVoltages();
+              settingsFile.close();
+              strcpy(currentSettingsFileNameChar, previousFileName);
+              settingsFile.open(currentSettingsFileNameChar, O_READ);
             }
           } else if (settingsOp == 3) { // Delete
-            sd.remove(currentSettingsFileNameChar);
+            confirmBit = sd.remove(currentSettingsFileNameChar); // 0 if there was no such file
+            if (strcasecmp(previousFileName, currentSettingsFileNameChar) != 0) {
+              strcpy(currentSettingsFileNameChar, previousFileName); // Another file was deleted: the current one stays
+            } else {
+              strcpy(currentSettingsFileNameChar, DEFAULT_SETTINGS_FILE_NAME); // The current one was deleted
+            }
+            settingsFile.open(currentSettingsFileNameChar, O_READ);
           }
           settingsFile.rewind();
-          PPUSB.writeByte(confirmBit); // Send confirm byte (0 if a load failed)
+          PPUSB.writeByte(confirmBit); // Send confirm byte (0 if the file could not be saved, loaded or deleted)
         } break;
 
         case OP_PROGRAM_PARAM_ALL_CHANNELS: { // Op 91. Program one parameter on all 4 output channels (or both trigger channels).
@@ -507,7 +535,7 @@ void processUSBCommands() {
             paramSyncPending = false; // A set buffered earlier and never loaded is replaced by this one
           #endif
           PPUSB.readBlock(paramBuffer, PARAM_BUFFER_N_BYTES); // The whole parameter set arrives as one block
-          byte allParamsValid = validateParamBuffer(); // Checked here, because a set loaded by handler() cannot be reported on
+          byte allParamsValid = validateParamBuffer(paramBuffer); // Checked here, because a set loaded by handler() cannot be reported on
           bool waitForSyncEdge = false;
           #if (HARDWARE_VERSION > 2)
             waitForSyncEdge = paramSyncEnabled(); // A trigger channel is in param sync mode: hold the set for its next rising edge
@@ -516,7 +544,7 @@ void processUSBCommands() {
             paramSyncPending = waitForSyncEdge && !PPUSB.timedOut();
           #endif
           if (!waitForSyncEdge) {
-            applyParamBuffer(); // No channel is waiting for a TTL, so program the device now
+            applyParamBuffer(paramBuffer); // No channel is waiting for a TTL, so program the device now
           }
           PPUSB.writeByte(allParamsValid); // Send confirm byte (0 if any parameter was out of range)
         } break;
@@ -548,6 +576,11 @@ void processUSBCommands() {
           setRestingVoltageIfIdle(inByte);
         } break;
         case OP_FORMAT_SD_CARD: { // Op 97. Format microSD card
+          byte key[sizeof(FORMAT_SD_CARD_KEY) - 1];
+          PPUSB.readByteArray(key, sizeof(key));
+          if (memcmp(key, FORMAT_SD_CARD_KEY, sizeof(key)) != 0) {
+            break; // Not a format command, e.g. 213 and 97 in the data of a command that was not read as a whole: ignored
+          }
           #if (HARDWARE_VERSION > 2)
             mountOK = formatCard();
             PPUSB.writeByte(mountOK);
@@ -588,7 +621,7 @@ void processUSBCommands() {
   }
 }
 
-void HandleReadTimeout() {
+FLASHMEM void HandleReadTimeout() { // Waits for a click: run from flash
   byte FlashState = 0;
   write2Screen("COMM. FAILURE!","Click joystick->");
   ClickerButtonState = 1;
@@ -618,17 +651,18 @@ void HandleReadTimeout() {
   write2Screen(CommanderString," Click for menu");
 }
 
-// Copies a complete parameter set from paramBuffer into the parameter arrays (op 92), by loading each output
-// channel in turn and then the trigger modes. The set must already have been through validateParamBuffer().
+// Copies a complete parameter set in op 92's layout (paramBuffer, or a settings file rearranged by
+// RestoreParametersFromSD()) into the parameter arrays, by loading each output channel in turn and then the trigger
+// modes. The set must already have been through validateParamBuffer().
 //
 // This is deliberately separate from the USB read: it touches parameters that handler() also reads, and it is short
 // enough to run inside one timer cycle, which is what lets param sync mode load a set at a trial's onset. Keep it
 // free of anything that waits.
-void loadParamsFromBuffer() {
+void loadParamsFromBuffer(const uint8_t *buffer) {
   for (int x = 0; x < 4; x++) {
-    loadChannelParamsFromBuffer(paramBuffer, x);
+    loadChannelParamsFromBuffer(buffer, x);
   }
-  memcpy(TriggerMode, paramBuffer + PARAM_BUFFER_TRIGGER_MODE_OFFSET, sizeof(TriggerMode));
+  memcpy(TriggerMode, buffer + PARAM_BUFFER_TRIGGER_MODE_OFFSET, sizeof(TriggerMode));
 }
 
 // Copies one output channel's parameters out of a buffer holding an op 92 parameter set. The buffer holds the
@@ -662,15 +696,16 @@ void loadChannelParamsFromBuffer(const uint8_t *buffer, byte channel) {
   TriggerAddress[1][channel] = nextByte[channel + sizeof(TriggerAddress[0])];
 }
 
-// Loads the parameter set in paramBuffer and brings the device into line with it: UsesBursts is recomputed, the new
+// Loads a parameter set in op 92's layout and brings the device into line with it: UsesBursts is recomputed, the new
 // resting voltage is sent to the DAC for idle channels, and a channel whose continuous loop mode was switched off stops. The set must
-// already have been through validateParamBuffer(). Op 92 calls this from loop() when no trigger channel is in param
-// sync mode. A param sync edge takes the other route, through startParamSync().
-void applyParamBuffer() {
+// already have been through validateParamBuffer(). Op 92 calls this from loop() with paramBuffer when no trigger
+// channel is in param sync mode, and RestoreParametersFromSD() with a settings file. A param sync edge takes the other
+// route, through startParamSync().
+void applyParamBuffer(const uint8_t *buffer) {
   for (int i = 0; i < 4; i++) {
     ContinuousLoopModeOriginal[i] = ContinuousLoopMode[i]; // Read before the buffer overwrites it
   }
-  loadParamsFromBuffer();
+  loadParamsFromBuffer(buffer);
   for (int x = 0; x < 4; x++) {
     updateUsesBursts(x);
     setRestingVoltageIfIdle(x);
@@ -713,6 +748,19 @@ void applyParamBuffer() {
       }
     }
   }
+
+  // Makes the custom trains op 95 loaded in param sync mode current: each one's loaded memory block becomes the block
+  // channels play from their next start, and channels playing the old block finish their trains on it. Called by
+  // handler() at a param sync edge, and by updateParamSyncPending() with interrupts off when the last trigger channel
+  // leaves param sync mode. A few instructions, so safe in the timer callback.
+  void applyStoredCustomTrains() {
+    for (int t = 0; t < N_CUSTOM_PULSE_TRAINS; t++) {
+      if (bitRead(customTrainLoadsStored, t)) {
+        currentCustomTrainBlock[t] = otherCustomTrainBlock(t);
+      }
+    }
+    customTrainLoadsStored = 0;
+  }
 #endif
 
 void sendCurrentParams() {
@@ -741,15 +789,56 @@ void sendCurrentParams() {
 
 // Loads a custom pulse train from the USB serial port (ops 75, 76 and 95). trainID is zero-indexed.
 // Each pulse has a 4-byte time and a 2-byte voltage, so the data after the pulse count is nPulses*6 bytes.
+//
+// The train is loaded into its other memory block (see "Custom train memory" in PulsePal3.ino), as a Wave Pal waveform is:
+// - Outside param sync mode, the channels playing the train stop first, and the train is left empty while it loads,
+//   so that a trigger meanwhile plays nothing (an empty train ends at once). Once stored, the loaded block is current.
+//   Writing over a train while a channel played it once left the channel "playing" at rest, ignoring triggers.
+// - In param sync mode, channels go on playing the current block. Once stored, the loaded block waits for the next
+//   param sync edge (customTrainLoadsStored), which makes it current. A channel still playing the other block, from
+//   before the previous edge, stops first. A later load of the same train before the edge replaces this one.
+// Pulse Pal 2 has one block per train and no param sync mode, so its channels playing the train always stop.
+// A train whose transfer is cut short is not stored: outside param sync mode it is left empty, and in param sync mode
+// the current block plays on.
 void loadCustomPulseTrain(byte trainID) {
   uint32_t nPulses = PPUSB.readUint32();
-  if ((trainID >= N_CUSTOM_PULSE_TRAINS) || (nPulses > MAX_CUSTOM_PULSES)) {
+  if ((trainID >= N_CUSTOM_PULSE_TRAINS) || (nPulses == 0) || (nPulses > MAX_CUSTOM_PULSES)) {
     discardBytes((uint64_t)nPulses * 6);
-    PPUSB.writeByte(0); // Unknown custom train, or more pulses than the device can store
+    PPUSB.writeByte(0); // Unknown custom train, an empty train, or more pulses than the device can store
     return;
   }
-  CustomTrainNpulses[trainID] = nPulses;
-  PPUSB.readUint32Array(CustomPulseTimes[trainID], nPulses); // One block read for the times, and one for the voltages
-  PPUSB.readUint16Array(CustomVoltages[trainID], nPulses);
+  byte block = otherCustomTrainBlock(trainID);
+  noInterrupts(); // handler() reads the blocks, and starts channels on them
+  bool paramSync = false;
+  #if (HARDWARE_VERSION > 2)
+    paramSync = paramSyncEnabled(); // Trigger modes change only through ops, and at param sync edges (checked again below)
+    bitClear(customTrainLoadsStored, trainID); // A load stored earlier for this train is in this block: this one replaces it
+  #endif
+  if (paramSync) {
+    stopCustomTrainChannels(trainID, block);
+  } else {
+    stopCustomTrainChannels(trainID, ANY_CUSTOM_TRAIN_BLOCK);
+    CustomTrainNpulses[currentCustomTrainBlock[trainID]] = 0;
+  }
+  CustomTrainNpulses[block] = 0;
+  interrupts();
+  PPUSB.readUint32Array(CustomPulseTimes[block], nPulses); // One block read for the times, and one for the voltages
+  PPUSB.readUint16Array(CustomVoltages[block], nPulses);
+  if (PPUSB.timedOut()) { // The rest of the train never arrived. loop() reports the failure.
+    PPUSB.writeByte(0);
+    return;
+  }
+  noInterrupts();
+  CustomTrainNpulses[block] = nPulses;
+  #if (HARDWARE_VERSION > 2)
+    // A param sync edge during the load can have taken the trigger channels out of param sync mode, with a set from op
+    // 92. The load then applies at once, as one stored before that edge would have when the mode was left.
+    if (paramSync && paramSyncEnabled()) {
+      bitSet(customTrainLoadsStored, trainID); // The next param sync edge makes it current
+    } else {
+      currentCustomTrainBlock[trainID] = block;
+    }
+  #endif
+  interrupts();
   PPUSB.writeByte(1); // Send confirm byte
 }

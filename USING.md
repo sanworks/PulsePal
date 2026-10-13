@@ -39,7 +39,9 @@ what is new.
    every 50 µs, so a trigger pulse must last at least 100 µs to be seen reliably.
 5. **Connecting programs the defaults.** Whatever the device held (a program set with its
    joystick, or by an earlier script) is replaced. To keep a program, save it to a settings
-   file on the device and load it after connecting (see "Run without a computer" below).
+   file on the device and load it after connecting (see "Run without a computer" below). On
+   Pulse Pal they are the device's own defaults, which it also loads at startup: 5 V pulses of
+   0.1 ms, 1 ms apart, for 1 s, on every output channel.
 6. **Closing stops the outputs**, on all three firmwares: `P.close()`, the end of a `with`
    block, or the object being garbage collected in Python; `clear P` or `delete(P)` in MATLAB.
    Keep the object for as long as the outputs should play. The settings stay on the device, so
@@ -141,19 +143,19 @@ biphasic:    |phase 1|ipi|phase 2|-- inter_pulse_interval --|phase 1|ipi|phase 2
 | Python | MATLAB | Meaning | Default |
 |---|---|---|---|
 | `phase1_voltage` | `phase1Voltage` | Voltage of each pulse's first phase | 5 V |
-| `phase1_duration` | `phase1Duration` | Duration of the first phase | 1 ms |
-| `inter_pulse_interval` | `interPulseInterval` | From the **end** of one pulse to the start of the next | 10 ms |
+| `phase1_duration` | `phase1Duration` | Duration of the first phase | 0.1 ms |
+| `inter_pulse_interval` | `interPulseInterval` | From the **end** of one pulse to the start of the next | 1 ms |
 | `pulse_train_duration` | `pulseTrainDuration` | Duration of the train | 1 s |
 | `pulse_train_delay` | `pulseTrainDelay` | From the trigger to the first pulse | 0 |
 | `resting_voltage` | `restingVoltage` | Voltage between pulses, and while the channel is idle | 0 V |
 | `is_biphasic` | `isBiphasic` | `True`: each pulse has a second phase | `False` |
-| `inter_phase_interval` | `interPhaseInterval` | Rest between the two phases (biphasic only) | 1 ms |
-| `phase2_voltage`, `phase2_duration` | `phase2Voltage`, `phase2Duration` | The second phase (biphasic only) | -5 V, 1 ms |
+| `inter_phase_interval` | `interPhaseInterval` | Rest between the two phases (biphasic only) | 0.1 ms |
+| `phase2_voltage`, `phase2_duration` | `phase2Voltage`, `phase2Duration` | The second phase (biphasic only) | -5 V, 0.1 ms |
 | `burst_duration` | `burstDuration` | Pulses play in bursts of this length. 0: no bursts | 0 |
 | `inter_burst_interval` | `interBurstInterval` | Rest between bursts | 0 |
 | `link_trigger_channel1`, `link_trigger_channel2` | `linkTriggerChannel1`, `linkTriggerChannel2` | Whether trigger channel 1 (or 2) starts this output channel | channel 1: `True`; channel 2: `False` |
 | `custom_train_id` | `customTrainID` | 0: the train above. 1-4: a custom train (see below) | 0 |
-| `custom_train_target` | `customTrainTarget` | `"Pulses"`: custom times are pulse onsets. `"Bursts"`: they are burst onsets | `"Pulses"` |
+| `custom_train_target` | `customTrainTarget` | `"Pulses"`: custom times are pulse onsets. `"Bursts"`: they are burst onsets, which needs a `burst_duration` | `"Pulses"` |
 | `custom_train_loop` | `customTrainLoop` | `True`: repeat the custom train until the train duration ends | `False` |
 | `continuous_loop` | `continuousLoop` | `True`: play until stopped, ignoring the train duration | `False` |
 | `trigger_mode` | `triggerMode` | Per trigger channel, see "Trigger modes" | `"Normal"` |
@@ -258,6 +260,11 @@ Make each train end before the next trial's TTL: a channel still playing at the 
 its train on the old parameters, and ignores the start trigger on channel 1, so the new trial's
 train would not play.
 
+Custom trains work the same way: in param sync mode, `send_custom_pulse_train()` and
+`send_custom_waveform()` (MATLAB `sendCustomPulseTrain()`, `sendCustomWaveform()`) store the train
+for the next edge, and channels go on playing the old one until then. Send the next trial's
+trains with its parameters, during the trial before.
+
 **Charge-balanced biphasic pulses.** 200 µs at +3 V, 100 µs gap, 200 µs at -3 V, 100 times a
 second for 2 s:
 
@@ -342,7 +349,8 @@ P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
   is cut short. A biphasic pulse starts only if it can finish before the train ends, and in
   bursts, a pulse starts only if it fits in the burst, so the last pulse may be missing.
 - **Changes reach a playing train at once.** A parameter changed while a train plays changes
-  that train mid-way. Only param sync waits for the next trial.
+  that train mid-way, except its duration: a train's end is set when it starts, so a new
+  `pulse_train_duration` applies from the next train. Only param sync waits for the next trial.
 - **A channel that is playing ignores a new trigger,** soft or TTL in normal mode, and so does
   one waiting out its pulse train delay. Stop it first, or let the train end.
 - **Connecting replaces the device's program** with the defaults, and a program set with the
@@ -353,13 +361,28 @@ P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
 - **Custom trains.** A custom train that does not loop plays all its pulses and ends, whatever
   the train duration; one that loops stops at the train duration. Custom pulse times must be
   multiples of 100 µs: a time in between raises an error rather than being rounded. A train
-  targeting bursts (`custom_train_target` `"Bursts"`) needs a burst duration.
+  needs at least one pulse. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
+  burst duration above 0: set `burst_duration` first, or both in a `batch()` block.
+- **Loading a custom train stops the channels playing it** (outside param sync mode), and their
+  next trigger plays the new train. To change a train between trials without stopping the one
+  playing, use param sync mode (see the recipe above).
+- **A biphasic custom pulse always plays whole.** If its phases last longer than the gap to the
+  next pulse's time, the next pulse starts late, as it ends. Space biphasic custom pulses at
+  least `phase1_duration + inter_phase_interval + phase2_duration` apart to keep their times.
 - **Continuous loop mode is not saved** in settings files, and is not read back by
-  `sync_from_device()`.
+  `sync_from_device()`. It starts nothing either, from a script or from the joystick menu's
+  Continuous item: the next trigger plays the train until it is stopped. (Firmware v21 started
+  the channel.)
+- **A settings file that cannot be loaded changes nothing.** `load_settings_file()` raises an
+  error for a missing or invalid file, and the device keeps its program.
 - **A non-zero resting voltage is output all the time** the channel is idle, from the moment
   it is set.
 - **Unplugging the USB cable during playback** stops it: the device shows "COMM. FAILURE!",
   returns the outputs to their resting voltages, and loads its default parameters.
+- **"COMM. FAILURE!"** means a command reached the device only in part (a cable pulled, a
+  script stopped while it wrote). The device then reads no command, and every call times out,
+  until its joystick is clicked; it then loads its default parameters. Click it, and connect
+  again.
 
 ## Wave Pal
 
@@ -390,6 +413,7 @@ output channel plays one of them: its `current_waveform`, or none.
 | `W.set_fixed_voltage(3, 1.5)` | `W.setFixedVoltage(3, 1.5);` | Holds channels at a voltage |
 | `W.status()` | `W.status()` | Which channels are playing, each channel's waveform, what waits for a param sync edge, and any underruns |
 | `W.export_params()` | `W.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data. Not the waveforms |
+| `W.import_params(params)` | `W.importParams(params);` | Programs the settings `export_params()` returned. Load the waveforms first |
 | `W.set_screen_saver(True, 300)` | `W.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity. Kept on the device, shared with the other firmwares |
 
 ### Recipe: a waveform on each trial's TTL
@@ -491,6 +515,7 @@ ramps.
 | `with S.batch(): ...` | `S.autoSync = false; ... S.syncToDevice();` | Sends several changes in one command |
 | `S.status()` | `S.status()` | Which channels are playing, and their output ranges |
 | `S.export_params()` | `S.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data |
+| `S.import_params(params)` | `S.importParams(params);` | Programs the settings `export_params()` returned, in one command |
 | `S.sync_from_device()` | `S.syncFromDevice();` | Reads the device's settings into the object, e.g. after using the joystick |
 | `S.set_screen_saver(True, 300)` | `S.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity. Kept on the device, shared with the other firmwares |
 

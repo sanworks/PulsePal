@@ -25,13 +25,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Functions in this file:
 //   TC3_Handler() (HW2 only)
+//   timeReached()
 //   mirrorAboutZero()
 //   pulseFitsInBurst()
 //   pulseFitsInTrain()
+//   startCustomPulse()
+//   endCustomTrainPass()
 //   handler()
 //   killChannel()
 //   AbortAllPulseTrains()
 //   updateUsesBursts()
+//   stopCustomTrainChannels()
 
 #if (HARDWARE_VERSION == 2)
   // Interrupt service routine for timer counter TC3, configured in startHardwareTimer(). On Pulse Pal 3, IntervalTimer calls handler() directly.
@@ -40,6 +44,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     handler();
   }
 #endif
+
+// True once SystemTime has reached a time: the time is now, or has passed. handler() schedules each transition at a time,
+// and makes it in the first cycle at or after that time. It used to wait for SystemTime to equal the time, so a time
+// scheduled in the past (a biphasic custom pulse longer than the gap to the next one, a custom burst longer than the
+// gap between burst onsets, a delay shortened during the delay...) was never met: the channel stayed "playing", at a
+// pulse's voltage or at rest, and ignored triggers until it was stopped, or until SystemTime wrapped around 59.6 hours
+// later. The subtraction works across that wrap, for times up to 2^31 cycles (29.8 hours) apart.
+static inline bool timeReached(uint32_t time) {
+  return (int32_t)(SystemTime - time) >= 0;
+}
 
 // Returns the DAC code for the same voltage with the opposite sign. Used for phase 2 of biphasic custom pulses.
 static inline uint16_t mirrorAboutZero(uint16_t dacCode) {
@@ -62,7 +76,7 @@ static inline bool pulseFitsInBurst(byte channel) {
   if (IsBiphasic[channel]) {
     pulseEnd += InterPhaseInterval[channel] + Phase2Duration[channel];
   }
-  return pulseEnd < NextBurstTransitionTime[channel];
+  return (int32_t)(NextBurstTransitionTime[channel] - pulseEnd) > 0; // pulseEnd < NextBurstTransitionTime, across SystemTime's wrap
 }
 
 // True if a pulse starting on an output channel (0-3) now would end by the end of its pulse train. The end of a train
@@ -75,7 +89,59 @@ static inline bool pulseFitsInTrain(byte channel) {
     return true;
   }
   uint32_t pulseEnd = SystemTime + Phase1Duration[channel] + InterPhaseInterval[channel] + Phase2Duration[channel];
-  return pulseEnd <= PulseTrainEndTime[channel];
+  return (int32_t)(PulseTrainEndTime[channel] - pulseEnd) >= 0; // pulseEnd <= PulseTrainEndTime, across SystemTime's wrap
+}
+
+// Starts the next pulse of a custom train whose times are pulse onsets (CustomTrainTarget 0) on an output channel (0-3),
+// from the memory block the channel plays. handler() calls it when the pulse's time has come, or when the pulse before
+// ended after that time. A looping train that has played its last pulse starts again from its first. A channel past the
+// last pulse of its train stops: the train is empty (an empty block holds no times), or its custom train ID changed
+// during the train to a shorter train.
+static inline void startCustomPulse(byte channel, byte block) {
+  if ((CustomTrainLoop[channel] == 1) && (CustomPulseTimeIndex[channel] >= (int)CustomTrainNpulses[block])) {
+    CustomPulseTimeIndex[channel] = 0;
+    PulseTrainTimestamps[channel] = SystemTime;
+  }
+  int pulse = CustomPulseTimeIndex[channel];
+  if (pulse >= (int)CustomTrainNpulses[block]) {
+    killChannel(channel);
+    return;
+  }
+  // A monophasic pulse whose next pulse starts before its phase 1 would end, or as it ends, is a sample of a custom
+  // waveform: it holds until the next pulse's time, with no rest between them. The last pulse has no next pulse time
+  // (the slot after the train is never loaded, and on Pulse Pal 3 not even zeroed at startup), so it lasts
+  // Phase1Duration, and a looping train starts again when it ends (see endCustomTrainPass()). A biphasic pulse always
+  // plays whole: phase 1, the inter-phase interval and phase 2. If the next pulse's time passes meanwhile, the next pulse
+  // starts as this one ends.
+  if ((IsBiphasic[channel] == 0) && (pulse + 1 < (int)CustomTrainNpulses[block]) &&
+      ((CustomPulseTimes[block][pulse+1] - CustomPulseTimes[block][pulse]) <= Phase1Duration[channel])) {
+    PulseStatus[channel] = PULSE_IDLE;
+    NextPulseTransitionTime[channel] = PulseTrainTimestamps[channel] + CustomPulseTimes[block][pulse+1];
+  } else {
+    PulseStatus[channel] = PULSE_PHASE1;
+    NextPulseTransitionTime[channel] = SystemTime + Phase1Duration[channel];
+  }
+  setDAC(channel, CustomVoltages[block][pulse]);
+  digitalWriteDirect(OutputLEDLines[channel], HIGH);
+  if (IsBiphasic[channel] == 0) {
+    CustomPulseTimeIndex[channel] = pulse + 1; // A biphasic pulse moves on at its phase 2, which plays this voltage mirrored
+  }
+}
+
+// Called by handler() when the last pulse of a custom train whose times are pulse onsets has ended, on an output
+// channel (0-3). A train that does not loop ends. A looping train starts again at once, with its first pulse, if that
+// pulse fits before the end of the train (see pulseFitsInTrain()); if not, the channel rests until the train ends.
+static inline void endCustomTrainPass(byte channel, byte block) {
+  if (CustomTrainLoop[channel] == 0) {
+    killChannel(channel);
+  } else if (pulseFitsInTrain(channel)) {
+    startCustomPulse(channel, block);
+  } else {
+    PulseStatus[channel] = PULSE_IDLE;
+    NextPulseTransitionTime[channel] = SystemTime; // The PULSE_IDLE case finds that the pulse still does not fit
+    digitalWriteDirect(OutputLEDLines[channel], LOW);
+    setDAC(channel, RestingVoltage[channel]);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -89,18 +155,19 @@ static inline bool pulseFitsInTrain(byte channel) {
 //     outputs change DAC_LATCH_US after the timer tick, however many channels changed (see dacWriteTimed()).
 //  2. Soft triggers scheduled from loop() (op 77 or joystick menu) become active.
 //  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent). On Pulse Pal 3, a rising
-//     edge on a trigger channel in param sync mode takes the parameter set op 92 left in paramBuffer. Output
-//     channels that are idle take it at the edge; channels playing a pulse train finish that train on the
-//     parameters it started with, and take the new ones in the cycle it ends. Both happen before step 4, so an edge
-//     on the other trigger channel in the same cycle starts its trains with the new parameters, and a channel
-//     triggered after its train ended plays the whole of the next train with them. A param sync channel starts and
-//     stops nothing itself, even when the set it loads moves it to another trigger mode.
+//     edge on a trigger channel in param sync mode takes the parameter set op 92 left in paramBuffer, and makes the
+//     custom trains op 95 loaded since the last edge current. Output channels that are idle take the parameters at
+//     the edge; channels playing a pulse train finish that train on the parameters, and the custom train memory
+//     block, it started with, and take the new ones in the cycle it ends. Both happen before step 4, so an edge on
+//     the other trigger channel in the same cycle starts its trains with the new parameters and custom trains, and a
+//     channel triggered after its train ended plays the whole of the next train with them. A param sync channel
+//     starts and stops nothing itself, even when the set it loads moves it to another trigger mode.
 //  4. For each output channel that is playing: stop it if a linked trigger channel in toggle mode went low to high,
 //     or a linked trigger channel in gated mode went high to low (unless the other trigger channel is also linked,
 //     gated and still high). For each channel that is not playing: start it if a linked trigger went low to high,
 //     or a soft trigger arrived. Triggers in normal mode, and soft triggers, are ignored while a channel is playing.
-//  5. For each output channel, advance its state machine. Transitions occur when SystemTime equals
-//     NextPulseTransitionTime or NextBurstTransitionTime.
+//  5. For each output channel, advance its state machine. Transitions occur when SystemTime reaches
+//     NextPulseTransitionTime or NextBurstTransitionTime (see timeReached()).
 //       PreStimulusStatus = 1   Waiting for PulseTrainDelay to elapse, then StimulusStatus = 1
 //       StimulusStatus = 1      Playing the pulse train
 //         BurstStatus           1 during a burst, 0 between bursts (always 1 if UsesBursts is false)
@@ -114,7 +181,10 @@ static inline bool pulseFitsInTrain(byte channel) {
 // Custom trains (CustomTrainID > 0) use CustomPulseTimes (relative to PulseTrainTimestamps) and CustomVoltages
 // in place of the parametric pulse timing and phase 1 voltage. CustomPulseTimeIndex tracks the current pulse.
 // If CustomTrainTarget is 0 each time starts a pulse; if 1 each time starts a burst of parametric pulses.
-// Phase 2 of a biphasic custom pulse is the phase 1 voltage mirrored about 0V.
+// Phase 2 of a biphasic custom pulse is the phase 1 voltage mirrored about 0V. A channel reads its custom train from
+// one memory block (customTrainPlayBlock), the train's current block when the channel started, or when its custom
+// train ID changed during the train: a train loaded meanwhile plays from the channel's next start. An empty train
+// (CustomTrainNpulses 0) ends at once.
 //
 // StimulatingState is 0 when no channel is playing, 2 on the cycle playback starts from idle, and 1 otherwise.
 // loop() only runs the joystick menu while StimulatingState is 0.
@@ -169,8 +239,9 @@ void handler(void) {
     }
 
     #if (HARDWARE_VERSION > 2)
-      // Take the parameter set that op 92 left waiting, if a trigger channel in param sync mode just went high
-      if (paramSyncPending) {
+      // Take the parameter set that op 92 left waiting, and the custom trains op 95 loaded, if a trigger channel in param
+      // sync mode just went high
+      if (paramSyncPending || customTrainLoadsStored) {
         byte paramSyncEdges = 0; // One bit per trigger channel in param sync mode that went high this cycle
         for (int y = 0; y < 2; y++) {
           if ((TriggerMode[y] == TRIGGER_MODE_PARAM_SYNC) && (LineTriggerEvent[y] == TRIGGER_EVENT_LOW_TO_HIGH)) {
@@ -178,8 +249,11 @@ void handler(void) {
           }
         }
         if (paramSyncEdges) {
-          paramSyncPending = false;
-          startParamSync();
+          applyStoredCustomTrains();
+          if (paramSyncPending) {
+            paramSyncPending = false;
+            startParamSync();
+          }
           // The set can move a trigger channel out of param sync mode. Its edge was a param sync edge, so it must
           // not also start or toggle trains below under the new mode.
           for (int y = 0; y < 2; y++) {
@@ -251,39 +325,54 @@ void handler(void) {
     
     // Check clock and adjust line levels for new time as per programming
     for (int x = 0; x < 4; x++) {
-      byte thisTrainID = CustomTrainID[x];
-      byte thisTrainIDIndex = thisTrainID-1;
+      // The custom train memory block this channel plays (see "Custom train memory" in PulsePal3.ino). A channel takes
+      // its train's current block when it starts, and again if its custom train ID changes during the train.
+      if ((PreStimulusStatus[x] || StimulusStatus[x]) && (CustomTrainID[x] != customTrainPlayID[x])) {
+        customTrainPlayID[x] = CustomTrainID[x];
+        if (CustomTrainID[x] > 0) {
+          customTrainPlayBlock[x] = currentCustomTrainBlock[CustomTrainID[x]-1];
+        }
+      }
+      byte thisBlock = customTrainPlayBlock[x];
       if (PreStimulusStatus[x] == 1) {
           if (StimulatingState != 2) {
            StimulatingState = 1;
           }
-        if (SystemTime == (PrePulseTrainTimestamps[x] + PulseTrainDelay[x])) {
-          PreStimulusStatus[x] = 0;
-          StimulusStatus[x] = 1;
-          PulseStatus[x] = PULSE_IDLE;
-          PulseTrainTimestamps[x] = SystemTime;
-          PulseTrainEndTime[x] = SystemTime + PulseTrainDuration[x];
-          if (CustomTrainTarget[x] == 1)  {
-            if (CustomTrainID[x] > 0) {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0];
+        if (timeReached(PrePulseTrainTimestamps[x] + PulseTrainDelay[x])) {
+          if ((CustomTrainID[x] > 0) && (CustomTrainNpulses[thisBlock] == 0)) {
+            // An empty custom train plays nothing. Its block holds no times: on Pulse Pal 3 the memory is not even zeroed
+            // at startup, and a looping train once held a voltage left there for the whole train.
+            killChannel(x);
+          } else {
+            PreStimulusStatus[x] = 0;
+            StimulusStatus[x] = 1;
+            PulseStatus[x] = PULSE_IDLE;
+            PulseTrainTimestamps[x] = SystemTime;
+            PulseTrainEndTime[x] = SystemTime + PulseTrainDuration[x];
+            if (CustomTrainTarget[x] == 1)  {
+              if (CustomTrainID[x] > 0) {
+                NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[thisBlock][0];
+              } else {
+                // Legacy behavior: burst target with no custom train selected takes its first burst time from custom train 2
+                byte legacyBlock = currentCustomTrainBlock[1];
+                NextBurstTransitionTime[x] = SystemTime + ((CustomTrainNpulses[legacyBlock] > 0) ? CustomPulseTimes[legacyBlock][0] : 0);
+              }
+              BurstStatus[x] = 0;
             } else {
-              NextBurstTransitionTime[x] = SystemTime + CustomPulseTimes[1][0]; // Legacy behavior: burst target with no custom train selected
+              NextBurstTransitionTime[x] = SystemTime+BurstDuration[x];
             }
-            BurstStatus[x] = 0;
-          } else {
-            NextBurstTransitionTime[x] = SystemTime+BurstDuration[x];
-          }
-          if (CustomTrainID[x] == 0) {
-            NextPulseTransitionTime[x] = SystemTime;
-            // The PULSE_IDLE case below starts the first pulse in this cycle, unless its phase 1 does not fit in the first
-            // burst: a monophasic pulse then still shows here, cut short at the end of the burst, as it is at the start of
-            // later bursts. A biphasic pulse must play whole, so only the PULSE_IDLE case starts it.
-            if (IsBiphasic[x] == 0) {
-              setDAC(x, Phase1Voltage[x]);
+            if (CustomTrainID[x] == 0) {
+              NextPulseTransitionTime[x] = SystemTime;
+              // The PULSE_IDLE case below starts the first pulse in this cycle, unless its phase 1 does not fit in the first
+              // burst: a monophasic pulse then still shows here, cut short at the end of the burst, as it is at the start of
+              // later bursts. A biphasic pulse must play whole, so only the PULSE_IDLE case starts it.
+              if (IsBiphasic[x] == 0) {
+                setDAC(x, Phase1Voltage[x]);
+              }
+            } else {
+              NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisBlock][0];
+              CustomPulseTimeIndex[x] = 0;
             }
-          } else {
-            NextPulseTransitionTime[x] = SystemTime + CustomPulseTimes[thisTrainIDIndex][0]; 
-            CustomPulseTimeIndex[x] = 0;
           }
         }
       }
@@ -296,14 +385,14 @@ void handler(void) {
            case PULSE_IDLE: { // if this is the inter-pulse interval
             // determine if the next pulse should start now
             if ((CustomTrainID[x] == 0) || ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1))) {
-              if (SystemTime == NextPulseTransitionTime[x]) {
+              if (timeReached(NextPulseTransitionTime[x])) {
                 NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
                     // so that it doesn't start a pulse it can't finish due to burst end, or a biphasic pulse it can't finish due to train end
                     if (!((UsesBursts[x] == 1) && !pulseFitsInBurst(x)) && pulseFitsInTrain(x)){
                       PulseStatus[x] = PULSE_PHASE1;
                       digitalWriteDirect(OutputLEDLines[x], HIGH);
                       if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                        setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
+                        setDAC(x, CustomVoltages[thisBlock][CustomPulseTimeIndex[x]]);
                       } else {
                         setDAC(x, Phase1Voltage[x]);
                       }
@@ -312,88 +401,36 @@ void handler(void) {
               } else {
                // A biphasic pulse that cannot finish before the train ends is not started. Nothing else happens on this
                // channel until the train ends.
-               if ((SystemTime == NextPulseTransitionTime[x]) && pulseFitsInTrain(x)) {
-                     int SkipNextInterval = 0;
-                     if ((CustomTrainLoop[x] == 1) && (CustomPulseTimeIndex[x] == CustomTrainNpulses[thisTrainIDIndex])) {
-                            CustomPulseTimeIndex[x] = 0;
-                            PulseTrainTimestamps[x] = SystemTime;
-                     }
-                     if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]) {
-                       // The last pulse has no next pulse time: the slot after the train is never loaded, and on Pulse Pal 3
-                       // DMAMEM is not even zeroed at startup. Reading it made the end of the train depend on leftover memory,
-                       // and could freeze the output until the train ended. So the last pulse always lasts Phase1Duration,
-                       // and a looping train then restarts in the PULSE_PHASE1 case below.
-                       if ((CustomPulseTimeIndex[x] + 1 == CustomTrainNpulses[thisTrainIDIndex]) ||
-                           ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x])) {
-                         NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-                       } else {
-                         NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1];  
-                         SkipNextInterval = 1;
-                       }
-                     }
-                     if (SkipNextInterval == 0) {
-                        PulseStatus[x] = PULSE_PHASE1;
-                     }
-                     setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
-                     digitalWriteDirect(OutputLEDLines[x], HIGH);
-                     if (IsBiphasic[x] == 0) {
-                        CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                     }
-                     if (CustomPulseTimeIndex[x] > (CustomTrainNpulses[thisTrainIDIndex])){
-                       CustomPulseTimeIndex[x] = 0;
-                       if (CustomTrainLoop[x] == 0) {
-                         killChannel(x);
-                       }
-                     }
-                  }
-              } 
+               if (timeReached(NextPulseTransitionTime[x]) && pulseFitsInTrain(x)) {
+                 startCustomPulse(x, thisBlock);
+               }
+              }
             } break;
-            
+
             case PULSE_PHASE1: { // if this is the first phase of the pulse
              // determine if this phase should end now
-             if (SystemTime == NextPulseTransitionTime[x]) {
+             if (timeReached(NextPulseTransitionTime[x])) {
                 if (IsBiphasic[x] == 0) {
                   if (CustomTrainID[x] == 0) {
                       NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
                       PulseStatus[x] = PULSE_IDLE;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
                       setDAC(x, RestingVoltage[x]);
-                  } else {
-                    if (CustomTrainTarget[x] == 0) {
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
+                  } else if (CustomTrainTarget[x] == 0) {
+                    if (CustomPulseTimeIndex[x] >= (int)CustomTrainNpulses[thisBlock]) {
+                      endCustomTrainPass(x, thisBlock); // The last pulse has ended. A looping train plays pulse 0 now
                     } else {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
-                    }
-                    if (CustomPulseTimeIndex[x] == CustomTrainNpulses[thisTrainIDIndex]) {
-                      if (CustomTrainLoop[x] == 1) {
-                              CustomPulseTimeIndex[x] = 0;
-                              PulseTrainTimestamps[x] = SystemTime;
-                              setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
-                              // Pulse 0 of the next loop plays now. Schedule the next transition as the PULSE_IDLE case does:
-                              // the end of this pulse's phase 1, or pulse 1's own time if pulse 1 starts before phase 1 would
-                              // end. Pulse 1 must not be scheduled at Phase1Duration in that case: later pulses are scheduled
-                              // from their own times, so when Phase1Duration is longer than the gap between pulses (e.g. a
-                              // waveform whose sample period is shorter than Phase1Duration), pulse 2's time would already have
-                              // passed, and the output would freeze until the train ended.
-                              if ((CustomTrainNpulses[thisTrainIDIndex] == 1) || // A one-pulse train has no second time to compare (see above)
-                                  ((CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1] - CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]]) > Phase1Duration[x])) {
-                                PulseStatus[x] = PULSE_PHASE1;
-                                NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + Phase1Duration[x];
-                              } else {
-                                PulseStatus[x] = PULSE_IDLE;
-                                NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]+1];
-                              }
-                              CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-                      } else {
-                        killChannel(x);
-                      }
-                    } else {
+                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisBlock][CustomPulseTimeIndex[x]];
                       PulseStatus[x] = PULSE_IDLE;
                       digitalWriteDirect(OutputLEDLines[x], LOW);
                       setDAC(x, RestingVoltage[x]);
                     }
+                  } else {
+                    NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
+                    PulseStatus[x] = PULSE_IDLE;
+                    digitalWriteDirect(OutputLEDLines[x], LOW);
+                    setDAC(x, RestingVoltage[x]);
                   }
-     
                 } else {
                   if (InterPhaseInterval[x] == 0) {
                     NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
@@ -401,12 +438,12 @@ void handler(void) {
                     if (CustomTrainID[x] == 0) {
                       setDAC(x, Phase2Voltage[x]);
                     } else {
-                      
-                       setDAC(x, mirrorAboutZero(CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]));
+
+                       setDAC(x, mirrorAboutZero(CustomVoltages[thisBlock][CustomPulseTimeIndex[x]]));
                        if (CustomTrainTarget[x] == 0) {
                            CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
                        }
-                    } 
+                    }
                   } else {
                     NextPulseTransitionTime[x] = SystemTime + InterPhaseInterval[x];
                     PulseStatus[x] = PULSE_INTER_PHASE;
@@ -416,13 +453,13 @@ void handler(void) {
               }
             } break;
             case PULSE_INTER_PHASE: {
-               if (SystemTime == NextPulseTransitionTime[x]) {
+               if (timeReached(NextPulseTransitionTime[x])) {
                  NextPulseTransitionTime[x] = SystemTime + Phase2Duration[x];
                  PulseStatus[x] = PULSE_PHASE2;
                  if (CustomTrainID[x] == 0) {
-                   setDAC(x, Phase2Voltage[x]);  
+                   setDAC(x, Phase2Voltage[x]);
                  } else {
-                   setDAC(x, mirrorAboutZero(CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]));
+                   setDAC(x, mirrorAboutZero(CustomVoltages[thisBlock][CustomPulseTimeIndex[x]]));
                    if (CustomTrainTarget[x] == 0) {
                        CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
                    }
@@ -430,19 +467,24 @@ void handler(void) {
                }
             } break;
             case PULSE_PHASE2: {
-              if (SystemTime == NextPulseTransitionTime[x]) {
-                  if (CustomTrainID[x] == 0) {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
+              if (timeReached(NextPulseTransitionTime[x])) {
+                if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {
+                  // A biphasic custom pulse has ended. The next one starts at its own time, or now if that time passed
+                  // while this pulse played, with no rest between them.
+                  if (CustomPulseTimeIndex[x] >= (int)CustomTrainNpulses[thisBlock]) {
+                    endCustomTrainPass(x, thisBlock); // The last pulse has ended. A looping train plays pulse 0 now
                   } else {
-                    if (CustomTrainTarget[x] == 0) {
-                      NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
-                      if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
-                          killChannel(x);
-                     }
+                    NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisBlock][CustomPulseTimeIndex[x]];
+                    if (timeReached(NextPulseTransitionTime[x]) && pulseFitsInTrain(x)) {
+                      startCustomPulse(x, thisBlock);
                     } else {
-                      NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
+                      PulseStatus[x] = PULSE_IDLE;
+                      digitalWriteDirect(OutputLEDLines[x], LOW);
+                      setDAC(x, RestingVoltage[x]);
                     }
                   }
+                } else {
+                 NextPulseTransitionTime[x] = SystemTime + InterPulseInterval[x];
                  // With no inter-pulse interval, the next pulse starts now, if it can play whole (as in the PULSE_IDLE case).
                  // If not, the channel rests until the next burst, or the end of the train.
                  bool startNextPulse = (CustomTrainID[x] == 0) && (InterPulseInterval[x] == 0) &&
@@ -456,24 +498,26 @@ void handler(void) {
                    NextPulseTransitionTime[x] = (NextPulseTransitionTime[x] - InterPulseInterval[x]) + (Phase1Duration[x]);
                    setDAC(x, Phase1Voltage[x]);
                  }
+                }
                }
             } break;
-            
+
           }
         }
           // Determine if burst status should go to 0 now
        if (UsesBursts[x] == true) {
-        if (SystemTime == NextBurstTransitionTime[x]) {
+        if (timeReached(NextBurstTransitionTime[x])) {
           if (BurstStatus[x] == 1) {
             if (CustomTrainID[x] == 0) {
                      NextPulseTransitionTime[x] = SystemTime + BurstInterval[x];
-                     NextBurstTransitionTime[x] = SystemTime + BurstInterval[x];              
+                     NextBurstTransitionTime[x] = SystemTime + BurstInterval[x];
             } else if (CustomTrainTarget[x] == 1) {
               CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
-              if (CustomPulseTimeIndex[x] == (CustomTrainNpulses[thisTrainIDIndex])){
+              if (CustomPulseTimeIndex[x] >= (int)CustomTrainNpulses[thisBlock]){
                   killChannel(x);
               }
-              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisTrainIDIndex][CustomPulseTimeIndex[x]];
+              // The next burst starts at its own time, or at once if that time passed during this burst
+              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisBlock][CustomPulseTimeIndex[x]];
               NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
             }
               BurstStatus[x] = 0;
@@ -485,8 +529,8 @@ void handler(void) {
             if ((IsBiphasic[x] == 0) || (pulseFitsInBurst(x) && pulseFitsInTrain(x))) {
               PulseStatus[x] = PULSE_PHASE1;
               if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                if (CustomPulseTimeIndex[x] < CustomTrainNpulses[thisTrainIDIndex]){
-                    setDAC(x, CustomVoltages[thisTrainIDIndex][CustomPulseTimeIndex[x]]);
+                if (CustomPulseTimeIndex[x] < (int)CustomTrainNpulses[thisBlock]){
+                    setDAC(x, CustomVoltages[thisBlock][CustomPulseTimeIndex[x]]);
                 }
               } else {
                    setDAC(x, Phase1Voltage[x]);
@@ -497,9 +541,9 @@ void handler(void) {
             BurstStatus[x] = 1;
          }
         }
-       } 
+       }
         // Determine if Stimulus Status should go to 0 now
-        if ((SystemTime == PulseTrainEndTime[x]) && (StimulusStatus[x] == 1)) {
+        if (timeReached(PulseTrainEndTime[x]) && (StimulusStatus[x] == 1)) {
           if (((CustomTrainID[x] > 0) && (CustomTrainLoop[x] == 1)) || (CustomTrainID[x] == 0)) {
             if (ContinuousLoopMode[x] == false) {
                 killChannel(x);
@@ -520,6 +564,7 @@ void killChannel(byte outputChannel) {
   SoftTriggerScheduled[outputChannel] = 0;
   SoftTriggered[outputChannel] = 0;
   CustomPulseTimeIndex[outputChannel] = 0;
+  customTrainPlayID[outputChannel] = 0; // The channel takes its custom train's current memory block when it starts again
   PreStimulusStatus[outputChannel] = 0;
   StimulusStatus[outputChannel] = 0;
   PulseStatus[outputChannel] = PULSE_IDLE;
@@ -545,4 +590,17 @@ void updateUsesBursts(byte channel) {
   if ((BurstDuration[channel] == 0) || (BurstInterval[channel] == 0)) {UsesBursts[channel] = false;} else {UsesBursts[channel] = true;}
   if (CustomTrainTarget[channel] == 1) {UsesBursts[channel] = true;}
   if ((CustomTrainID[channel] > 0) && (CustomTrainTarget[channel] == 0)) {UsesBursts[channel] = false;}
+}
+
+// Stops the output channels that are playing a custom train (0-based), or waiting out their pulse train delay to play
+// it: those playing it from a memory block, or from either of its blocks if block is ANY_CUSTOM_TRAIN_BLOCK. Used by
+// loadCustomPulseTrain() before a block is loaded. Call from loop() with interrupts off, so that handler() cannot start
+// a channel on the block between the test and the stop.
+void stopCustomTrainChannels(byte train, byte block) {
+  for (int x = 0; x < 4; x++) {
+    if ((StimulusStatus[x] || PreStimulusStatus[x]) && (customTrainPlayID[x] == train + 1) &&
+        ((block == ANY_CUSTOM_TRAIN_BLOCK) || (customTrainPlayBlock[x] == block))) {
+      killChannel(x);
+    }
+  }
 }

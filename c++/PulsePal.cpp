@@ -283,7 +283,8 @@ bool PulsePal::initialize(std::string portString)
                                << ", use its Python or MATLAB class.";
             reportError(otherFirmwareError.str());
         } else {
-            reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal.");
+            reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal. "
+                        "If its screen shows COMM. FAILURE!, click its joystick and try again.");
         }
         serial->close();
         return false;
@@ -477,7 +478,12 @@ bool PulsePal::setInterPulseInterval(uint8_t channel, float timeInSeconds)
 
 bool PulsePal::setBurstDuration(uint8_t channel, float timeInSeconds)
 {
-    if (!setOutputParam(channel, PARAM_BURST_DURATION, timeInSeconds, "setBurstDuration()")) {
+    const char* context = "setBurstDuration()";
+    if ((channel >= 1) && (channel <= 4) && !checkCustomBursts(channel, currentOutputParams[channel].customTrainTarget,
+                                                               timeInSeconds, context)) {
+        return false;
+    }
+    if (!setOutputParam(channel, PARAM_BURST_DURATION, timeInSeconds, context)) {
         return false;
     }
     currentOutputParams[channel].burstDuration = timeInSeconds;
@@ -540,7 +546,12 @@ bool PulsePal::setCustomTrainID(uint8_t channel, uint8_t ID)
 
 bool PulsePal::setCustomTrainTarget(uint8_t channel, uint8_t target)
 {
-    if (!setOutputParam(channel, PARAM_CUSTOM_TRAIN_TARGET, target, "setCustomTrainTarget()")) {
+    const char* context = "setCustomTrainTarget()";
+    if ((channel >= 1) && (channel <= 4) && !checkCustomBursts(channel, target,
+                                                               currentOutputParams[channel].burstDuration, context)) {
+        return false;
+    }
+    if (!setOutputParam(channel, PARAM_CUSTOM_TRAIN_TARGET, target, context)) {
         return false;
     }
     currentOutputParams[channel].customTrainTarget = target;
@@ -783,11 +794,8 @@ bool PulsePal::syncAllParams()
                 return false;
             }
         }
-        if ((currentOutputParams[channel].customTrainTarget == 1) && (timeToCycles(currentOutputParams[channel].burstDuration) == 0)) {
-            std::ostringstream error;
-            error << context << ": output channel " << channel << " has customTrainTarget = 1, so its custom train "
-                  << "times are burst onsets. Its burstDuration must be above 0.";
-            reportError(error.str());
+        if (!checkCustomBursts(channel, currentOutputParams[channel].customTrainTarget,
+                               currentOutputParams[channel].burstDuration, context)) {
             return false;
         }
     }
@@ -888,6 +896,21 @@ bool PulsePal::program(uint8_t channel, uint8_t paramCode, uint32_t paramValue, 
 }
 
 // Checks that a parameter value is in range for the connected device. channel is only used in the error message.
+// A custom train targeting bursts (customTrainTarget = 1) needs a burst duration: its times are burst onsets, and a
+// burst of no duration plays one 50 us cycle of a pulse at each. Checked whenever either parameter is sent, against the
+// other as the device holds it, as in the MATLAB and Python classes.
+bool PulsePal::checkCustomBursts(int channel, int customTrainTarget, float burstDuration, const char* context)
+{
+    if ((customTrainTarget == 1) && (timeToCycles(burstDuration) == 0)) {
+        std::ostringstream error;
+        error << context << ": output channel " << channel << " has customTrainTarget = 1, so its custom train "
+              << "times are burst onsets. Its burstDuration must be above 0: set it first.";
+        reportError(error.str());
+        return false;
+    }
+    return true;
+}
+
 bool PulsePal::checkParam(uint8_t paramCode, float value, int channel, const char* context)
 {
     std::ostringstream error;

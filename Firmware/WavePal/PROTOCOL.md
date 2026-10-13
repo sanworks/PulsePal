@@ -222,8 +222,9 @@ channels the other edge starts play the new waveforms.
 
 **Leaving param sync mode.** When no trigger channel is left in the mode (op 84, or the default
 settings after a comm failure), what is stored becomes current at once, as at an edge. Nothing is
-left stored that could apply long after it was sent. This differs from Pulse Pal and Synth Pal,
-which discard a stored set then: here the clients' record of the waveforms they loaded stays true.
+left stored that could apply long after it was sent. Pulse Pal does the same with its stored
+custom trains; it and Synth Pal discard a stored parameter set then. Here the clients' record of
+the waveforms they loaded stays true.
 
 ### Timing
 

@@ -97,7 +97,8 @@ public:
     bool setTrigger1Link(uint8_t channel, uint8_t link_state); // 1: trigger channel 1 starts this output channel
     bool setTrigger2Link(uint8_t channel, uint8_t link_state);
     bool setCustomTrainID(uint8_t channel, uint8_t ID); // ID = 0: no custom train. ID = 1-2 (Pulse Pal 2) or 1-4 (Pulse Pal 3): that custom train
-    bool setCustomTrainTarget(uint8_t channel, uint8_t target); // target = 0: Custom times define pulses Target = 1: They define bursts
+    bool setCustomTrainTarget(uint8_t channel, uint8_t target); // target = 0: Custom times define pulses Target = 1: They define bursts,
+                                                                // which need a burst duration above 0: set it first
     bool setCustomTrainLoop(uint8_t channel, uint8_t loop_state); // loop_state = 0: No loop 1: loop
 
     // Program all parameters from object fields. Sends currentOutputParams and currentInputParams to the device in a
@@ -105,16 +106,22 @@ public:
     //
     // On Pulse Pal 3, while either trigger channel is in param sync mode (trigger mode 3), the device stores the
     // parameters instead of applying them, and applies them at the next rising edge on that trigger channel. This is
-    // how the next trial's parameters can be sent during the current trial. Only syncAllParams() is held back this
-    // way: the single-parameter methods above and setTriggerMode() take effect at once, so use setTriggerMode() to
-    // leave param sync mode. See "Param sync mode" in /Firmware/PROTOCOL.md.
+    // how the next trial's parameters can be sent during the current trial. Only syncAllParams() and
+    // sendCustomPulseTrain() are held back this way: the single-parameter methods above and setTriggerMode() take effect
+    // at once, so use setTriggerMode() to leave param sync mode. See "Param sync mode" in /Firmware/PROTOCOL.md.
     bool syncAllParams();
 
     // Upload a custom pulse train. ID is 1-2 on Pulse Pal 2, or 1-4 on Pulse Pal 3. customPulseTimes are pulse onset
     // times in seconds from the start of the train: increasing, each a multiple of 100 us (two timer cycles, the
     // shortest pulse a trigger channel detects reliably), up to 9999.9999 s. customVoltages are in volts, -10 to 10.
-    // nPulses is at most 5000 on Pulse Pal 2, or 10000 on Pulse Pal 3. Set an output channel's custom train ID to play
-    // the train there.
+    // nPulses is 1 to 5000 on Pulse Pal 2, or 1 to 10000 on Pulse Pal 3. Set an output channel's custom train ID to play
+    // the train there. A biphasic pulse always plays whole: if it lasts longer than the gap to the next pulse, the next
+    // pulse starts as it ends, late.
+    // Loading a train stops the output channels playing it, and their next trigger plays the new train. On Pulse Pal 3,
+    // while a trigger channel is in param sync mode, the device stores the train instead, as it stores syncAllParams():
+    // channels go on playing the old train, and the next rising edge on the param sync channel makes the new one
+    // current. A channel playing the old train at that edge finishes it. Leaving param sync mode makes a stored train
+    // current at once.
     bool sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float customPulseTimes[], const float customVoltages[]);
 
     // Operations and settings
@@ -199,6 +206,7 @@ private:
     bool setOutputParam(uint8_t channel, uint8_t paramCode, float value, const char* context);
     bool program(uint8_t channel, uint8_t paramCode, uint32_t paramValue, const char* context);
     bool checkParam(uint8_t paramCode, float value, int channel, const char* context);
+    bool checkCustomBursts(int channel, int customTrainTarget, float burstDuration, const char* context);
     uint32_t encodeParam(uint8_t paramCode, float value);
     uint32_t timeToCycles(float timeInSeconds);
     uint16_t voltageToInt16(float voltage);

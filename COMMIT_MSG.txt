@@ -1,0 +1,3 @@
+-Firmware: Fixed custom trains that froze an output or hung a channel: transitions fire once their time is reached, biphasic custom pulses play whole, empty trains refused; custom trains double-buffered on Pulse Pal 3 for param sync; a failed settings file load keeps the parameters; op 97 needs a key
+-Python, MATLAB: Defaults match the firmware's; stricter custom train checks; clearer errors; Wave/Synth import_params; faster custom train upload (Python)
+-C++, MATLAB Legacy, Tests, Docs: Updated to match

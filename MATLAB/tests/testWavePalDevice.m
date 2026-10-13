@@ -36,7 +36,7 @@ tests = {@testConnectionAndDefaults, @testWaveformsPlayExactly, @testLoopDuratio
     @testSamplingRateResendsLoopDurations, @testHalfwayValuesRoundAsInPython, @testTriggerModes, @testOneWaveformOnSeveralChannels, ...
     @testCurrentWaveformChangesAtTheNextStart, @testParamSyncWaitsForAnEdge, ...
     @testOutputRangeChangeReloadsWaveforms, @testEveryOutputRangePlays, @testFixedVoltageAndStop, ...
-    @testScreenSaverAndExportParams, @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
+    @testScreenSaverAndExportParams, @testImportParams, @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
 rng(1);
 W = WavePalDevice(portString);
 nFailed = 0;
@@ -301,6 +301,41 @@ assert(isequal(fieldnames(params)', {'samplingRate', 'outputRange', 'currentWave
 assert(isequal(params.currentWaveform, W.currentWaveform), 'exported current waveforms');
 W.loopMode(2) = false;
 W.loopDuration(2) = 0;
+end
+
+function testImportParams(W)
+% importParams() programs what exportParams() returned, after checking every setting. Imported with a trigger channel
+% entering param sync mode, the current waveforms still apply at once: the trigger modes are sent last. A setting that
+% that is invalid (a waveform number out of range) changes and sends nothing.
+cleanup = onCleanup(@() resetAfterImport(W)); % Also if a check fails
+setNormalMode(W);
+loadRandomWaveform(W, 2, 100, -1, 1, 2);
+W.samplingRate = 25000;
+W.loopMode(3) = true;
+W.loopDuration(3) = 0.5;
+W.currentWaveform = [0 2 2 0];
+W.linkTriggerChannel2(4) = true;
+W.triggerMode = {'Master', 'Param Sync'};
+expected = W.exportParams();
+setNormalMode(W);
+W.samplingRate = 10000;
+resetLoops(W);
+W.currentWaveform = zeros(1,4);
+W.linkTriggerChannel2(4) = false;
+W.importParams(jsondecode(jsonencode(expected))); % As read from a .json file: columns
+assert(isequal(W.exportParams(), expected), 'imported settings');
+status = W.status();
+assert(isequal(status.currentWaveform, [0 2 2 0]), 'the current waveforms waited for an edge');
+expectError(@() W.importParams(struct('currentWaveform', [5 0 0 0], 'loopMode', [true true true true])));
+assert(isequal(W.exportParams(), expected), 'a refused import changed the settings');
+end
+
+function resetAfterImport(W)
+setNormalMode(W);
+resetLoops(W);
+W.samplingRate = 10000;
+W.currentWaveform = zeros(1,4);
+W.linkTriggerChannel2(4) = false;
 end
 
 function testInvalidArgumentsAreRefused(W)

@@ -54,7 +54,7 @@ See the GNU General Public License for more details.
 
 #define ARCOM_READ_TIMEOUT_MS 100 // Longest gap between bytes of one command before the transfer is abandoned
 #define ARCOM_WRITE_BUFFER_SIZE 256 // Must hold the largest reply: 178 bytes in Pulse Pal firmware (ops 85 and 93),
-                                    // 37 bytes in Wave Pal firmware (op 71)
+                                    // 47 bytes in Wave Pal firmware (op 71)
 
 class ArCOM
 {

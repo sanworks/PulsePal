@@ -39,7 +39,7 @@ tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAre
     @testWaveformChangesFindAnAcceptedOrder, @testConfigureSetsLevelsTogether, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testSyncToDevice, @testSyncFromDeviceReadsWhatTheDevicePlays, ...
-    @testScreenSaverSettings, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused};
+    @testScreenSaverSettings, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused, @testImportParams};
 S = SynthPalDevice(portString);
 nFailed = 0;
 for i = 1:numel(tests)
@@ -363,6 +363,31 @@ S.configure(2, 'waveform', 'Sine', 'peakToPeak', 20, 'meanVoltage', 0);
 S.syncFromDevice();
 assert(strcmp(S.waveform{2}, 'Sine') && S.peakToPeak(2) == 20 && S.meanVoltage(2) == 0, 'levels after read-back');
 clear cleanup
+S.setDefaultParams();
+end
+
+function testImportParams(S)
+% importParams() programs what exportParams() returned, in one command (op 'U'), checking the levels together: here
+% a mean of 6 V arrives before the 4 V peak to peak it goes with, which an assignment would refuse after 20 V. Read
+% back from the device, the settings are the ones exported. A bad value changes and sends nothing.
+S.frequency = 440.5;
+S.configure(1, 'waveform', 'Triangle', 'peakToPeak', 4, 'meanVoltage', 6);
+S.configure(2, 'waveform', 'Fixed Voltage', 'fixedVoltage', -2.5);
+S.restingVoltage(3) = -1;
+S.playDuration(4) = 0.25;
+S.triggerMode{2} = 'Toggle';
+expected = S.exportParams();
+S.setDefaultParams();
+S.configure(1, 'peakToPeak', 20, 'meanVoltage', 0);
+params = jsondecode(jsonencode(expected)); % As read from a .json file: columns
+names = fieldnames(params);
+params = orderfields(params, [find(strcmp(names, 'meanVoltage')); find(~strcmp(names, 'meanVoltage'))]);
+S.importParams(params);
+assert(isequal(S.exportParams(), expected), 'imported settings');
+S.syncFromDevice();
+assert(isequal(S.exportParams(), expected), 'the settings read back differ from those imported');
+expectError(@() S.importParams(struct('meanVoltage', [9 0 0 0]))); % 9 V around a 4 V peak to peak reaches 11 V
+assert(isequal(S.exportParams(), expected), 'a refused import changed the settings');
 S.setDefaultParams();
 end
 

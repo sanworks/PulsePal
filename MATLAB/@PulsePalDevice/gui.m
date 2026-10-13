@@ -745,12 +745,14 @@ obj.ui.StatusLabel.Text = 'Status: Default Program Restored';
 end
 
 function uploadProgram(obj)
-% Trigger modes are handled on their own, because syncAllParams() is the one thing param sync mode defers.
-% A channel leaving param sync mode is programmed before the sync, so that the sync reaches the device. One
-% entering it is programmed after, so that this program is the one that loads and the next one waits for a TTL.
-% The GUI keeps trigger modes as their codes (see defaultParams()), and the triggerMode property as names
+% Trigger modes are handled on their own, because param sync mode defers syncAllParams() and custom train loads, and
+% not an assigned trigger mode. A channel leaving param sync mode is programmed before the sync and the trains, so
+% that they reach the device. One entering it is programmed after, so that this program is the one that loads and the
+% next one waits for a TTL. The GUI keeps trigger modes as their codes (see defaultParams()), and the triggerMode
+% property as names
 paramSyncMode = 3;
 autoSyncState = obj.autoSync;
+cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState)); % Also if a step fails
 newModes = obj.ui.params.triggerMode;
 [~, deviceModes] = ismember(obj.triggerMode, obj.TriggerModeNames);
 deviceModes = deviceModes - 1;
@@ -763,15 +765,9 @@ if any(leavingParamSync)
 end
 programBuffered = any(deviceModes == paramSyncMode);
 
-% Sends the GUI's parameters in one command, whatever autoSync is
+% Sends the GUI's parameters in one command, whatever autoSync is. The custom trains follow, before a trigger channel
+% enters param sync mode: in param sync mode the device stores both for the next TTL, and otherwise loads both at once.
 obj.importParams(obj.ui.params);
-if any(enteringParamSync)
-    obj.autoSync = true;
-    obj.triggerMode = newModes;
-end
-obj.autoSync = autoSyncState;
-
-% Sync custom waveforms (if applicable)
 for iTrain = 1:obj.info.nCustomPulseTrains
     timestampString = obj.ui.customTrain.timestamps{iTrain};
     voltageString = obj.ui.customTrain.voltages{iTrain};
@@ -789,6 +785,11 @@ for iTrain = 1:obj.info.nCustomPulseTrains
         end
     end
 end
+if any(enteringParamSync)
+    obj.autoSync = true;
+    obj.triggerMode = newModes;
+end
+clear cleanup % Restores autoSync
 if programBuffered
     obj.ui.StatusLabel.Text = 'Status: Program Buffered for Next Param Sync TTL';
 else

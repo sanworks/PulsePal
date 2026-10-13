@@ -203,7 +203,9 @@ static const uint8_t PythonOp73[180] = {
     153, 89, 51, 147, 50, 179, 204, 76, 153, 153, 1, 0, 0, 0, 0, 1, 1, 0, 1, 2, 0, 1, 0, 0,
     1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 2,
 };
-static const uint8_t PythonOp92Defaults[184] = {
+// The Python class's op 92 for the C++ class's default parameters: 1 ms pulses 10 ms apart, for 1 s. (The Python and
+// MATLAB classes' own defaults are the device's: 0.1 ms pulses 1 ms apart.)
+static const uint8_t PythonOp92ForCppDefaults[184] = {
     213, 92, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0,
     0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0, 20, 0,
     0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -265,7 +267,7 @@ static void test_connect_to_pulse_pal_3()
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
         CHECK_BYTES(port.writes[2], bytes({213, 100}));
         CHECK_BYTES(port.writes[3], bytes({213, 91, 128, 0, 0}));
-        CHECK_BYTES(port.writes[4], Bytes(PythonOp92Defaults, PythonOp92Defaults + 184));
+        CHECK_BYTES(port.writes[4], Bytes(PythonOp92ForCppDefaults, PythonOp92ForCppDefaults + 184));
     }
     // Handshake reply, hardware info, circuit board revision, and the confirm bytes of ops 91 and 92
     CHECK((port.reads == std::vector<size_t>{5, 10, 1, 1, 1}));
@@ -434,6 +436,30 @@ static void test_sync_all_params_sends_nothing_if_a_field_is_out_of_range()
     CHECK(port.writes.empty());
 }
 
+static void test_custom_bursts_need_a_burst_duration()
+{
+    // A custom train whose times are burst onsets needs bursts that last. Each of the two parameters is checked against
+    // the other, as the device holds it, and nothing is sent when one is refused.
+    FakeSerialPort port;
+    PulsePal pulsePal(&port);
+    connect(pulsePal, port, 22, 3);
+    {
+        CaptureErrors errors;
+        CHECK(!pulsePal.setCustomTrainTarget(2, 1));
+        CHECK(contains(errors.text(), "burstDuration must be above 0"));
+    }
+    CHECK(port.writes.empty());
+    CHECK(pulsePal.setBurstDuration(2, 0.05f));
+    CHECK(pulsePal.setCustomTrainTarget(2, 1));
+    {
+        CaptureErrors errors;
+        CHECK(!pulsePal.setBurstDuration(2, 0));
+        CHECK(contains(errors.text(), "output channel 2"));
+    }
+    CHECK(port.writes.size() == 2);
+    CHECK(pulsePal.currentOutputParams[2].burstDuration == 0.05f);
+}
+
 static void test_single_parameters_use_op_74()
 {
     FakeSerialPort port;
@@ -455,7 +481,7 @@ static void test_single_parameters_use_op_74()
     CHECK(pulsePal.setTrigger1Link(1, 0));
     CHECK(pulsePal.setTrigger2Link(2, 1));
     CHECK(pulsePal.setCustomTrainID(3, 4));            // Custom train 4 exists on Pulse Pal 3
-    CHECK(pulsePal.setCustomTrainTarget(4, 1));
+    CHECK(pulsePal.setCustomTrainTarget(1, 1));            // Channel 1 has a burst duration, set above
     CHECK(pulsePal.setCustomTrainLoop(1, 1));
     CHECK(pulsePal.setTriggerMode(2, 3));              // Param sync mode exists on Pulse Pal 3
 
@@ -475,7 +501,7 @@ static void test_single_parameters_use_op_74()
         bytes({213, 74, 12, 1, 0}),
         bytes({213, 74, 13, 2, 1}),
         bytes({213, 74, 14, 3, 4}),
-        bytes({213, 74, 15, 4, 1}),
+        bytes({213, 74, 15, 1, 1}),
         bytes({213, 74, 16, 1, 1}),
         bytes({213, 74, 128, 2, 3}),
     };
@@ -728,6 +754,7 @@ int main()
         {"syncAllParams matches Python on firmware v22", test_sync_all_params_matches_python_on_firmware_v22},
         {"syncAllParams matches Python on firmware v21", test_sync_all_params_matches_python_on_firmware_v21},
         {"syncAllParams sends nothing if a field is out of range", test_sync_all_params_sends_nothing_if_a_field_is_out_of_range},
+        {"custom bursts need a burst duration", test_custom_bursts_need_a_burst_duration},
         {"single parameters use op 74", test_single_parameters_use_op_74},
         {"out of range arguments send nothing", test_out_of_range_arguments_send_nothing},
         {"a rejected or unanswered command returns false", test_a_rejected_or_unanswered_command_returns_false},

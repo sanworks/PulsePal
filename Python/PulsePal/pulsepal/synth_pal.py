@@ -618,6 +618,50 @@ class SynthPalDevice:
         params.update({name: list(getattr(self, name))[1:] for name in _CHANNEL_SETTINGS})
         return params
 
+    def import_params(self, params):
+        """Program the device with settings exported by `SynthPalDevice.export_params`.
+
+        All of them are checked first, and then sent in one command, as
+        at the end of a `SynthPalDevice.batch` block: in param sync mode,
+        the device stores them for the next sync edge. The levels
+        (`waveform`, `peak_to_peak`, `fixed_voltage`, `mean_voltage`) are
+        checked together, so their order in `params` does not matter.
+        Settings missing from `params` keep their values. A name that is
+        not a setting is skipped with a warning, so that settings exported
+        by a newer version of this package, which may have more, can still
+        be imported.
+
+        ```python
+        import json
+        with open("trial_settings.json") as f:
+            S.import_params(json.load(f))
+        ```
+
+        Args:
+            params: A dict of setting name to its value: a number for
+                `"frequency"`, and one value per channel (a list, tuple or
+                NumPy array) for the others, as `export_params` returns.
+
+        Raises:
+            PulsePalError: If a value is invalid. Nothing is sent, and the
+                settings keep the values they had.
+        """
+        names = {"frequency", *_CHANNEL_SETTINGS}
+        unknown = [name for name in params if name not in names]
+        if unknown:
+            warnings.warn(f"import_params(): skipped {', '.join(map(repr, unknown))}, which this version of "
+                          "SynthPalDevice does not have.", stacklevel=2)
+        levels = ("waveform", "peak_to_peak", "fixed_voltage", "mean_voltage")
+        with self.batch():
+            for name, values in params.items():
+                if name in levels:
+                    # Each is checked alone here, and the levels together when the block ends (_check_sync()):
+                    # an assignment would check each against the others' old values
+                    getattr(self, name)._store(
+                        self._normalize(name, _common.one_value_per_channel(name, values, 4)))
+                elif name in names:
+                    setattr(self, name, values)
+
     def sync_to_device(self):
         """Send every setting to the device in one command.
 
@@ -1157,6 +1201,7 @@ class SynthPalDevice:
             raise PulsePalError(
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Synth Pal firmware?"
+                f" {_common.NO_REPLY_HINT}"
             )
         reply, version = handshake
         if reply != self._HANDSHAKE_REPLY:
@@ -1454,8 +1499,8 @@ class SynthPalDevice:
         message = self.port.read(n_bytes)
         if len(message) < n_bytes:
             raise PulsePalError(
-                f"Serial port timed out. {len(message)} byte(s) read. "
-                f"Expected {n_bytes} byte(s)."
+                f"Synth Pal sent {len(message)} of the {n_bytes} byte(s) of its reply within "
+                f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
         return message
 
@@ -1466,7 +1511,8 @@ class SynthPalDevice:
             reply = self._read_raw(1)[0]
         except PulsePalError as exc:
             raise PulsePalError(
-                f"Synth Pal did not confirm {context}."
+                f"Synth Pal did not confirm {context}: no reply arrived within {self.port.timeout} s. "
+                f"{_common.NO_REPLY_HINT}"
             ) from exc
         if reply != 1:
             raise _Rejected(

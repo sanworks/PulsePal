@@ -30,7 +30,7 @@ import tkinter as tk
 import weakref
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
-from .pulse_pal import CUSTOM_TRAIN_TARGETS, MAX_TIME, TRIGGER_MODES
+from .pulse_pal import _DEFAULT_OUTPUT_VALUES, CUSTOM_TRAIN_TARGETS, MAX_TIME, TRIGGER_MODES
 
 PROGRAM_FORMAT_VERSION = 1
 """Version of the program file format, written to each file as
@@ -338,24 +338,14 @@ class PulsePalGUI:
     _BOOLEAN_PARAMS = ("is_biphasic", "link_trigger_channel1",
                        "link_trigger_channel2", "custom_train_loop")
 
+    # The class's default parameters (set_default_params()), in the GUI's
+    # form. The GUI has no continuous loop mode.
     _DEFAULT_OUTPUT_PARAMS = {
-        "is_biphasic": 0,
-        "phase1_voltage": 5.0,
-        "phase2_voltage": -5.0,
-        "resting_voltage": 0.0,
-        "phase1_duration": 0.001,
-        "inter_phase_interval": 0.001,
-        "phase2_duration": 0.001,
-        "inter_pulse_interval": 0.01,
-        "burst_duration": 0.0,
-        "inter_burst_interval": 0.0,
-        "pulse_train_duration": 1.0,
-        "pulse_train_delay": 0.0,
-        "link_trigger_channel1": 1,
-        "link_trigger_channel2": 0,
-        "custom_train_id": 0,
-        "custom_train_target": 0,
-        "custom_train_loop": 0,
+        name: (int(value) if isinstance(value, bool) else
+               CUSTOM_TRAIN_TARGETS.index(value) if name == "custom_train_target"
+               else value)
+        for name, value in _DEFAULT_OUTPUT_VALUES.items()
+        if name != "continuous_loop"
     }
 
     # (parameter name, label, tooltip)
@@ -1726,7 +1716,10 @@ class PulsePalGUI:
                             for mode in device.trigger_mode[1:3]]
             buffered = self._program_trigger_modes(device_modes,
                                                    leaving=True)
-            # The batch sends the whole program in one command when it ends
+            # The batch sends the whole program in one command when it ends.
+            # The custom trains follow it, before a trigger channel enters
+            # param sync mode: in param sync mode the device stores both
+            # for the next TTL, and otherwise loads both at once.
             with device.batch():
                 for name, values in self._params.items():
                     getattr(device, name)[1:5] = [
@@ -1735,9 +1728,9 @@ class PulsePalGUI:
                 device.trigger_mode[1:3] = [
                     TRIGGER_MODES[int(mode)] for mode in self._trigger_mode
                 ]
-            self._program_trigger_modes(device_modes, leaving=False)
             for train_id, times, voltages in custom_trains:
                 device.send_custom_pulse_train(train_id, times, voltages)
+            self._program_trigger_modes(device_modes, leaving=False)
         except Exception as exc:
             self._show_error(f"Failed to load the program to the device:\n"
                              f"{exc}")

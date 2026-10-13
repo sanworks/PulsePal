@@ -50,6 +50,13 @@ class PulsePalError(Exception):
     """
 
 
+NO_REPLY_HINT = (
+    "If the device's screen shows COMM. FAILURE!, a command reached it only in part, and it waits: click its "
+    "joystick, then connect again. Otherwise, check the USB connection."
+)
+"""Added to the error for a reply that does not arrive. After a comm failure the device reads no command until its
+joystick is clicked, and then loads its default settings."""
+
 HANDSHAKE_REPLY_BYTES = 5  # The reply to op 72 on all three firmwares: the firmware's letter, then its version (uint32)
 HANDSHAKE_QUIET_TIME = 0.05  # Seconds without a byte that end the handshake's reply (see read_handshake_reply())
 HANDSHAKE_MAX_TIME = 1  # Seconds after the first 5 bytes, at most, to wait for the device to go quiet
@@ -207,6 +214,30 @@ def channel_numbers(channels, n_channels=4, kind="Output"):
     return [int(ch) for ch in values]
 
 
+def one_value_per_channel(name, values, n_channels):
+    """Return a setting's new values as a list of one per channel.
+
+    `values` holds one value per channel, or one more with `None` first, as a `ChannelSettings` list prints. A
+    single value is refused rather than copied to every channel: a script that sets one channel should say which,
+    and one that sets them all should list them, so that it reads the same in every class and language.
+    """
+    if isinstance(values, (str, bytes)) or not is_iterable(values):
+        raise PulsePalError(
+            f"{name} holds one value per channel, so a single value is ambiguous. Set one "
+            f"channel by its number, e.g. {name}[1] = {values!r}, or all {n_channels} with a list, "
+            f"e.g. {name} = {[values] * n_channels!r}."
+        )
+    values = list(values)
+    if len(values) == n_channels + 1 and values[0] is None:
+        return values[1:]
+    if len(values) != n_channels:
+        raise PulsePalError(
+            f"{name} needs one value per channel 1-{n_channels}. "
+            f"Received {len(values)} values."
+        )
+    return values
+
+
 def channel_bits(channels):
     """One bit per output channel, channel 1 in bit 0, as ops that take several channels expect."""
     bits = 0
@@ -253,28 +284,9 @@ class ChannelSettings(list):
 
     def _assign(self, values):
         """Set all channels from one value per channel, or a list with index
-        0 unused, as the list prints.
-
-        A single value is refused rather than copied to every channel: a
-        script that sets one channel should say which, and one that sets
-        them all should list them, so that it reads the same in every
-        class and language.
-        """
-        if isinstance(values, (str, bytes)) or not is_iterable(values):
-            raise PulsePalError(
-                f"{self._name} holds one value per channel, so a single value is ambiguous. Set one "
-                f"channel by its number, e.g. {self._name}[1] = {values!r}, or all {self._n} with a list, "
-                f"e.g. {self._name} = {[values] * self._n!r}."
-            )
-        values = list(values)
-        if len(values) == self._n + 1 and values[0] is None:
-            values = values[1:]
-        elif len(values) != self._n:
-            raise PulsePalError(
-                f"{self._name} needs one value per channel 1-{self._n}. "
-                f"Received {len(values)} values."
-            )
-        self._set_all(values)
+        0 unused, as the list prints. A single value is refused (see
+        one_value_per_channel())."""
+        self._set_all(one_value_per_channel(self._name, values, self._n))
 
     def _set_all(self, values):
         device = self._device()

@@ -132,6 +132,11 @@ TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync", "Master")
 _TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Param Sync": 3, "Master": 4}
 
 
+# The channel settings export_params() returns, after the sampling rate and the output range
+_CHANNEL_SETTINGS = ("current_waveform", "loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
+                     "link_trigger_channel2")
+
+
 @dataclass
 class DeviceInfo:
     """Properties of the connected Wave Pal.
@@ -429,16 +434,7 @@ class WavePalDevice:
 
     @sampling_rate.setter
     def sampling_rate(self, rate):
-        try:
-            rate_hz = int(rate)
-            is_whole = rate_hz == rate and not isinstance(rate, (bool, str))
-        except (TypeError, ValueError, OverflowError):
-            is_whole = False
-        if not is_whole or not 1 <= rate_hz <= self.info.max_sampling_rate:
-            raise PulsePalError(
-                "sampling_rate must be a whole number of Hz from 1 to "
-                f"{self.info.max_sampling_rate}. Received {rate!r}."
-            )
+        rate_hz = self._normalize_sampling_rate(rate)
         # Loop durations are sent in samples, so check that they still fit
         # before anything is changed
         loop_samples = None
@@ -482,24 +478,8 @@ class WavePalDevice:
 
     @output_range.setter
     def output_range(self, range_name):
-        name = self._range_name(range_name)
-        low, high = OUTPUT_RANGES[name]
+        name = self._check_output_range(range_name, self._trigger_mode[1:])
         changed = name != self._output_range
-        for number, waveform in enumerate(self._waveforms):
-            if waveform is not None and (
-                    waveform.min() < low or waveform.max() > high):
-                raise PulsePalError(
-                    f"Waveform {number} spans "
-                    f"{waveform.min():g} V to {waveform.max():g} V, which "
-                    f"does not fit the {name} range. Load a new waveform "
-                    "first, or choose a wider range."
-                )
-        if changed and "Param Sync" in self._trigger_mode:
-            raise PulsePalError(
-                "output_range cannot change while a trigger channel is in param sync mode: the waveforms are "
-                "loaded again for the new range, and in param sync mode they would wait for a TTL edge. Set "
-                "trigger_mode to another mode first."
-            )
         range_index = list(OUTPUT_RANGES).index(name)
         self._write_command(self._OP_SET_OUTPUT_RANGE, bytes([range_index]))
         self._read_ack("setting output_range")
@@ -617,7 +597,9 @@ class WavePalDevice:
         was waiting for an edge becomes current at once, so
         `WavePalDevice.waveforms` and `WavePalDevice.current_waveform`
         describe the device again. (Pulse Pal and Synth Pal discard their
-        stored settings then.) `WavePalDevice.output_range` cannot change
+        stored parameters and settings then; Pulse Pal makes its stored
+        custom trains current, as this class does its waveforms.)
+        `WavePalDevice.output_range` cannot change
         in param sync mode. To make the waveforms current on the same edge
         that starts the channels, wire the TTL to the other trigger channel
         as well: the param sync edge is handled first.
@@ -706,10 +688,96 @@ class WavePalDevice:
         ```
         """
         params = {"sampling_rate": self._sampling_rate, "output_range": self._output_range}
-        for name in ("current_waveform", "loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
-                     "link_trigger_channel2"):
+        for name in _CHANNEL_SETTINGS:
             params[name] = list(getattr(self, name))[1:]
         return params
+
+    def import_params(self, params):
+        """Program the device with settings exported by `WavePalDevice.export_params`.
+
+        All of them are checked first, and nothing is sent if one is
+        invalid. They are then sent in an order that lets each take
+        effect: a trigger channel leaving param sync mode first, then the
+        sampling rate, the output range and the channel settings, and a
+        trigger channel entering param sync mode last. So
+        `WavePalDevice.current_waveform` applies at once, unless a trigger
+        channel was in param sync mode and stays in it: then it waits for
+        the next edge, as an assignment would. Settings missing from
+        `params` keep their values. A name that is not a setting is
+        skipped with a warning, so that settings exported by a newer
+        version of this package, which may have more, can still be
+        imported.
+
+        The waveforms are not settings: load them with
+        `WavePalDevice.load_waveform` first, since a current waveform must
+        be a loaded one.
+
+        ```python
+        import json
+        with open("session_settings.json") as f:
+            W.import_params(json.load(f))
+        ```
+
+        Args:
+            params: A dict of setting name to its value: a number for
+                `"sampling_rate"`, a name for `"output_range"`, and one
+                value per channel (a list, tuple or NumPy array) for the
+                others, as `export_params` returns.
+
+        Raises:
+            PulsePalError: If a value is invalid (nothing is sent), or the
+                device rejects a setting.
+        """
+        names = {"sampling_rate", "output_range", *_CHANNEL_SETTINGS}
+        unknown = [name for name in params if name not in names]
+        if unknown:
+            warnings.warn(f"import_params(): skipped {', '.join(map(repr, unknown))}, which this version of "
+                          "WavePalDevice does not have.", stacklevel=2)
+        new = {}
+        for name in _CHANNEL_SETTINGS:
+            if name in params:
+                n = 2 if name == "trigger_mode" else self.info.n_channels
+                new[name] = _common.one_value_per_channel(name, params[name], n)
+        if "current_waveform" in new:
+            new["current_waveform"] = self._normalize_current_waveform(new["current_waveform"])
+        if "loop_mode" in new:
+            new["loop_mode"] = [to_bool(value, "loop_mode") for value in new["loop_mode"]]
+        if "loop_duration" in new:
+            new["loop_duration"] = self._normalize_loop_durations(new["loop_duration"])
+        for name in ("link_trigger_channel1", "link_trigger_channel2"):
+            if name in new:
+                new[name] = [to_bool(value, name) for value in new[name]]
+        modes = list(self._trigger_mode)[1:]
+        if "trigger_mode" in new:
+            modes = [to_name(value, TRIGGER_MODES, "trigger mode") for value in new["trigger_mode"]]
+        # The trigger modes the other settings are sent in: those of channels leaving param sync mode are sent
+        # first, those of channels entering it last
+        first_modes = [new_mode if (old == "Param Sync" and new_mode != "Param Sync") else old
+                       for old, new_mode in zip(self._trigger_mode[1:], modes)]
+        rate = self._sampling_rate
+        if "sampling_rate" in params:
+            rate = self._normalize_sampling_rate(params["sampling_rate"])
+        range_name = self._output_range
+        if "output_range" in params:
+            range_name = self._check_output_range(params["output_range"], first_modes)
+        self._durations_to_samples(new.get("loop_duration", self._loop_duration[1:]), rate)  # They fit at the rate
+
+        if first_modes != list(self._trigger_mode)[1:]:
+            self.trigger_mode = first_modes
+        if rate != self._sampling_rate:
+            self.sampling_rate = rate
+        if range_name != self._output_range:
+            self.output_range = range_name
+        for name in ("loop_mode", "loop_duration"):
+            if name in new:
+                setattr(self, name, new[name])
+        if "link_trigger_channel1" in new or "link_trigger_channel2" in new:
+            self._set_trigger_links(new.get("link_trigger_channel1", self._link_trigger_channel1[1:]),
+                                    new.get("link_trigger_channel2", self._link_trigger_channel2[1:]))
+        if "current_waveform" in new:
+            self.current_waveform = new["current_waveform"]
+        if modes != first_modes:
+            self.trigger_mode = modes
 
     @property
     def waveforms(self):
@@ -982,6 +1050,7 @@ class WavePalDevice:
             raise PulsePalError(
                 f"No reply from the device on {self.port.port}. Is it a "
                 "Pulse Pal 3 running Wave Pal firmware?"
+                f" {_common.NO_REPLY_HINT}"
             )
         reply, version = handshake
         if reply != self._HANDSHAKE_REPLY:
@@ -1017,6 +1086,13 @@ class WavePalDevice:
         self.info.circuit_board_revision = self._read_raw(1)[0]
 
     def _apply_current_waveform(self, values):
+        waveform_numbers = self._normalize_current_waveform(values)
+        self._write_command(self._OP_SET_CURRENT_WAVEFORMS, bytes(waveform_numbers))
+        self._read_ack("setting current_waveform")
+        return waveform_numbers
+
+    def _normalize_current_waveform(self, values):
+        """Check new current waveforms for all channels, and return them as the list holds them."""
         waveform_numbers = []
         for channel, value in enumerate(values, start=1):
             if (isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral)
@@ -1032,8 +1108,6 @@ class WavePalDevice:
                     f"Waveform {value} is not loaded. Load it with load_waveform({value}, waveform) first."
                 )
             waveform_numbers.append(value)
-        self._write_command(self._OP_SET_CURRENT_WAVEFORMS, bytes(waveform_numbers))
-        self._read_ack("setting current_waveform")
         return waveform_numbers
 
     def _apply_loop_mode(self, values):
@@ -1043,6 +1117,13 @@ class WavePalDevice:
         return modes
 
     def _apply_loop_duration(self, values):
+        durations = self._normalize_loop_durations(values)
+        samples = self._durations_to_samples(durations, self._sampling_rate)
+        self._send_loop_duration_samples(samples)
+        return durations
+
+    def _normalize_loop_durations(self, values):
+        """Check new loop durations for all channels, and return them as the list holds them, in seconds."""
         durations = []
         for value in values:
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
@@ -1056,8 +1137,6 @@ class WavePalDevice:
                     f"positive number of seconds. Received {value!r}."
                 )
             durations.append(duration)
-        samples = self._durations_to_samples(durations, self._sampling_rate)
-        self._send_loop_duration_samples(samples)
         return durations
 
     def _send_loop_duration_samples(self, samples):
@@ -1121,6 +1200,41 @@ class WavePalDevice:
         clock = self.info.sample_clock_hz
         return clock / ((clock + rate_hz // 2) // rate_hz)
 
+    def _normalize_sampling_rate(self, rate):
+        """Check a sampling rate, and return it as a whole number of Hz."""
+        try:
+            rate_hz = int(rate)
+            is_whole = rate_hz == rate and not isinstance(rate, (bool, str))
+        except (TypeError, ValueError, OverflowError):
+            is_whole = False
+        if not is_whole or not 1 <= rate_hz <= self.info.max_sampling_rate:
+            raise PulsePalError(
+                "sampling_rate must be a whole number of Hz from 1 to "
+                f"{self.info.max_sampling_rate}. Received {rate!r}."
+            )
+        return rate_hz
+
+    def _check_output_range(self, range_name, trigger_modes):
+        """Check that the output range can be set, with these trigger modes, and return its canonical name."""
+        name = self._range_name(range_name)
+        low, high = OUTPUT_RANGES[name]
+        for number, waveform in enumerate(self._waveforms):
+            if waveform is not None and (
+                    waveform.min() < low or waveform.max() > high):
+                raise PulsePalError(
+                    f"Waveform {number} spans "
+                    f"{waveform.min():g} V to {waveform.max():g} V, which "
+                    f"does not fit the {name} range. Load a new waveform "
+                    "first, or choose a wider range."
+                )
+        if name != self._output_range and "Param Sync" in trigger_modes:
+            raise PulsePalError(
+                "output_range cannot change while a trigger channel is in param sync mode: the waveforms are "
+                "loaded again for the new range, and in param sync mode they would wait for a TTL edge. Set "
+                "trigger_mode to another mode first."
+            )
+        return name
+
     def _range_name(self, range_name):
         """Return the canonical name of an output range."""
         if isinstance(range_name, str):
@@ -1174,8 +1288,8 @@ class WavePalDevice:
         message = self.port.read(n_bytes)
         if len(message) < n_bytes:
             raise PulsePalError(
-                f"Serial port timed out. {len(message)} byte(s) read. "
-                f"Expected {n_bytes} byte(s)."
+                f"Wave Pal sent {len(message)} of the {n_bytes} byte(s) of its reply within "
+                f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
         return message
 
@@ -1186,7 +1300,8 @@ class WavePalDevice:
             reply = self._read_raw(1)[0]
         except PulsePalError as exc:
             raise PulsePalError(
-                f"Wave Pal did not confirm {context}."
+                f"Wave Pal did not confirm {context}: no reply arrived within {self.port.timeout} s. "
+                f"{_common.NO_REPLY_HINT}"
             ) from exc
         if reply != 1:
             raise PulsePalError(

@@ -45,14 +45,15 @@
 %   interPulseInterval   Time from the end of one pulse to the start of the next
 %   burstDuration        Duration of each burst of pulses. 0 for no bursts: pulses continue for the whole train
 %   interBurstInterval   Time at the resting voltage between bursts, when burstDuration is not 0
-%   pulseTrainDuration   Duration of the pulse train
+%   pulseTrainDuration   Duration of the pulse train. A train's end is set when it starts: a new duration applies from the
+%                        next train
 %   pulseTrainDelay      Time from the trigger to the start of the pulse train
 %   linkTriggerChannel1  true if a TTL on trigger channel 1 triggers the output channel
 %   linkTriggerChannel2  true if a TTL on trigger channel 2 triggers the output channel
 %   customTrainID        0 plays the pulse train defined above. 1 or more plays that custom train instead, loaded
 %                        with sendCustomPulseTrain() or sendCustomWaveform(): 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2
 %   customTrainTarget    1x4 cell array. 'Pulses': a custom train's times are pulse onsets. 'Bursts': they are
-%                        burst onsets
+%                        burst onsets, and burstDuration must be above 0 (with autoSync on, set it first)
 %   customTrainLoop      true repeats a custom train until pulseTrainDuration has elapsed. false plays it once
 %   continuousLoop       false plays the pulse train once per trigger. true plays it until the channel is stopped,
 %                        ignoring pulseTrainDuration (firmware v22 or newer)
@@ -66,13 +67,14 @@
 %   'Toggle'      As 'Normal', but a rising edge during a train stops it.
 %   'Gated'       The trains play only while the TTL is high.
 %   'Param Sync'  (Pulse Pal 3 only) A rising edge starts and stops nothing. It loads the parameters most recently sent
-%                 by syncToDevice(): this is how the next trial's parameters are sent during the current trial and
-%                 applied the instant it starts. An idle output channel takes them in the timer cycle the edge is
+%                 by syncToDevice(), and the custom trains loaded since the previous edge: this is how the next trial's
+%                 parameters and custom trains are sent during the current trial and applied the instant it starts. An idle output channel takes them in the timer cycle the edge is
 %                 detected. One that is playing a pulse train finishes it on the parameters it started with, and takes
 %                 the new ones the moment it ends, so the next trigger plays a whole train with the new parameters. A
 %                 channel in continuous loop mode has no train end, so it keeps its parameters until something stops
-%                 it. Only syncToDevice() waits for the edge: with autoSync on, assigning a parameter programs the
-%                 device at once, also in param sync mode. So leaving param sync mode means assigning triggerMode with
+%                 it. Only syncToDevice() and custom train loads wait for the edge: with autoSync on, assigning a
+%                 parameter programs the device at once, also in param sync mode. A custom train still waiting when
+%                 param sync mode is left becomes current at once; parameters still waiting are discarded. So leaving param sync mode means assigning triggerMode with
 %                 autoSync on; a trigger mode sent by syncToDevice() takes effect at the next edge. A param sync
 %                 channel's links to output channels are ignored: to start trains on the same edge, wire the TTL to the
 %                 other trigger channel too (the parameters load first). Connecting, and setDefaultParams(), take both
@@ -192,6 +194,11 @@ classdef PulsePalDevice < handle
             'Volts' 'Logical'};
         TriggerModeCode = 128 % The parameter code of triggerMode, the one trigger channel parameter
         TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync'} % In order of their code on the device (0-3)
+        FormatKey = 'WIPE' % Follows op 97, so that two stray bytes cannot format the card (FORMAT_SD_CARD_KEY in the firmware)
+        % Added to the error for a reply that does not arrive. After a comm failure the device reads no command until its
+        % joystick is clicked, and then loads its default parameters. The same text as the Python classes'.
+        NoReplyHint = ['If the device''s screen shows COMM. FAILURE!, a command reached it only in part, and it ' ...
+                       'waits: click its joystick, then connect again. Otherwise, check the USB connection.']
         CustomTrainTargetNames = {'Pulses', 'Bursts'} % In order of their code on the device
     end
 
@@ -333,6 +340,10 @@ classdef PulsePalDevice < handle
                        '), not Pulse Pal firmware.' newline 'To use it as a Pulse Pal, load Pulse Pal firmware '...
                        'onto it with LoadPulsePalFirmware (in /MATLAB/FirmwareLoader).' newline ...
                        'To use it as a Synth Pal, connect with SynthPalDevice.'])
+            elseif isempty(HandShakeOkByte)
+                obj.port = [];
+                error(['No reply to the handshake from the device at port ' portString '. Is it a Pulse Pal? ' ...
+                       obj.NoReplyHint])
             else
                 obj.port = [];
                 error(['The device at port ' portString ' returned an unexpected handshake signature.'])
@@ -464,9 +475,16 @@ classdef PulsePalDevice < handle
             % voltages: one per pulse, in volts, -10 to 10.
             % An output channel plays the train when its customTrainID property is set to the train's number. Each
             % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
-            % sign reversed. Example:
+            % sign reversed. A biphasic pulse always plays whole: if it lasts longer than the gap to the next pulse,
+            % the next pulse starts as it ends, late. Example:
             %   P.sendCustomPulseTrain(1, [0 0.1 0.25 0.5], [5 2.5 -2.5 -5]);
             %   P.customTrainID(2) = 1;
+            % Loading a train stops the output channels playing it, and their next trigger plays the new train. On
+            % Pulse Pal 3, while a trigger channel is in param sync mode, the device stores the train instead, as it
+            % stores the parameters syncToDevice() sends: channels go on playing the old train, and the next rising
+            % edge on the param sync channel makes the new one current. A channel playing the old train at that edge
+            % finishes it, and plays the new one from its next trigger. Leaving param sync mode makes a stored train
+            % current at once.
             sendCustomTrain(obj, customTrainID, pulseTimes, voltages);
         end
 
@@ -474,7 +492,8 @@ classdef PulsePalDevice < handle
             % Loads a sampled waveform onto the device, as a custom pulse train of adjoining pulses: one per sample,
             % samplingPeriod seconds apart (a multiple of 100 us). Set phase1Duration to samplingPeriod on the output
             % channel that plays it, so that each sample lasts until the next. customTrainID: the train's number, 1-4
-            % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10.
+            % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10. It is loaded as a custom train is:
+            % see sendCustomPulseTrain() for what happens to channels playing it, and in param sync mode.
             nVoltages = length(voltages);
             if ~isnumeric(samplingPeriod) || ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
@@ -487,9 +506,11 @@ classdef PulsePalDevice < handle
         end
 
         function setDefaultParams(obj)
-            % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 1 ms, 10 ms
-            % apart, for 1 second, resting at 0 V and linked to trigger channel 1; both trigger channels in normal
-            % mode. They are sent at once, also while autoSync is off. The constructor calls it.
+            % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 0.1 ms, 1 ms
+            % apart (about 909 a second), for 1 second, resting at 0 V and linked to trigger channel 1; for biphasic
+            % pulses, a phase 2 of -5 V and 0.1 ms after 0.1 ms at rest; both trigger channels in normal mode. They are
+            % the device's own defaults, which it also loads at startup, after a comm failure and after formatting its
+            % microSD card. They are sent at once, also while autoSync is off. The constructor calls it.
             if obj.hardwareVersion > 2
                 % A device left in param sync mode would store the sync below instead of running it,
                 % leaving the device on its old program until a TTL arrived. Assigning triggerMode is
@@ -611,13 +632,14 @@ classdef PulsePalDevice < handle
         function loadSettingsFile(obj, fileName)
             % Loads a settings file from the device's microSD card, e.g. P.loadSettingsFile('MyProgram.pps'). The
             % device plays the program in it, and the parameters are read back into the properties (see
-            % syncFromDevice). If the load fails, the device loads its own default parameters (not the ones
-            % setDefaultParams() sets), the properties are updated to match, and an error is raised.
+            % syncFromDevice). The program is loaded at once, also in param sync mode. If there is no such file, or it
+            % is not a valid settings file, an error is raised, and the device and the properties keep their values.
             obj.settingsFileOp(fileName, 2, 'loadSettingsFile()');
         end
 
         function deleteSettingsFile(obj, fileName)
             % Deletes a settings file from the device's microSD card, e.g. P.deleteSettingsFile('MyProgram.pps').
+            % Raises an error if there is no such file.
             obj.settingsFileOp(fileName, 3, 'deleteSettingsFile()');
         end
 
@@ -653,7 +675,7 @@ classdef PulsePalDevice < handle
                     return
                 end
             end
-            obj.port.write([obj.OpMenuByte 97], 'uint8');
+            obj.port.write([obj.OpMenuByte 97 double(obj.FormatKey)], 'uint8');
             % The device replies with lines of status text, the last of which contains '!', and then a confirm byte (1
             % if the card was formatted, 0 if not). The confirm byte is sent after the device has reloaded its default
             % parameters, so it can arrive well after the text. It must be read here: left in the buffer, it would be
@@ -675,7 +697,8 @@ classdef PulsePalDevice < handle
                 pause(.01);
             end
             if ~replyComplete
-                error('Pulse Pal did not report the result of formatting its microSD card within 30 seconds.')
+                error(['Pulse Pal did not report the result of formatting its microSD card within 30 seconds. ' ...
+                       obj.NoReplyHint])
             end
             disp(strtrim(char(msg(1:lineEnd))));
             success = (msg(lineEnd+1) == 1);
@@ -920,6 +943,15 @@ classdef PulsePalDevice < handle
             if ~obj.autoSync
                 return
             end
+            if paramCode == 8 || paramCode == 15
+                % Sent alone, so it must suit the other parameter as the device holds it. With autoSync off,
+                % syncToDevice() checks both together (checkSyncParams()).
+                if paramCode == 8
+                    obj.checkCustomBursts(obj.customTrainTarget, value);
+                else
+                    obj.checkCustomBursts(value, obj.burstDuration);
+                end
+            end
             kind = 'Byte';
             if paramCode < obj.TriggerModeCode
                 kind = obj.ParamKinds{paramCode};
@@ -1055,17 +1087,30 @@ classdef PulsePalDevice < handle
             confirmed = obj.port.read(1, 'uint8');
             % read() returns nothing (with a warning) if the byte does not arrive, and "if [] ~= 1" is false, so a
             % missing confirm byte has to be checked for: left unchecked, it arrives late and is read as the next reply
-            if isempty(confirmed) || confirmed ~= 1
-                error('Error: Pulse Pal did not return an expected byte to confirm the operation.');
+            if isempty(confirmed)
+                error(['Pulse Pal did not confirm the operation: no reply arrived within ' ...
+                       num2str(obj.port.Timeout) ' s. ' obj.NoReplyHint]);
+            elseif confirmed ~= 1
+                error(['Pulse Pal rejected the operation. This usually means that a channel number, parameter code '...
+                       'or value was out of range for the connected device.']);
             end
         end
 
         function checkSyncParams(obj)
             % The checks on the whole parameter set that assigning one parameter cannot make
+            obj.checkCustomBursts(obj.customTrainTarget, obj.burstDuration);
+        end
+
+        function checkCustomBursts(~, targets, burstDurations)
+            % Refuses a custom train targeting bursts on a channel with no burst duration. Its times are burst onsets,
+            % and a burst of no duration plays one 50 us cycle of a pulse at each: a program that cannot be what was
+            % meant. (The device once played one pulse and then left the channel "playing", ignoring triggers until it
+            % was stopped.) The same check as the Python class's.
             for i = 1:4
-                if strcmp(obj.customTrainTarget{i}, 'Bursts') && obj.burstDuration(i) == 0
-                    error(['Error in output channel ' num2str(i)...
-                        ': When custom train times target burst onsets, a non-zero burst duration must be defined.'])
+                if strcmp(targets{i}, 'Bursts') && burstDurations(i) == 0
+                    error(['Output channel ' num2str(i) ': customTrainTarget ''Bursts'' makes the custom train''s ' ...
+                           'times burst onsets, so burstDuration must be above 0. Set burstDuration first, or set ' ...
+                           'both with autoSync off.'])
                 end
             end
         end
@@ -1109,6 +1154,11 @@ classdef PulsePalDevice < handle
                 error('There must be one voltage value for every timestamp');
             end
             nPulses = length(pulseTimes);
+            if nPulses == 0
+                % The device refuses an empty train too: it would hold no pulse times to play
+                error(['A custom train needs at least one pulse. To play nothing on a channel, set its customTrainID ' ...
+                       'to a train that holds what it should play, or do not trigger it.'])
+            end
             if ~isnumeric(pulseTimes) || ~isnumeric(voltages) || ~all(isfinite(double(pulseTimes(:)))) || ...
                     ~all(isfinite(double(voltages(:))))
                 error('Error: custom pulse times and voltages must be numbers (NaN and Inf are not allowed).');
@@ -1176,18 +1226,23 @@ classdef PulsePalDevice < handle
             elseif opByte == 2
                 pause(.1); % Firmware v21 does not acknowledge, so allow time for the load
             end
-            if opByte == 2
-                % Read the parameters back even if the load failed: the device then loads its own default
-                % parameters (not the ones setDefaultParams() sets), and the properties must describe them.
-                obj.importCurrentParamsFromPulsePal;
-            end
-            if isempty(confirmed) || confirmed ~= 1
-                if opByte == 2
-                    error(['Error: Pulse Pal could not load ' fileName '. It has loaded its default '...
-                        'parameters instead, and the properties have been updated to match.']);
-                else
-                    error(['Error: Pulse Pal did not confirm ' context '.']);
+            if isempty(confirmed)
+                error(['Pulse Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
+                       ' s. ' obj.NoReplyHint]);
+            elseif confirmed ~= 1
+                % The device refuses an operation it could not carry out, and changes nothing
+                switch opByte
+                    case 1
+                        error(['Pulse Pal could not save ' fileName ' to its microSD card. Is the card in place?'])
+                    case 2
+                        error(['Pulse Pal could not load ' fileName ': there is no such file on its microSD card, ' ...
+                               'or it is not a valid settings file. The device keeps its parameters.'])
+                    otherwise
+                        error(['Pulse Pal could not delete ' fileName ': there is no such file on its microSD card.'])
                 end
+            end
+            if opByte == 2
+                obj.importCurrentParamsFromPulsePal;
             end
         end
 
@@ -1203,7 +1258,7 @@ classdef PulsePalDevice < handle
             obj.port.write([obj.OpMenuByte 93], 'uint8');
             Msg = obj.port.read(178, 'uint8');
             if length(Msg) ~= 178
-                error(['Pulse Pal sent ' num2str(length(Msg)) ' of the 178 bytes of its parameters.'])
+                error(['Pulse Pal sent ' num2str(length(Msg)) ' of the 178 bytes of its parameters. ' obj.NoReplyHint])
             end
             obj.storing = true;
             cleanup = onCleanup(@() obj.endStoring());
@@ -1377,16 +1432,19 @@ classdef PulsePalDevice < handle
 
         function params = defaultParams
             % The default parameters, as the GUI keeps them: numbers, with each mode as its code (0 = 'Normal',
-            % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them.
+            % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them. They are the device's
+            % own defaults (LoadDefaultParameters() in /Firmware/PulsePal3/SDSettings.ino), which it loads at startup,
+            % after a comm failure and after formatting its microSD card, as in the Python class. The legacy functions
+            % in /MATLAB/Legacy keep their own.
             params = struct;
             params.isBiphasic = zeros(1,4);
             params.restingVoltage = zeros(1,4);
             params.phase1Voltage = ones(1,4)*5;
             params.phase2Voltage = ones(1,4)*-5;
-            params.phase1Duration = ones(1,4)*0.001;
-            params.interPhaseInterval = ones(1,4)*0.001;
-            params.phase2Duration = ones(1,4)*0.001;
-            params.interPulseInterval = ones(1,4)*0.01;
+            params.phase1Duration = ones(1,4)*0.0001;
+            params.interPhaseInterval = ones(1,4)*0.0001;
+            params.phase2Duration = ones(1,4)*0.0001;
+            params.interPulseInterval = ones(1,4)*0.001;
             params.burstDuration = zeros(1,4);
             params.interBurstInterval = zeros(1,4);
             params.pulseTrainDuration = ones(1,4);
