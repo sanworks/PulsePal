@@ -166,7 +166,11 @@ ctest --test-dir c++/build -C Release --output-on-failure
 
 Everything else needs a device: pulse timing, the trigger inputs, the screen, the joystick
 menu and the microSD card. `/Python/PulsePal/tests/benchmark_serial.py` measures USB latency
-and throughput on a connected device; run it before and after changing serial code. On a device
+and throughput on a connected device; run it before and after changing serial code.
+`/Python/PulsePal/tests/pulsepal_hardware_test.py` checks, without a scope, that a Pulse Pal stays
+in step with the PC: parameters read back as sent, refused and garbled commands, commands sent
+while all channels play, reconnects, transfers with the PC's CPU fully loaded, and (with
+`--driver`, a second Pulse Pal on the trigger inputs) 5 kHz trigger edges and param sync. On a device
 running Wave Pal, `/Python/PulsePal/tests/wavepal_hardware_test.py` checks transfers and every
 sample played, and `/MATLAB/tests/testWavePalDevice.m` does the same for the MATLAB class. On
 one running Synth Pal, `/Python/PulsePal/tests/synthpal_hardware_test.py` checks every sample

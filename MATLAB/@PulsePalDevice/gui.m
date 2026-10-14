@@ -89,7 +89,7 @@ obj.ui.CustomTrainIDLabel_2.Text = 'Custom Train ID';
 
 % Create DropDown_CustomTrainID
 obj.ui.DropDown_CustomTrainID = uidropdown(obj.ui.OutputChannelsPanel);
-obj.ui.DropDown_CustomTrainID.Items = {'0 (None)', '1', '2', '3', '4'};
+obj.ui.DropDown_CustomTrainID.Items = [{'0 (None)'} arrayfun(@num2str, 1:obj.info.nCustomPulseTrains, 'UniformOutput', false)];
 obj.ui.DropDown_CustomTrainID.Position = [458 84 82 22];
 obj.ui.DropDown_CustomTrainID.Value = '0 (None)';
 obj.ui.DropDown_CustomTrainID.ValueChangedFcn = obj.makeCallback(@ui_SetCustomTrainID);
@@ -204,7 +204,7 @@ obj.ui.EditField_BurstDuration.ValueChangedFcn = obj.makeCallback(@ui_setNumeric
 % Create EditField_InterBurstInterval
 obj.ui.EditField_InterBurstInterval = uieditfield(obj.ui.OutputChannelsPanel, 'numeric');
 obj.ui.EditField_InterBurstInterval.HorizontalAlignment = 'center';
-obj.ui.EditField_InterBurstInterval.Tooltip = {'Interval betwen pulse bursts (s)'};
+obj.ui.EditField_InterBurstInterval.Tooltip = {'Interval between pulse bursts (s)'};
 obj.ui.EditField_InterBurstInterval.Position = [445 20 72 22];
 obj.ui.EditField_InterBurstInterval.ValueChangedFcn = obj.makeCallback(@ui_setNumericOutputParam, 'InterBurstInterval');
 
@@ -596,7 +596,12 @@ triggerLogic(3) = obj.ui.CheckBox_TriggerCh3.Value;
 triggerLogic(4) = obj.ui.CheckBox_TriggerCh4.Value;
 chan2Trigger = find(triggerLogic);
 if ~isempty(chan2Trigger)
-    obj.trigger(chan2Trigger);
+    try
+        obj.trigger(chan2Trigger);
+    catch err
+        errordlg(['Failed to trigger output channels: ' err.message]) % A callback's error reaches only the Command Window
+        return
+    end
     obj.ui.StatusLabel.Text = 'Status: Output Channels Triggered';
 end
 end
@@ -612,31 +617,19 @@ end
 % ---- Parameter edit callback functions ----
 
 function ui_setNumericOutputParam(obj, ParamName)
+% Stores an edit field's value in the GUI's copy of the parameters. A value the device cannot play is refused with an
+% error dialog, and the field shows the stored value again, as in the Python GUI. Refused only when the program was
+% loaded, it gave no dialog: a callback's error reaches only the Command Window.
 chan = str2double(obj.ui.ChannelButtonGroup_OutputChan.SelectedObject.Text);
-switch ParamName
-    case 'RestingVoltage'
-        obj.ui.params.restingVoltage(chan) = obj.ui.EditField_RestingVoltage.Value;
-    case 'Phase1Voltage'
-        obj.ui.params.phase1Voltage(chan) = obj.ui.EditField_Phase1Voltage.Value;
-    case 'Phase2Voltage'
-        obj.ui.params.phase2Voltage(chan) = obj.ui.EditField_Phase2Voltage.Value;
-    case 'Phase1Duration'
-        obj.ui.params.phase1Duration(chan) = obj.ui.EditField_Phase1Duration.Value;
-    case 'InterPhaseInterval'
-        obj.ui.params.interPhaseInterval(chan) = obj.ui.EditField_InterPhaseInterval.Value;
-    case 'Phase2Duration'
-        obj.ui.params.phase2Duration(chan) = obj.ui.EditField_Phase2Duration.Value;
-    case 'InterPulseInterval'
-        obj.ui.params.interPulseInterval(chan) = obj.ui.EditField_InterPulseInterval.Value;
-    case 'BurstDuration'
-        obj.ui.params.burstDuration(chan) = obj.ui.EditField_BurstDuration.Value;
-    case 'InterBurstInterval'
-        obj.ui.params.interBurstInterval(chan) = obj.ui.EditField_InterBurstInterval.Value;
-    case 'PulseTrainDuration'
-        obj.ui.params.pulseTrainDuration(chan) = obj.ui.EditField_PulseTrainDuration.Value;
-    case 'PulseTrainDelay'
-        obj.ui.params.pulseTrainDelay(chan) = obj.ui.EditField_PulseTrainDelay.Value;
+field = obj.ui.(['EditField_' ParamName]);
+paramName = [lower(ParamName(1)) ParamName(2:end)]; % 'Phase1Voltage' is held in params.phase1Voltage
+[low, high, label] = fieldRange(obj, ParamName);
+if ~(field.Value >= low && field.Value <= high)
+    errordlg([label ' must be in range ' num2str(low, 10) ' to ' num2str(high, 10) '.'])
+    field.Value = obj.ui.params.(paramName)(chan);
+    return
 end
+obj.ui.params.(paramName)(chan) = field.Value;
 end
 
 function ui_SetPulseType(obj)
@@ -696,40 +689,33 @@ switch chan
 end
 end
 
+% The custom train boxes hold one line per press of Enter, and a column pasted from a spreadsheet is a line per value.
+% Each box's text is stored whole, its lines joined by new lines, and its numbers are separated by commas or new lines
+% (parseNumberList()), as in the Python GUI. Only a box's first line used to be kept, so the rest of a train was
+% dropped without a word.
 function uiSetCustomTimestamps(obj)
 trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-timestamps = obj.ui.TextArea_CustomTrainTimestamps.Value;
-
-% Validate format
-timestampString = char(timestamps{1});
-pattern = '^\s*(\d+(\.\d*)?|\.\d+)(\s*,\s*(\d+(\.\d*)?|\.\d+))*\s*$';
-if isempty(regexp(timestampString, pattern, 'once'))
+timestampText = textAreaText(obj.ui.TextArea_CustomTrainTimestamps);
+timestamps = parseNumberList(timestampText);
+if any(~isfinite(timestamps) | timestamps < 0)
     errordlg('Timestamps must be a comma-delimited list of pulse onset times, given in seconds.')
 end
-
-% Assign
-obj.ui.customTrain.timestamps{trainID} = timestamps{1};
+obj.ui.customTrain.timestamps{trainID} = timestampText;
 end
 
 function uiSetCustomVoltages(obj)
 trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-voltages = obj.ui.TextArea_CustomTrainVoltages.Value;
-
-% Validate format
-voltageString = char(voltages{1});
-pattern = '^\s*[+-]?(\d+(\.\d*)?|\.\d+)(\s*,\s*[+-]?(\d+(\.\d*)?|\.\d+))*\s*$';
-if isempty(regexp(voltageString, pattern, 'once'))
+voltageText = textAreaText(obj.ui.TextArea_CustomTrainVoltages);
+if any(~isfinite(parseNumberList(voltageText)))
     errordlg('Voltages must be a comma-delimited list of pulse voltages, given in volts.')
 end
-
-% Assign
-obj.ui.customTrain.voltages{trainID} = voltages{1};
+obj.ui.customTrain.voltages{trainID} = voltageText;
 end
 
 function ui_SetCustomTrainView(obj)
 trainID = str2double(obj.ui.ListBox_CustomTrainID.Value);
-obj.ui.TextArea_CustomTrainTimestamps.Value = obj.ui.customTrain.timestamps{trainID};
-obj.ui.TextArea_CustomTrainVoltages.Value = obj.ui.customTrain.voltages{trainID};
+obj.ui.TextArea_CustomTrainTimestamps.Value = cellstr(splitlines(string(obj.ui.customTrain.timestamps{trainID})));
+obj.ui.TextArea_CustomTrainVoltages.Value = cellstr(splitlines(string(obj.ui.customTrain.voltages{trainID})));
 end
 
 function restoreDefaults(obj)
@@ -749,45 +735,66 @@ function uploadProgram(obj)
 % not an assigned trigger mode. A channel leaving param sync mode is programmed before the sync and the trains, so
 % that they reach the device. One entering it is programmed after, so that this program is the one that loads and the
 % next one waits for a TTL. The GUI keeps trigger modes as their codes (see defaultParams()), and the triggerMode
-% property as names
+% property as names.
+% A program that cannot be loaded is reported in a dialog, as in the Python GUI: a callback's error reaches only the
+% Command Window, and the status line went on saying the last program had loaded. The custom trains, and the burst
+% duration a train targeting bursts needs, are checked before anything is sent.
+nTrains = obj.info.nCustomPulseTrains;
+trains = cell(nTrains, 2);
+for iTrain = 1:nTrains
+    timestamps = parseNumberList(obj.ui.customTrain.timestamps{iTrain});
+    voltages = parseNumberList(obj.ui.customTrain.voltages{iTrain});
+    if any(isnan(timestamps)) || any(isnan(voltages))
+        uploadFailed(obj, ['Failed to load custom pulse train ' num2str(iTrain) ...
+                           ': timestamps and voltages must be comma-delimited lists of numbers.'])
+        return
+    end
+    if numel(timestamps) ~= numel(voltages)
+        uploadFailed(obj, ['Failed to load custom pulse train ' num2str(iTrain) ...
+                           ': the number of timestamps and voltages must match.'])
+        return
+    end
+    trains(iTrain, :) = {timestamps, voltages};
+end
+for iChannel = 1:4
+    if obj.ui.params.customTrainTarget(iChannel) == 1 && obj.ui.params.burstDuration(iChannel) == 0
+        uploadFailed(obj, ['Error in output channel ' num2str(iChannel) ': when custom train times target burst ' ...
+                           'onsets, a non-zero burst duration must be defined.'])
+        return
+    end
+end
 paramSyncMode = 3;
 autoSyncState = obj.autoSync;
 cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState)); % Also if a step fails
-newModes = obj.ui.params.triggerMode;
-[~, deviceModes] = ismember(obj.triggerMode, obj.TriggerModeNames);
-deviceModes = deviceModes - 1;
-leavingParamSync = (deviceModes == paramSyncMode) & (newModes ~= paramSyncMode);
-enteringParamSync = (deviceModes ~= paramSyncMode) & (newModes == paramSyncMode);
-if any(leavingParamSync)
-    deviceModes(leavingParamSync) = newModes(leavingParamSync);
-    obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
-    obj.triggerMode = deviceModes;
-end
-programBuffered = any(deviceModes == paramSyncMode);
+try
+    newModes = obj.ui.params.triggerMode;
+    [~, deviceModes] = ismember(obj.triggerMode, obj.TriggerModeNames);
+    deviceModes = deviceModes - 1;
+    leavingParamSync = (deviceModes == paramSyncMode) & (newModes ~= paramSyncMode);
+    enteringParamSync = (deviceModes ~= paramSyncMode) & (newModes == paramSyncMode);
+    if any(leavingParamSync)
+        deviceModes(leavingParamSync) = newModes(leavingParamSync);
+        obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
+        obj.triggerMode = deviceModes;
+    end
+    programBuffered = any(deviceModes == paramSyncMode);
 
-% Sends the GUI's parameters in one command, whatever autoSync is. The custom trains follow, before a trigger channel
-% enters param sync mode: in param sync mode the device stores both for the next TTL, and otherwise loads both at once.
-obj.importParams(obj.ui.params);
-for iTrain = 1:obj.info.nCustomPulseTrains
-    timestampString = obj.ui.customTrain.timestamps{iTrain};
-    voltageString = obj.ui.customTrain.voltages{iTrain};
-    if ~isempty(timestampString) || ~isempty(voltageString)
-        timestamps = str2double(split(timestampString, ','))';
-        voltages = str2double(split(voltageString, ','))';
-        nTimestamps = length(timestamps);
-        nVoltages = length(voltages);
-        if nTimestamps ~= nVoltages
-            errordlg(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
-            error(['Failed to load custom pulse train ' num2str(iTrain) ': the number of timestamps and voltages must match.'])
-        end
-        if nTimestamps > 0
-            obj.sendCustomTrain(iTrain, timestamps, voltages);
+    % Sends the GUI's parameters in one command, whatever autoSync is. The custom trains follow, before a trigger
+    % channel enters param sync mode: in param sync mode the device stores both for the next TTL, and otherwise loads
+    % both at once.
+    obj.importParams(obj.ui.params);
+    for iTrain = 1:nTrains
+        if ~isempty(trains{iTrain, 1})
+            obj.sendCustomTrain(iTrain, trains{iTrain, 1}, trains{iTrain, 2});
         end
     end
-end
-if any(enteringParamSync)
-    obj.autoSync = true;
-    obj.triggerMode = newModes;
+    if any(enteringParamSync)
+        obj.autoSync = true;
+        obj.triggerMode = newModes;
+    end
+catch err
+    uploadFailed(obj, ['Failed to load the program to the device: ' err.message])
+    return
 end
 clear cleanup % Restores autoSync
 if programBuffered
@@ -842,6 +849,10 @@ if ischar(file) && ischar(path)
             [params, timestamps, voltages] = readJsonProgram(obj, fullfile(path, file));
         else
             [params, timestamps, voltages] = readMatProgram(obj, fullfile(path, file));
+        end
+        if any(params.customTrainID > obj.info.nCustomPulseTrains)
+            % A program saved on Pulse Pal 3 can use custom trains 3 and 4, which Pulse Pal 2 does not have
+            error('customTrainID names a custom train this device does not have.')
         end
     catch err
         errordlg(['Failed to open ' file ': ' err.message])
@@ -948,4 +959,49 @@ function resetGUISelections(obj)
 obj.ui.ChannelButtonGroup_OutputChan.SelectedObject = obj.ui.RadioButton_OutputCh1;
 obj.ui.ChannelButtonGroup_TriggerChan.SelectedObject = obj.ui.RadioButton_TriggerCh1;
 obj.ui.ListBox_CustomTrainID.Value = '1';
+end
+
+function uploadFailed(obj, message)
+% Reports a program that was not loaded, in a dialog and on the status line
+errordlg(message)
+obj.ui.StatusLabel.Text = 'Status: Program Not Loaded';
+end
+
+function [low, high, label] = fieldRange(obj, paramName)
+% The values an edit field takes (paramName as in its EditField_ name), and its label: as in the Python GUI
+% (_FIELD_RANGES), the limits the class checks (see "Value limits" in /Firmware/PROTOCOL.md)
+switch paramName
+    case {'RestingVoltage', 'Phase1Voltage', 'Phase2Voltage'}
+        low = -10;
+        high = 10;
+    case {'Phase1Duration', 'Phase2Duration', 'InterPulseInterval', 'PulseTrainDuration'}
+        low = obj.info.minPulseWidth_us / 1e6;
+        high = obj.info.maxTime;
+    otherwise % InterPhaseInterval, BurstDuration, InterBurstInterval, PulseTrainDelay
+        low = 0;
+        high = obj.info.maxTime;
+end
+labels = struct('RestingVoltage', 'Resting (V)', 'Phase1Voltage', 'Phase1 (V)', 'Phase2Voltage', 'Phase2 (V)', ...
+                'Phase1Duration', 'Phase1 (s)', 'InterPhaseInterval', 'Phase Interval', 'Phase2Duration', 'Phase2 (s)', ...
+                'InterPulseInterval', 'Pulse Interval', 'BurstDuration', 'Burst (s)', ...
+                'InterBurstInterval', 'Burst Interval', 'PulseTrainDuration', 'Train (s)', 'PulseTrainDelay', 'Train Delay');
+label = labels.(paramName);
+end
+
+function text = textAreaText(textArea)
+% A text area's text, its lines joined by new lines
+text = char(strjoin(reshape(string(textArea.Value), 1, []), newline));
+end
+
+function values = parseNumberList(text)
+% The numbers in a custom train's text, separated by commas or new lines, as the Python GUI reads them
+% (_parse_number_list()): an item left empty, by a trailing comma or a blank line, is skipped, and an item that is not
+% a number is NaN. A row.
+items = strtrim(split(string(text), [",", string(newline), string(char(13))]));
+items = items(strlength(items) > 0);
+if isempty(items)
+    values = zeros(1, 0);
+    return
+end
+values = reshape(str2double(items), 1, []);
 end

@@ -128,7 +128,9 @@ Parameters programmed during playback (ops 73, 74, 91, 92, a settings file load)
 once, including in trains that are playing, except a train's duration: its end is set when it
 starts, so a new pulse train duration applies from the next train. A new resting voltage goes to
 an idle channel's output at once. A channel playing a pulse train is not interrupted: it moves to
-the new resting voltage at its next transition to rest. A custom train load (op 95) stops the
+the new resting voltage at its next transition to rest. A change that switches a channel's bursts
+off between two bursts (a burst duration or interval of 0, or a custom train targeting pulses)
+starts its pulses again when its next burst would have started. A custom train load (op 95) stops the
 channels playing that train, outside param sync mode (see [Custom trains](#custom-trains)).
 
 Transitions are scheduled in timer cycles, and a channel makes each one in the first cycle at

@@ -1695,6 +1695,7 @@ class PulsePalGUI:
         self._store_train_boxes()
         custom_trains = self._collect_custom_trains()
         if custom_trains is None:
+            self._set_status("Program Not Loaded")
             return
 
         for index in range(4):
@@ -1707,6 +1708,7 @@ class PulsePalGUI:
                     "times target burst onsets, a non-zero burst duration "
                     "must be defined."
                 )
+                self._set_status("Program Not Loaded")
                 return
 
         try:
@@ -1734,6 +1736,8 @@ class PulsePalGUI:
         except Exception as exc:
             self._show_error(f"Failed to load the program to the device:\n"
                              f"{exc}")
+            # Not the last program's "Loaded" status
+            self._set_status("Program Not Loaded")
             return
         if buffered:
             self._set_status("Program Buffered for Next Param Sync TTL")

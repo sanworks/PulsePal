@@ -170,7 +170,8 @@ static inline void endCustomTrainPass(byte channel, byte block) {
 //     NextPulseTransitionTime or NextBurstTransitionTime (see timeReached()).
 //       PreStimulusStatus = 1   Waiting for PulseTrainDelay to elapse, then StimulusStatus = 1
 //       StimulusStatus = 1      Playing the pulse train
-//         BurstStatus           1 during a burst, 0 between bursts (always 1 if UsesBursts is false)
+//         BurstStatus           1 during a burst, 0 between bursts. Pulses play whenever UsesBursts is false, whatever it says
+//                               (see the burst check below)
 //           PulseStatus         PULSE_IDLE -> PULSE_PHASE1 -> [PULSE_INTER_PHASE] -> [PULSE_PHASE2] -> PULSE_IDLE
 //                               (bracketed phases are for biphasic pulses only)
 //     Parametric trains and looping custom trains stop at PulseTrainEndTime, unless ContinuousLoopMode is set.
@@ -380,7 +381,13 @@ void handler(void) {
           if (StimulatingState != 2) {
            StimulatingState = 1; 
           }
-        if (BurstStatus[x] == 1) { // if this output line is currently gated "on"
+        // Pulses play during a burst, or always when the channel no longer uses bursts. A change that switched bursts off
+        // between two bursts (a burst duration or interval of 0, or a custom train targeting pulses) left BurstStatus 0,
+        // and only the burst code below, which runs only while UsesBursts, sets it back: the rest of the train played
+        // nothing, and a train that does not end at its duration (a custom train that does not loop, continuous loop
+        // mode) stayed "playing" for ever, ignoring triggers. So did a channel started by a trigger in the same cycle as
+        // a stop command, which killChannel() in loop() then left with BurstStatus 0.
+        if ((BurstStatus[x] == 1) || !UsesBursts[x]) {
           switch (PulseStatus[x]) { // depending on the phase of the pulse
            case PULSE_IDLE: { // if this is the inter-pulse interval
             // determine if the next pulse should start now
