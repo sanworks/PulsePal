@@ -78,9 +78,9 @@ pulse times are not rounded: each must be a multiple of
 
 `PulsePalDevice.export_params` returns every parameter as a dict, to
 store with your data or in a file, and `PulsePalDevice.import_params`
-programs the device with one. The device's microSD card holds settings
-files too, which its joystick menu can load:
-`PulsePalDevice.save_settings_file`.
+programs the device with one. The device's microSD card holds programs
+too, which its joystick menu can load:
+`PulsePalDevice.save_program_to_microsd`.
 
 ## Further reading
 
@@ -1199,17 +1199,17 @@ class PulsePalDevice:
         bits = 0x0F if channels is None else _common.channel_bits(channels)
         self._write_serial((self._OP_MENU_BYTE, 98, bits), "uint8")
 
-    def save_settings_file(self, file_name):
-        """Save the parameters to a settings file on the device's microSD card.
+    def save_program_to_microsd(self, file_name):
+        """Save the parameters to the device's microSD card, as a program.
 
-        A settings file holds a complete Pulse Pal program, which can be
-        loaded later with `PulsePalDevice.load_settings_file` or from the
-        device's joystick menu. A file of the same name is replaced. To
-        keep parameters on this computer instead, see
+        The program can be loaded later with
+        `PulsePalDevice.load_program_from_microsd` or with the joystick
+        menu's Load Program item. A file of the same name is replaced. To
+        keep the parameters on this computer instead, see
         `PulsePalDevice.export_params`.
 
         ```python
-        P.save_settings_file("MyProtocol.pps")
+        P.save_program_to_microsd("MyProtocol.pps")
         ```
 
         Args:
@@ -1219,39 +1219,40 @@ class PulsePalDevice:
             PulsePalError: If the file name is invalid, or the device could
                 not write the file to its microSD card.
         """
-        self._settings_file_op(file_name, 1, "save_settings_file()")
+        self._settings_file_op(file_name, 1, "save_program_to_microsd()")
 
-    def load_settings_file(self, file_name):
-        """Load a settings file from the device's microSD card.
+    def load_program_from_microsd(self, file_name):
+        """Load a program from the device's microSD card.
 
-        The device plays the program in the file, and the parameters are
-        read back into this object (see `PulsePalDevice.sync_from_device`).
-        The file's trigger modes take effect too, and the program is loaded
-        at once, also in param sync mode.
+        The device plays the program, and the parameters are read back
+        into this object (see `PulsePalDevice.sync_from_device`). The
+        program's trigger modes take effect too, and it is loaded at once,
+        also in param sync mode.
 
         Args:
-            file_name: The file's name, ending in `.pps`, as saved by
-                `PulsePalDevice.save_settings_file` or the joystick menu.
+            file_name: The program's file name, ending in `.pps`, as saved
+                by `PulsePalDevice.save_program_to_microsd` or the joystick
+                menu.
 
         Raises:
             PulsePalError: If the file name is invalid, or the device could
-                not load the file: there is no such file on its microSD
-                card, or it is not a valid settings file. The device then
-                keeps its parameters, and so does this object.
+                not load the program: there is no such file on its microSD
+                card, or it is not a valid Pulse Pal program. The device
+                then keeps its parameters, and so does this object.
         """
-        self._settings_file_op(file_name, 2, "load_settings_file()")
+        self._settings_file_op(file_name, 2, "load_program_from_microsd()")
 
-    def delete_settings_file(self, file_name):
-        """Delete a settings file from the device's microSD card.
+    def delete_program_from_microsd(self, file_name):
+        """Delete a program from the device's microSD card.
 
         Args:
-            file_name: The file's name, ending in `.pps`.
+            file_name: The program's file name, ending in `.pps`.
 
         Raises:
             PulsePalError: If the file name is invalid, or the device could
                 not delete the file, e.g. because there is no such file.
         """
-        self._settings_file_op(file_name, 3, "delete_settings_file()")
+        self._settings_file_op(file_name, 3, "delete_program_from_microsd()")
 
     def _settings_file_op(self, file_name, op_byte, context):
         """Save (op_byte 1), load (2) or delete (3) a settings file, with op 90."""
@@ -1278,7 +1279,7 @@ class PulsePalDevice:
             refusal = {
                 1: f"Pulse Pal could not save {file_name!r} to its microSD card. Is the card in place?",
                 2: f"Pulse Pal could not load {file_name!r}: there is no such file on its microSD card, or it is not "
-                   "a valid settings file. The device keeps its parameters.",
+                   "a valid Pulse Pal program. The device keeps its parameters.",
                 3: f"Pulse Pal could not delete {file_name!r}: there is no such file on its microSD card.",
             }[op_byte]
             self._read_ack(context, refusal_message=refusal)
@@ -1290,7 +1291,7 @@ class PulsePalDevice:
     def format_microsd(self, *, confirm=True, timeout=30):
         """Format the device's microSD card.
 
-        Erases every settings file stored on the device and resets its
+        Erases every program saved on the device and resets its
         parameters to the defaults. By default, asks at the console for
         confirmation first; a script that runs on its own, or an AI agent,
         passes `confirm=False`.
@@ -1320,7 +1321,7 @@ class PulsePalDevice:
         if to_bool(confirm, "confirm"):
             print("*** Pulse Pal microSD Formatter ***")
             print("This will format Pulse Pal's microSD card,")
-            print("erase all settings files on the device")
+            print("erase all programs saved on the device")
             print("and reset all parameters to defaults.")
             reply = input("Do you want to continue (y/n)")
             if reply.strip().lower() != "y":

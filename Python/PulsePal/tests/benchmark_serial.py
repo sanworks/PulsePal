@@ -83,12 +83,12 @@ def main():
                    timed(lambda: P.send_custom_pulse_train(1, times, voltages), repeats),
                    payload_bytes=n_pulses * 6 + 7)
 
-        # Settings file round trip through the microSD card
-        report("save_settings_file (op 90)",
-               timed(lambda: P.save_settings_file("BENCH.pps"), max(5, arguments.repeats // 20)))
-        report("load_settings_file (op 90 + 93)",
-               timed(lambda: P.load_settings_file("BENCH.pps"), max(5, arguments.repeats // 20)))
-        P.delete_settings_file("BENCH.pps")
+        # Program round trip through the microSD card
+        report("save_program_to_microsd (op 90)",
+               timed(lambda: P.save_program_to_microsd("BENCH.pps"), max(5, arguments.repeats // 20)))
+        report("load_program_from_microsd (op 90 + 93)",
+               timed(lambda: P.load_program_from_microsd("BENCH.pps"), max(5, arguments.repeats // 20)))
+        P.delete_program_from_microsd("BENCH.pps")
         print("\nDone. The device has been left with the default parameters.")
 
 

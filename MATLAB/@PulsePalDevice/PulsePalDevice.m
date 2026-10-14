@@ -96,10 +96,11 @@
 %   setDefaultParams()                   Programs the default parameters
 %   exportParams()                       Returns every parameter as a struct, e.g. to save with your data;
 %                                        importParams(params) programs the device with one
-%   saveParameters(fileName)             Saves the parameters to a .json program file, which both GUIs open;
-%                                        loadParameters(fileName) programs the device with one
-%   saveSettingsFile(fileName)           Saves the parameters to a settings file on the device's microSD card;
-%                                        loadSettingsFile(fileName) and deleteSettingsFile(fileName)
+%   saveProgramToFile(fileName)          Saves the parameters to a .json program file on this computer, which both
+%                                        GUIs open; loadProgramFromFile(fileName) programs the device with one
+%   saveProgramToMicroSD(fileName)       Saves the parameters to the device's microSD card, as a program its joystick
+%                                        menu can load; loadProgramFromMicroSD(fileName) and
+%                                        deleteProgramFromMicroSD(fileName)
 %   gui()                                Opens the parameter editor window
 %   setScreenSaver(enabled, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
 % info holds the connected device's hardware and firmware versions, and its limits. info.circuitBoardRevision is the
@@ -179,7 +180,7 @@ classdef PulsePalDevice < handle
         MaxTime = 9999.9999 % Longest time parameter or custom pulse time, in seconds: the most the device's joystick
                             % menu shows and edits (four digits before the point), as in the Python and C++ classes
         MaxSettingsFileNameLength = 15 % Characters, including '.pps'
-        ProgramFormatVersion = 1 % Version of the program file format (see saveParameters()), as in the Python GUI
+        ProgramFormatVersion = 1 % Version of the program file format (see saveProgramToFile()), as in the Python GUI
         % Output parameter names in order of their parameter code, and the kind of value each takes. The codes are
         % fixed: see "Parameter codes" in /Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
         ParamNames = {...
@@ -394,8 +395,8 @@ classdef PulsePalDevice < handle
 
         function syncFromDevice(obj)
             % Reads every parameter from the device into the properties, e.g. after they were changed with the
-            % joystick or by loading a settings file. Requires firmware v22 or newer. continuousLoop is left as it
-            % is: the device does not report it.
+            % joystick or by loading a program from the microSD card. Requires firmware v22 or newer. continuousLoop is
+            % left as it is: the device does not report it.
             obj.importCurrentParamsFromPulsePal;
         end
 
@@ -530,7 +531,7 @@ classdef PulsePalDevice < handle
             % triggerMode) holding one value per channel, e.g. to save with your data and record exactly what the
             % device played. importParams() programs the device with it again. Example:
             %   params = P.exportParams();
-            %   save('Trial12.mat', 'params');           % Or P.saveParameters('Trial12.json'), for a text file
+            %   save('Trial12.mat', 'params');           % Or P.saveProgramToFile('Trial12.json'), for a text file
             % The Python class's export_params() returns the same, with snake_case names.
             params = struct;
             for i = 1:numel(obj.ParamNames)
@@ -552,7 +553,8 @@ classdef PulsePalDevice < handle
             if isfield(params, 'playbackMode') && ~isfield(params, 'continuousLoop')
                 params.continuousLoop = params.playbackMode; % The parameter's name before continuousLoop
             end
-            % Files saved by earlier versions of saveParameters() also hold autoSync, which is not a parameter
+            % Files saved by earlier versions of saveProgramToFile(), then called saveParameters(), also hold autoSync,
+            % which is not a parameter
             names = setdiff(fieldnames(params), {'playbackMode', 'autoSync'}, 'stable');
             unknown = setdiff(names, [obj.ParamNames {'triggerMode'}], 'stable');
             if ~isempty(unknown)
@@ -585,24 +587,27 @@ classdef PulsePalDevice < handle
             clear cleanup
         end
 
-        function saveParameters(obj, fileName)
-            % Saves the parameters to a program file on this computer, e.g. P.saveParameters('MyProgram.json'): the
-            % .json file both GUIs save and open (see "Program files" in /USING.md). Its params are exportParams()
+        function saveProgramToFile(obj, fileName)
+            % Saves the parameters to a program file on this computer, e.g. P.saveProgramToFile('MyProgram.json'):
+            % the .json file both GUIs save and open (see "Program files" in /USING.md). Its params are exportParams()
             % with the Python class's snake_case names, which its import_params() takes as they are.
-            % loadParameters() programs the device with them again.
+            % loadProgramFromFile() programs the device with them again. To keep a program on the device instead, see
+            % saveProgramToMicroSD().
             if ~(ischar(fileName) || (isstring(fileName) && isscalar(fileName))) || ~endsWith(lower(fileName), '.json')
-                error('The file to save must be a .json file, e.g. P.saveParameters(''MyProgram.json'')')
+                error('The file to save must be a .json file, e.g. P.saveProgramToFile(''MyProgram.json'')')
             end
             obj.writeProgramFile(char(fileName), obj.exportParams(), {}, {});
         end
 
-        function loadParameters(obj, fileName)
-            % Programs the device with the parameters in a program file (see importParams): a .json file saved by
-            % saveParameters() or by either GUI, or a .mat file saved by saveParameters() before it saved .json files.
-            % Parameters the file leaves out keep their values, and autoSync is left as it is. The custom trains in a
-            % GUI's program are not loaded: open it with gui() for those.
+        function loadProgramFromFile(obj, fileName)
+            % Programs the device with the parameters in a program file on this computer (see importParams): a .json
+            % file saved by saveProgramToFile() or by either GUI, or a .mat file saved by saveParameters(), as
+            % saveProgramToFile() was called before it saved .json files. Parameters the file leaves out keep their
+            % values, and autoSync is left as it is. The custom trains in a GUI's program are not loaded: open it with
+            % gui() for those. To load a program from the device's microSD card, see loadProgramFromMicroSD().
             if ~(ischar(fileName) || (isstring(fileName) && isscalar(fileName)))
-                error('loadParameters() takes the name of a .json file, e.g. P.loadParameters(''MyProgram.json'')')
+                error(['loadProgramFromFile() takes the name of a .json file, ' ...
+                       'e.g. P.loadProgramFromFile(''MyProgram.json'')'])
             end
             fileName = char(fileName);
             if endsWith(lower(fileName), '.mat')
@@ -615,36 +620,36 @@ classdef PulsePalDevice < handle
             end
             [params, timestamps, voltages] = obj.readProgramFile(fileName);
             if any(~cellfun(@isempty, [timestamps voltages]))
-                warning('PulsePalDevice:customTrainsNotLoaded', ['loadParameters() loads the parameters only: ' ...
+                warning('PulsePalDevice:customTrainsNotLoaded', ['loadProgramFromFile() loads the parameters only: ' ...
                         'open ' fileName ' with gui() to load its custom trains too.'])
             end
             obj.importParams(params);
         end
 
-        function saveSettingsFile(obj, fileName)
-            % Saves the parameters to a settings file on the device's microSD card, e.g.
-            % P.saveSettingsFile('MyProgram.pps'). fileName: 1 to 11 ASCII characters followed by .pps. A file of the
-            % same name is replaced. loadSettingsFile() and the device's joystick menu load it. To keep the parameters
-            % on this computer instead, see exportParams().
-            obj.settingsFileOp(fileName, 1, 'saveSettingsFile()');
+        function saveProgramToMicroSD(obj, fileName)
+            % Saves the parameters to the device's microSD card, as a program, e.g.
+            % P.saveProgramToMicroSD('MyProgram.pps'). fileName: 1 to 11 ASCII characters followed by .pps. A file of
+            % the same name is replaced. loadProgramFromMicroSD() and the joystick menu's Load Program item load it.
+            % To keep the parameters on this computer instead, see saveProgramToFile() and exportParams().
+            obj.settingsFileOp(fileName, 1, 'saveProgramToMicroSD()');
         end
 
-        function loadSettingsFile(obj, fileName)
-            % Loads a settings file from the device's microSD card, e.g. P.loadSettingsFile('MyProgram.pps'). The
-            % device plays the program in it, and the parameters are read back into the properties (see
-            % syncFromDevice). The program is loaded at once, also in param sync mode. If there is no such file, or it
-            % is not a valid settings file, an error is raised, and the device and the properties keep their values.
-            obj.settingsFileOp(fileName, 2, 'loadSettingsFile()');
+        function loadProgramFromMicroSD(obj, fileName)
+            % Loads a program from the device's microSD card, e.g. P.loadProgramFromMicroSD('MyProgram.pps'). The
+            % device plays the program, and the parameters are read back into the properties (see syncFromDevice).
+            % The program is loaded at once, also in param sync mode. If there is no such file, or it is not a valid
+            % program, an error is raised, and the device and the properties keep their values.
+            obj.settingsFileOp(fileName, 2, 'loadProgramFromMicroSD()');
         end
 
-        function deleteSettingsFile(obj, fileName)
-            % Deletes a settings file from the device's microSD card, e.g. P.deleteSettingsFile('MyProgram.pps').
+        function deleteProgramFromMicroSD(obj, fileName)
+            % Deletes a program from the device's microSD card, e.g. P.deleteProgramFromMicroSD('MyProgram.pps').
             % Raises an error if there is no such file.
-            obj.settingsFileOp(fileName, 3, 'deleteSettingsFile()');
+            obj.settingsFileOp(fileName, 3, 'deleteProgramFromMicroSD()');
         end
 
         function formatted = formatMicroSD(obj, varargin)
-            % Formats the device's microSD card (Pulse Pal 3), which erases every settings file on it, and programs
+            % Formats the device's microSD card (Pulse Pal 3), which erases every program saved on it, and programs
             % the default parameters. By default it asks for confirmation at the command prompt first. A script that
             % runs on its own, or an AI agent, formats without asking:
             %   P.formatMicroSD('Confirm', false);
@@ -667,7 +672,7 @@ classdef PulsePalDevice < handle
             if confirm
                 disp('*** Pulse Pal microSD Formatter ***')
                 disp('This will format Pulse Pal''s microSD card,')
-                disp('erase all settings files on the device')
+                disp('erase all programs saved on the device')
                 disp('and reset all parameters to defaults.')
                 reply = input('Do you want to continue (y/n) > ', 's');
                 if ~strcmpi(strtrim(reply), 'y')
@@ -1236,7 +1241,7 @@ classdef PulsePalDevice < handle
                         error(['Pulse Pal could not save ' fileName ' to its microSD card. Is the card in place?'])
                     case 2
                         error(['Pulse Pal could not load ' fileName ': there is no such file on its microSD card, ' ...
-                               'or it is not a valid settings file. The device keeps its parameters.'])
+                               'or it is not a valid Pulse Pal program. The device keeps its parameters.'])
                     otherwise
                         error(['Pulse Pal could not delete ' fileName ': there is no such file on its microSD card.'])
                 end
@@ -1291,7 +1296,7 @@ classdef PulsePalDevice < handle
         end
 
         function writeProgramFile(obj, fileName, params, timestamps, voltages)
-            % Writes a program file (see saveParameters()), in the Python GUI's format: format_version, then params,
+            % Writes a program file (see saveProgramToFile()), in the Python GUI's format: format_version, then params,
             % the custom trains' text and the device's info. params: parameters by their MATLAB names, in any form an
             % assignment takes (names or codes, logicals or 0 and 1), written as exportParams() holds them, with the
             % Python class's snake_case names. timestamps and voltages: the text of each custom train, as the GUI's
@@ -1345,7 +1350,7 @@ classdef PulsePalDevice < handle
         end
 
         function [params, timestamps, voltages] = readProgramFile(obj, fileName)
-            % Reads a program file (see saveParameters()). params: the parameters it holds, by their MATLAB names, as
+            % Reads a program file (see saveProgramToFile()). params: the parameters it holds, by their MATLAB names, as
             % the file holds them (names and logicals, or the GUIs' numbers in files from before format_version), each
             % as a row. timestamps and voltages: the text of each custom train, 1x4, '' for none. Keys that are not
             % parameters of this class are skipped with a warning.

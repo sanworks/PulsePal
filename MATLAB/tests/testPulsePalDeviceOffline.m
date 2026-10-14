@@ -177,28 +177,28 @@ end
 
 function testSettingsFiles()
 [P, port] = connect();
-P.saveSettingsFile('Protocol1.pps');
-P.loadSettingsFile('ABCDEFGHIJK.PPS'); % 15 characters
-P.deleteSettingsFile("Protocol1.pps");
+P.saveProgramToMicroSD('Protocol1.pps');
+P.loadProgramFromMicroSD('ABCDEFGHIJK.PPS'); % 15 characters
+P.deleteProgramFromMicroSD("Protocol1.pps");
 assert(isequal(port.writes, {uint8([213 90 1 13 double('Protocol1.pps')]), ...
     uint8([213 90 2 15 double('ABCDEFGHIJK.PPS')]), uint8([213 93]), ...
     uint8([213 90 3 13 double('Protocol1.pps')])}), 'op 90 messages');
 port.clearWrites();
 for name = {'Protocol1', 'Protocol1.pps.txt', 'ABCDEFGHIJKL.pps', '.pps', ['Pr' char(246) 'tocol.pps'], 5}
-    expectError(@() P.saveSettingsFile(name{1}));
+    expectError(@() P.saveProgramToMicroSD(name{1}));
 end
 assert(isempty(port.writes), 'a refused file name was sent');
 % A refused load changes nothing on the device, so nothing is read back; a refused save or deletion says so
 P.phase1Voltage(1) = 2.5;
 port.clearWrites();
 port.loadReply = 0;
-message = expectError(@() P.loadSettingsFile('MISSING.pps'));
-assert(contains(message, 'no such file on its microSD card, or it is not a valid settings file'), message);
+message = expectError(@() P.loadProgramFromMicroSD('MISSING.pps'));
+assert(contains(message, 'no such file on its microSD card, or it is not a valid Pulse Pal program'), message);
 assert(isscalar(port.writes) && P.phase1Voltage(1) == 2.5, 'a refused load changed the properties');
 port.ack = 0;
-message = expectError(@() P.saveSettingsFile('NEW.pps'));
+message = expectError(@() P.saveProgramToMicroSD('NEW.pps'));
 assert(contains(message, 'could not save NEW.pps'), message);
-message = expectError(@() P.deleteSettingsFile('MISSING.pps'));
+message = expectError(@() P.deleteProgramFromMicroSD('MISSING.pps'));
 assert(contains(message, 'could not delete MISSING.pps'), message);
 end
 
@@ -295,8 +295,8 @@ assert(~P2.autoSync && numel(port2.writes) == nWrites + 1, 'autoSync');
 end
 
 function testProgramFiles()
-% saveParameters() writes the program file both GUIs open, in the Python GUI's format; loadParameters() reads it, and
-% the .mat files saveParameters() wrote before
+% saveProgramToFile() writes the program file both GUIs open, in the Python GUI's format; loadProgramFromFile() reads
+% it, and the .mat files saveParameters(), its earlier name, wrote before
 P = connect();
 P.phase1Voltage(2) = 2.5;
 P.burstDuration(3) = 0.1;
@@ -306,7 +306,7 @@ P.triggerMode{1} = 'Toggle';
 fileName = [tempname '.json'];
 matName = [tempname '.mat'];
 cleanup = onCleanup(@() delete(fileName));
-P.saveParameters(fileName);
+P.saveProgramToFile(fileName);
 program = jsondecode(fileread(fileName));
 assert(program.format_version == 1, 'format_version');
 assert(isequal(program.params.phase1_voltage', [5 2.5 5 5]) && ...
@@ -317,7 +317,7 @@ assert(numel(fieldnames(program.params)) == 19, 'every parameter is saved');
 assert(strcmp(program.device_info.output_parameter_names{1}, 'is_biphasic') && ...
        program.device_info.n_custom_pulse_trains == 4, 'device_info');
 [P2, port2] = connect();
-P2.loadParameters(fileName);
+P2.loadProgramFromFile(fileName);
 assert(isequal(P2.exportParams(), P.exportParams()), 'loaded params');
 assert(isscalar(port2.writes) && port2.writes{1}(2) == 92, 'loading is not one op 92');
 % A key this version does not know is skipped with a warning
@@ -326,16 +326,16 @@ fileID = fopen(fileName, 'w');
 fwrite(fileID, text, 'char');
 fclose(fileID);
 P2.setDefaultParams();
-id = expectWarning(@() P2.loadParameters(fileName));
+id = expectWarning(@() P2.loadProgramFromFile(fileName));
 assert(strcmp(id, 'PulsePalDevice:unknownParams') && isequal(P2.exportParams(), P.exportParams()), 'unknown key');
 % A .mat file saved by saveParameters() before it saved .json files
 params = P.exportParams();
 save(matName, 'params');
 matCleanup = onCleanup(@() delete(matName));
 P2.setDefaultParams();
-P2.loadParameters(matName);
+P2.loadProgramFromFile(matName);
 assert(isequal(P2.exportParams(), P.exportParams()), '.mat file');
-expectError(@() P.saveParameters('Program.mat'));
+expectError(@() P.saveProgramToFile('Program.mat'));
 end
 
 function testSyncFromDeviceStoresWhatTheDeviceHolds()
@@ -366,7 +366,8 @@ end
 function testMethodsReturnNothing()
 % Failures raise an error, so a returned confirmation would always be true
 methodList = ?PulsePalDevice;
-for name = {'syncToDevice', 'syncFromDevice', 'saveSettingsFile', 'loadSettingsFile', 'deleteSettingsFile'}
+for name = {'syncToDevice', 'syncFromDevice', 'saveProgramToMicroSD', 'loadProgramFromMicroSD', ...
+            'deleteProgramFromMicroSD'}
     method = findobj(methodList.MethodList, 'Name', name{1});
     assert(isempty(method.OutputNames), '%s returns a value', name{1});
 end

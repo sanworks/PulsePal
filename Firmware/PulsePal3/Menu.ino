@@ -50,9 +50,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // MENU_TOP              "Click for menu". Click -> MENU_CHANNEL_LIST
 // MENU_CHANNEL_LIST     SelectedChannel      1-4   Output channels -> MENU_OUTPUT_CHANNEL
 //                                            5-6   Trigger channels -> MENU_TRIGGER_CHANNEL
-//                                            7     Save settings -> MENU_FILE_SAVE
-//                                            8     Load settings -> MENU_FILE_LOAD
-//                                            9     Erase settings -> MENU_FILE_DELETE
+//                                            7     Save program -> MENU_FILE_SAVE
+//                                            8     Load program -> MENU_FILE_LOAD
+//                                            9     Erase program -> MENU_FILE_DELETE
 //                                            10    Screen saver on/off (MENU_ITEM_SCREEN_SAVER, Pulse Pal 3 only)
 //                                            11    Device info (MENU_ITEM_DEVICE_INFO)
 //                                            12    Reset (MENU_ITEM_RESET)
@@ -129,19 +129,19 @@ void UpdateSettingsMenu() {
                 SelectedChannel = 2;
                 write2Screen("< Trigger Now  >"," ");
               } break;
-              case 7: { // Save settings
+              case 7: { // Save program
                 inMenu = MENU_FILE_SAVE; // file save menu
                 myFilePos = 1;
                 RefreshFileMenu();
               } break;
-              case 8: { // Load settings
+              case 8: { // Load program
                 inMenu = MENU_FILE_LOAD; // file load menu
                 settingsFile.close();
                 myFilePos = 1;
                 RefreshFileMenu();
                 settingsFile.open(currentSettingsFileNameChar, O_READ);
               } break;
-              case 9: { // Delete settings
+              case 9: { // Erase program
                 inMenu = MENU_FILE_DELETE;
                 settingsFile.close();
                 myFilePos = 1;
@@ -275,7 +275,7 @@ void UpdateSettingsMenu() {
           if (myFilePos < 1) {
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 8;
-            write2Screen(" LOAD SETTINGS  ","<Click to load >");
+            write2Screen("  LOAD PROGRAM  ","<Click to load >");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
@@ -284,18 +284,18 @@ void UpdateSettingsMenu() {
             settingsFile.open(candidateSettingsFileChar, O_READ);
             validProgram = RestoreParametersFromSD();
             if (validProgram != SETTINGS_FILE_END_MARKER) {
-              write2Screen("!ERROR! INVALID ","SETTINGS FILE.");
+              write2Screen("!ERROR! INVALID ","PROGRAM FILE.");
               delayMicroseconds(1000000);
               settingsFile.close(); // Nothing was loaded: the device keeps its parameters, and its settings file
               settingsFile.open(currentSettingsFileNameChar, O_READ);
             } else {
               outputRestingVoltages();
               strcpy(currentSettingsFileNameChar, candidateSettingsFileChar);
-              write2Screen("Settings loaded."," ");
+              write2Screen("Program loaded."," ");
               delayMicroseconds(1000000);
               inMenu = MENU_CHANNEL_LIST;
               SelectedChannel = 8;
-              write2Screen(" LOAD SETTINGS  ","<Click to load >");
+              write2Screen("  LOAD PROGRAM  ","<Click to load >");
               NeedUpdate = 1;
             }
           }
@@ -304,7 +304,7 @@ void UpdateSettingsMenu() {
           if (myFilePos < 1) {
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 7;
-            write2Screen(" SAVE SETTINGS  ","<Click to save >");
+            write2Screen("  SAVE PROGRAM  ","<Click to save >");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
@@ -412,14 +412,14 @@ void UpdateSettingsMenu() {
             if (nameIsReserved) {
               write2Screen("Name reserved.", " ");
             } else if (SaveCurrentProgram2SD()) {
-              write2Screen("Settings saved."," ");
+              write2Screen("Program saved."," ");
             } else {
-              write2Screen("!ERROR! SETTINGS","NOT SAVED.");
+              write2Screen("!ERROR! PROGRAM ","NOT SAVED.");
             }
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 7;
-            write2Screen(" SAVE SETTINGS  ","<Click to save >");
+            write2Screen("  SAVE PROGRAM  ","<Click to save >");
             NeedUpdate = 1;
             myFilePos = 2;
           }
@@ -428,20 +428,20 @@ void UpdateSettingsMenu() {
           if (myFilePos < 1) {
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 9;
-            write2Screen(" ERASE SETTINGS ","<Click to erase>");
+            write2Screen(" ERASE PROGRAM  ","<Click to erase>");
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
             if (!isDefaultSettingsFile(candidateSettingsFileChar) && // Selected in RefreshFileMenu(), which does not list the default file
                 sd.remove(candidateSettingsFileChar)) {
-              write2Screen("Settings erased."," ");
+              write2Screen("Program erased."," ");
             } else {
-              write2Screen("!ERROR! SETTINGS","NOT ERASED.");
+              write2Screen("!ERROR! PROGRAM ","NOT ERASED.");
             }
             delayMicroseconds(1000000);
             inMenu = MENU_CHANNEL_LIST;
             SelectedChannel = 9;
-            write2Screen(" ERASE SETTINGS ","<Click to erase>");
+            write2Screen(" ERASE PROGRAM  ","<Click to erase>");
             NeedUpdate = 1;
           }
         } break;
@@ -575,9 +575,9 @@ void RefreshChannelMenu(int ThisChannel) {
         case 4: {write2Screen("Output Channels","<  Channel 4  >");} break;
         case 5: {write2Screen("Trigger Channels","<  Channel 1  >");} break;
         case 6: {write2Screen("Trigger Channels","<  Channel 2  >");} break;
-        case 7: {write2Screen(" SAVE SETTINGS  ","< Select File >");} break;
-        case 8: {write2Screen(" LOAD SETTINGS  ","< Select File >");} break;
-        case 9: {write2Screen(" ERASE SETTINGS ","< Select File >");} break;
+        case 7: {write2Screen("  SAVE PROGRAM  ","< Select File >");} break;
+        case 8: {write2Screen("  LOAD PROGRAM  ","< Select File >");} break;
+        case 9: {write2Screen(" ERASE PROGRAM  ","< Select File >");} break;
         #if (HARDWARE_VERSION > 2)
           case MENU_ITEM_SCREEN_SAVER: {write2Screen("Screen Saver", screenSaverEnabled ? "On" : "Off");} break;
         #endif

@@ -38,8 +38,8 @@ what is new.
 4. **Trigger inputs take TTL:** 0 V low, 3 to 5 V high. A trigger channel reads its input once
    every 50 µs, so a trigger pulse must last at least 100 µs to be seen reliably.
 5. **Connecting programs the defaults.** Whatever the device held (a program set with its
-   joystick, or by an earlier script) is replaced. To keep a program, save it to a settings
-   file on the device and load it after connecting (see "Run without a computer" below). On
+   joystick, or by an earlier script) is replaced. To keep a program, save it to the device's
+   microSD card and load it after connecting (see "Run without a computer" below). On
    Pulse Pal they are the device's own defaults, which it also loads at startup: 5 V pulses of
    0.1 ms, 1 ms apart, for 1 s, on every output channel.
 6. **Closing stops the outputs**, on all three firmwares: `P.close()`, the end of a `with`
@@ -179,7 +179,7 @@ inter_pulse_interval` seconds.
 | `P.import_params(params)` | `P.importParams(params);` | Programs the parameters `export_params()` returned |
 | `P.sync_from_device()` | `P.syncFromDevice();` | Reads the device's parameters into the object, e.g. after using the joystick |
 | `P.set_default_params()` | `P.setDefaultParams();` | Programs the defaults |
-| `P.save_settings_file("A.pps")` | `P.saveSettingsFile('A.pps');` | Saves the parameters to the microSD card; also `load_settings_file`, `delete_settings_file` |
+| `P.save_program_to_microsd("A.pps")` | `P.saveProgramToMicroSD('A.pps');` | Saves the parameters to the microSD card, as a program the joystick menu can load; also `load_program_from_microsd`, `delete_program_from_microsd` |
 | `P.set_screen_saver(True, 300)` | `P.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity (Pulse Pal 3). Kept on the device |
 | `P.gui()` | `P.gui();` | Opens the parameter editor window |
 | `P.close()` | `clear P` | Disconnects, and stops all outputs |
@@ -308,7 +308,7 @@ with open("session_params.json", "w") as f:
     json.dump(P.export_params(), f)
 ```
 
-In MATLAB, `P.saveParameters('session.json')` saves them as a program file (below), or
+In MATLAB, `P.saveProgramToFile('session.json')` saves them as a program file (below), or
 `params = P.exportParams(); save('session.mat', 'params')`.
 
 To record which hardware played them, save `P.info.hardware_version` and
@@ -316,7 +316,7 @@ To record which hardware played them, save `P.info.hardware_version` and
 your data too. Program files hold them in `device_info`.
 
 **Program files.** The Python and MATLAB GUIs save and open the same `.json` program files, and
-MATLAB's `saveParameters()` and `loadParameters()` write and read them too. A program file holds
+MATLAB's `saveProgramToFile()` and `loadProgramFromFile()` write and read them too. A program file holds
 `format_version` (1), `params` (what `export_params()` returns: Python's snake_case names, mode
 names, `true` and `false`), the text of each custom train as typed in a GUI, and `device_info`.
 To program a device from one in Python:
@@ -327,16 +327,16 @@ with open("MyProgram.json") as f:
     P.import_params(json.load(f)["params"])
 ```
 
-In MATLAB, `P.loadParameters('MyProgram.json')`. A GUI's custom trains are loaded only by
-opening the file in a GUI. `import_params()`, `importParams()` and `loadParameters()` skip names
-they do not know, with a warning, and the GUIs ignore them, so a file saved by a newer version
-still loads.
+In MATLAB, `P.loadProgramFromFile('MyProgram.json')`. A GUI's custom trains are loaded only by
+opening the file in a GUI. `import_params()`, `importParams()` and `loadProgramFromFile()` skip
+names they do not know, with a warning, and the GUIs ignore them, so a file saved by a newer
+version still loads.
 
-**Run without a computer.** Save a program to the device's microSD card, then load it from the
-joystick menu (or with `load_settings_file()`):
+**Run without a computer.** Save a program to the device's microSD card, then load it with the
+joystick menu's Load Program item (or with `load_program_from_microsd()`):
 
 ```python
-P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
+P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
 ```
 
 ### Pitfalls
@@ -369,12 +369,12 @@ P.save_settings_file("OPTO20HZ.pps")  # at most 11 characters, then .pps
 - **A biphasic custom pulse always plays whole.** If its phases last longer than the gap to the
   next pulse's time, the next pulse starts late, as it ends. Space biphasic custom pulses at
   least `phase1_duration + inter_phase_interval + phase2_duration` apart to keep their times.
-- **Continuous loop mode is not saved** in settings files, and is not read back by
-  `sync_from_device()`. It starts nothing either, from a script or from the joystick menu's
+- **Continuous loop mode is not saved** in programs on the microSD card, and is not read back
+  by `sync_from_device()`. It starts nothing either, from a script or from the joystick menu's
   Continuous item: the next trigger plays the train until it is stopped. (Firmware v21 started
   the channel.)
-- **A settings file that cannot be loaded changes nothing.** `load_settings_file()` raises an
-  error for a missing or invalid file, and the device keeps its program.
+- **A failed load from the microSD card changes nothing.** `load_program_from_microsd()` raises
+  an error for a missing or invalid file, and the device keeps its program.
 - **A non-zero resting voltage is output all the time** the channel is idle, from the moment
   it is set.
 - **Unplugging the USB cable during playback** stops it: the device shows "COMM. FAILURE!",

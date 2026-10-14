@@ -629,9 +629,10 @@ def test_a_refused_value_is_read_back_from_the_device():
 def test_a_refused_settings_file_operation_says_what_failed():
     """The device refuses a load of a missing or invalid file and keeps its parameters, so nothing is read
     back; and it refuses a save it could not write, and the deletion of a missing file."""
-    for call, text in ((lambda d: d.load_settings_file("MISSING.pps"), "no such file on its microSD card, or it is"),
-                       (lambda d: d.save_settings_file("NEW.pps"), "could not save 'NEW.pps'"),
-                       (lambda d: d.delete_settings_file("MISSING.pps"), "could not delete 'MISSING.pps'")):
+    for call, text in ((lambda d: d.load_program_from_microsd("MISSING.pps"),
+                        "no such file on its microSD card, or it is"),
+                       (lambda d: d.save_program_to_microsd("NEW.pps"), "could not save 'NEW.pps'"),
+                       (lambda d: d.delete_program_from_microsd("MISSING.pps"), "could not delete 'MISSING.pps'")):
         device = make_device()
         device.phase1_voltage[1] = 2.5
         device.port.writes.clear()
@@ -667,7 +668,7 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
     try:
         device = make_device()
         device.port.response = bytearray(bytes([1]) + parameter_message())
-        device.load_settings_file("TEST.pps")
+        device.load_program_from_microsd("TEST.pps")
         assert sleeps == [], sleeps
         assert device.port.reads == [1, 178], device.port.reads
 
@@ -675,7 +676,7 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
         sleeps.clear()
         legacy = make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000)
         try:
-            legacy.load_settings_file("TEST.pps")
+            legacy.load_program_from_microsd("TEST.pps")
         except PulsePalError:
             pass  # v21 has no op 93, so reading the parameters back is unsupported
         assert sleeps == [0.1], sleeps
@@ -686,9 +687,9 @@ def test_settings_file_load_does_not_wait_on_current_firmware():
 def test_settings_files_use_op_90():
     device = make_device()
     device.port.response = bytearray(bytes([1, 1]) + parameter_message() + bytes([1]))
-    device.save_settings_file("Protocol1.pps")
-    device.load_settings_file("ABCDEFGHIJK.PPS")   # 15 characters
-    device.delete_settings_file("Protocol1.pps")
+    device.save_program_to_microsd("Protocol1.pps")
+    device.load_program_from_microsd("ABCDEFGHIJK.PPS")   # 15 characters
+    device.delete_program_from_microsd("Protocol1.pps")
     assert device.port.writes == [
         bytes([OP_MENU_BYTE, 90, 1, 13]) + b"Protocol1.pps",
         bytes([OP_MENU_BYTE, 90, 2, 15]) + b"ABCDEFGHIJK.PPS",
@@ -697,7 +698,7 @@ def test_settings_files_use_op_90():
     ]
     for bad in ("Protocol1", "Protocol1.pps.txt", "ABCDEFGHIJKL.pps", ".pps", "Pr\u00f6tocol.pps", 5):
         device = make_device()
-        expect_error(device.save_settings_file, bad)
+        expect_error(device.save_program_to_microsd, bad)
         assert device.port.writes == []
 
 

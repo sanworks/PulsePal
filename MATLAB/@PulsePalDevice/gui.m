@@ -806,8 +806,8 @@ end
 
 function saveProgram(obj)
 % Saves the program as a .json program file, in the Python GUI's format (/Python/PulsePal/pulsepal/gui.py), so that
-% either GUI opens it (see saveParameters()): the parameters by their Python names, as exportParams() holds them, the
-% text of each custom train as typed, and the device's info.
+% either GUI opens it (see saveProgramToFile()): the parameters by their Python names, as exportParams() holds them,
+% the text of each custom train as typed, and the device's info.
 params = struct;
 names = [guiParamNames(obj) {'triggerMode'}];
 for i = 1:numel(names)
@@ -870,8 +870,9 @@ figure(obj.ui.Figure);
 end
 
 function [params, timestamps, voltages] = readJsonProgram(obj, fileName)
-% Reads a program saved by either GUI or by saveParameters(), into the GUI's form: each mode as its code, each on/off
-% parameter as 0 or 1 (see defaultParams()). Parameters it leaves out take their default values, as in the Python GUI.
+% Reads a program saved by either GUI or by saveProgramToFile(), into the GUI's form: each mode as its code, each
+% on/off parameter as 0 or 1 (see defaultParams()). Parameters it leaves out take their default values, as in the
+% Python GUI.
 [fileParams, timestamps, voltages] = obj.readProgramFile(fileName);
 params = obj.defaultParams;
 names = fieldnames(fileParams);

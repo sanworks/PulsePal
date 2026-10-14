@@ -262,11 +262,11 @@ def test_commands_while_playing_keep_the_device_in_step(P, D, report):
         assert P.port.read(5)[:1] == b"K"
         P.port.write(bytes([OP, 89]) + b"HWTEST")  # Client name
         P.trigger([1, 2])                         # Ignored: the channels play
-        P.save_settings_file("HWTEST1.pps")
-        P.load_settings_file("HWTEST1.pps")       # The same program: each channel keeps its continuous loop
+        P.save_program_to_microsd("HWTEST1.pps")
+        P.load_program_from_microsd("HWTEST1.pps")       # The same program: each channel keeps its continuous loop
     report(f"20 rounds of 9 commands while playing: {time.perf_counter() - start:.1f} s")
     assert_in_step(P, expected, "after commands while playing")
-    P.delete_settings_file("HWTEST1.pps")
+    P.delete_program_from_microsd("HWTEST1.pps")
     P.stop()
     P.continuous_loop = [False] * 4
 
