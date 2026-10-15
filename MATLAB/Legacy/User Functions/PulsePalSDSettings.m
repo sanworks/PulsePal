@@ -27,7 +27,9 @@ function ConfirmBit = PulsePalSDSettings(SettingsFileName, Op)
 % Op: 'Load' to load an existing settings file on the SD card. 'Save' to
 % save Pulse Pal's current settings to the file (will create if the file
 % does not exist, otherwise will overwrite).
-% ConfirmBit: 1 if completed successfully, 0 if error.
+% ConfirmBit: 1 if completed successfully, 0 if error. Pulse Pal 2 refuses
+% while a channel is playing (its microSD card shares a bus with the outputs):
+% ConfirmBit is then 0, with a warning.
 global PulsePalSystem
 if PulsePalSystem.FirmwareVersion < 20
     error('Error: You are connected to Pulse Pal 1.X, which does not have an external microSD memory for settings files.')
@@ -50,6 +52,11 @@ PulsePalSerialInterface('write', Message, 'uint8');
 ConfirmBit = 1;
 if PulsePalSystem.FirmwareVersion > 21
     ConfirmBit = PulsePalSerialInterface('read', 1, 'uint8');
+    if ConfirmBit == 2 % Pulse Pal 2, while a channel plays. Nothing was done
+        warning(['Pulse Pal 2 does not use its microSD card while a channel is playing, because the card shares '...
+                 'a bus with the outputs. Stop playback first.']);
+        ConfirmBit = 0;
+    end
 end
 CycleFreq = PulsePalSystem.CycleFrequency;
 RegisterBits = PulsePalSystem.RegisterBits;

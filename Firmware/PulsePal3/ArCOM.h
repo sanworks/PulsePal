@@ -33,6 +33,8 @@ See the GNU General Public License for more details.
 // - readBlock() reads a fixed number of bytes into a buffer of the caller's. An op that reads a known set of values
 //   can use it to take the whole set in one transfer, and unpack the buffer afterwards. Op 92 does this.
 // - This class is only used from loop(). Do not call it from handler() or any other interrupt.
+// - On Pulse Pal 2, it takes received USB packets off the USB controller itself (receiveUSB()), and reads SerialUSB's
+//   receive buffer directly, because the Due core's own receive code loses packets (see below).
 
 #ifndef ArCOM_h
 #define ArCOM_h
@@ -45,6 +47,30 @@ See the GNU General Public License for more details.
 
 #if (HARDWARE_VERSION == 2)
   typedef Serial_ ArCOMPort; // SAM3X USB CDC class, the type of SerialUSB
+
+  // Pulse Pal 2 receives USB data itself, instead of through the Due core's SerialUSB reads.
+  //
+  // The Due core (arduino:sam 1.6.12, cores/arduino/USB/CDC.cpp) can drop a whole packet sent by the PC. Its
+  // Serial_::accept() moves received bytes from the USB controller into SerialUSB's buffer. Once the controller's
+  // current bank is empty, it releases that bank again unconditionally, and a packet the controller stored there in
+  // the meantime is freed unread. The core runs accept() from its USB interrupt, and SerialUSB.read() runs it from
+  // loop(). The timer interrupt preempts both, for up to about 25us (see startHardwareTimer()), so a packet that
+  // arrived while the one before it was still being taken was sometimes lost: with all four channels playing, 1.4% of
+  // soft triggers (op 77) sent back to back, and op 93s among them, whose replies then never came. A command sent
+  // after the reply to the one before was never hit, so the classes' usual traffic was safe, but not triggers or stops.
+  //
+  // receiveUSB() takes received packets off the controller instead, from loop(), into the same buffer. It releases a
+  // bank only while it holds a whole packet (FIFOCON set): the controller never writes into a bank the CPU holds. The
+  // core's USB interrupt no longer handles received packets, because receiveUSB() switches off the endpoint's receive
+  // interrupt (the core switches it on whenever the PC configures the device). Bytes are read from the buffer here,
+  // never with SerialUSB.read(), which would run accept().
+  #define ARCOM_CDC_BUFFER_SIZE 512 // CDC_SERIAL_BUFFER_SIZE in the core's CDC.cpp
+  struct ring_buffer { // SerialUSB's receive buffer, as the core's CDC.cpp defines it
+    uint8_t buffer[ARCOM_CDC_BUFFER_SIZE];
+    volatile uint32_t head; // Next byte to store
+    volatile uint32_t tail; // Next byte to read. head == tail: empty; head one before tail: full
+  };
+  extern ring_buffer cdc_rx_buffer;
 #else
   typedef usb_serial_class ArCOMPort; // Teensy USB serial class, the type of Serial
 #endif
@@ -59,6 +85,9 @@ class ArCOM
 
     // Number of bytes waiting to be read
     unsigned int available() {
+      #if (HARDWARE_VERSION == 2)
+        receiveUSB();
+      #endif
       return port.available();
     }
 
@@ -116,12 +145,17 @@ class ArCOM
       size_t nBytesRead = 0;
       uint32_t lastByteTime = millis();
       while (nBytesRead < nBytes) {
-        size_t nAvailable = port.available();
+        size_t nAvailable = available();
         if (nAvailable > 0) {
           if (nAvailable > (nBytes - nBytesRead)) {
             nAvailable = nBytes - nBytesRead;
           }
-          nBytesRead += port.readBytes((char*)(nextByte + nBytesRead), nAvailable);
+          #if (HARDWARE_VERSION == 2)
+            readReceived(nextByte + nBytesRead, nAvailable);
+            nBytesRead += nAvailable;
+          #else
+            nBytesRead += port.readBytes((char*)(nextByte + nBytesRead), nAvailable);
+          #endif
           lastByteTime = millis();
         } else if ((millis() - lastByteTime) > ARCOM_READ_TIMEOUT_MS) {
           memset(nextByte + nBytesRead, 0, nBytes - nBytesRead);
@@ -175,6 +209,46 @@ class ArCOM
     bool readTimedOut = false;
     size_t nBytesToWrite = 0;
     uint8_t writeBuffer[ARCOM_WRITE_BUFFER_SIZE];
+
+    #if (HARDWARE_VERSION == 2)
+      // Moves the packets the PC has sent from the USB controller into SerialUSB's buffer, while it has room. Replaces
+      // the core's Serial_::accept(), which loses packets (see the top of this file).
+      __attribute__((noinline)) void receiveUSB() {
+        NVIC_DisableIRQ(UOTGHS_IRQn); // So that the core's USB interrupt cannot run accept() meanwhile
+        if (Is_udd_out_received_interrupt_enabled(CDC_RX)) {
+          udd_disable_out_received_interrupt(CDC_RX); // Switched on by the core whenever the PC configures the device
+        }
+        while (Is_udd_fifocon(CDC_RX)) { // The CPU holds a whole received packet (perhaps of zero length)
+          uint32_t nBytesLeft = UDD_FifoByteCount(CDC_RX); // Counts down as the bytes are read
+          uint32_t head = cdc_rx_buffer.head;
+          while (nBytesLeft > 0) {
+            uint32_t nextHead = (head + 1) % ARCOM_CDC_BUFFER_SIZE;
+            if (nextHead == cdc_rx_buffer.tail) {
+              break; // The buffer is full
+            }
+            cdc_rx_buffer.buffer[head] = UDD_Recv8(CDC_RX);
+            head = nextHead;
+            nBytesLeft--;
+          }
+          cdc_rx_buffer.head = head;
+          if (nBytesLeft > 0) {
+            break; // The rest of the packet waits in its bank, and the controller holds off the PC's next packets
+          }
+          UDD_ReleaseRX(CDC_RX); // The packet is read: free its bank for the PC, and go on to the other bank
+        }
+        NVIC_EnableIRQ(UOTGHS_IRQn);
+      }
+
+      // Reads nBytes from SerialUSB's buffer. available() must have reported them.
+      void readReceived(uint8_t *target, size_t nBytes) {
+        uint32_t tail = cdc_rx_buffer.tail;
+        for (size_t i = 0; i < nBytes; i++) {
+          target[i] = cdc_rx_buffer.buffer[tail];
+          tail = (tail + 1) % ARCOM_CDC_BUFFER_SIZE;
+        }
+        cdc_rx_buffer.tail = tail;
+      }
+    #endif
 
     // Adds bytes to the write buffer, sending it first if it is full
     __attribute__((noinline)) void writeBlock(const void *source, size_t nBytes) {

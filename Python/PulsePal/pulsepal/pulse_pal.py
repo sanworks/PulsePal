@@ -1217,7 +1217,9 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the file name is invalid, or the device could
-                not write the file to its microSD card.
+                not write the file to its microSD card. Pulse Pal 2 also
+                refuses while a channel is playing: its card shares a bus with
+                the outputs, so stop playback first.
         """
         self._settings_file_op(file_name, 1, "save_program_to_microsd()")
 
@@ -1237,8 +1239,9 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If the file name is invalid, or the device could
                 not load the program: there is no such file on its microSD
-                card, or it is not a valid Pulse Pal program. The device
-                then keeps its parameters, and so does this object.
+                card, or it is not a valid Pulse Pal program; or, on Pulse
+                Pal 2, a channel is playing (see `save_program_to_microsd`).
+                The device then keeps its parameters, and so does this object.
         """
         self._settings_file_op(file_name, 2, "load_program_from_microsd()")
 
@@ -1250,7 +1253,8 @@ class PulsePalDevice:
 
         Raises:
             PulsePalError: If the file name is invalid, or the device could
-                not delete the file, e.g. because there is no such file.
+                not delete the file, e.g. because there is no such file, or,
+                on Pulse Pal 2, because a channel is playing.
         """
         self._settings_file_op(file_name, 3, "delete_program_from_microsd()")
 
@@ -1282,7 +1286,13 @@ class PulsePalDevice:
                    "a valid Pulse Pal program. The device keeps its parameters.",
                 3: f"Pulse Pal could not delete {file_name!r}: there is no such file on its microSD card.",
             }[op_byte]
-            self._read_ack(context, refusal_message=refusal)
+            # Pulse Pal 2 replies 2 while a channel plays: its microSD card shares the SPI bus with the DAC
+            busy = (f"Pulse Pal 2 does not use its microSD card while a channel is playing, because the card shares a "
+                    f"bus with the outputs, so {file_name!r} was not {('saved', 'loaded', 'deleted')[op_byte - 1]}. "
+                    "Stop playback first, with stop().")
+            if op_byte == 2:
+                busy += " The device keeps its parameters."
+            self._read_ack(context, refusal_message=refusal, refusal_messages={2: busy})
         elif op_byte == 2:
             time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
         if op_byte == 2:
@@ -1987,7 +1997,7 @@ class PulsePalDevice:
             return values[0]
         return list(values)
 
-    def _read_ack(self, context, on_refusal=None, refusal_message=None):
+    def _read_ack(self, context, on_refusal=None, refusal_message=None, refusal_messages=None):
         """Read a one-byte acknowledgement from the device.
 
         The device replies 1 if it executed the command, or 0 if it rejected
@@ -1995,7 +2005,8 @@ class PulsePalDevice:
         is called before the error is raised: the device resets a value it
         refuses, so callers use it to read the value back into the local copy.
         refusal_message replaces the error's usual message, for a command
-        refused for another reason.
+        refused for another reason. refusal_messages maps other replies to
+        their own message, e.g. op 90's 2.
         """
         try:
             acknowledgement = self._read_serial(1, "uint8")
@@ -2006,6 +2017,7 @@ class PulsePalDevice:
             ) from exc
         if acknowledgement != 1:
             refusal = PulsePalError(
+                (refusal_messages or {}).get(acknowledgement) or
                 refusal_message or
                 f"Pulse Pal rejected the command sent by {context}. "
                 "This usually means that a channel number, parameter code or "

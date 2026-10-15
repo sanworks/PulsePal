@@ -36,6 +36,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   ProgramDAC()
 //   startHardwareTimer()
 //   stopHardwareTimer()
+//   pauseTimerForSD()
+//   resumeTimerAfterSD()
 //   digitalWriteDirect()
 //   digitalReadDirect()
 //   readHardwareRevision()
@@ -211,9 +213,11 @@ void startHardwareTimer() {
     TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS; // Enable the interrupt on RC compare...
     TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS; // ...and disable all other timer interrupts
     // The timer interrupt must be able to preempt the USB interrupt (0 is the highest priority). The Due core's USB
-    // interrupt copies each received byte into SerialUSB's buffer itself, about 3.9us per byte and up to 512 bytes, and
+    // interrupt copied each received byte into SerialUSB's buffer itself, about 3.9us per byte and up to 512 bytes, and
     // at equal priority every timer cycle in that time was lost: op 92 (178 bytes) during playback stretched every
-    // playing channel by 0.7ms, and a custom train upload by 2ms. The core sets the USB priority once, before setup().
+    // playing channel by 0.7ms, and a custom train upload by 2ms. ArCOM now takes received bytes from loop() instead
+    // (see ArCOM.h), but the USB interrupt still runs for the PC's other requests. The core sets the USB priority once,
+    // before setup().
     NVIC_SetPriority(UOTGHS_IRQn, 1);
     NVIC_SetPriority(TC3_IRQn, 0);
     NVIC_ClearPendingIRQ(TC3_IRQn);
@@ -240,6 +244,37 @@ void stopHardwareTimer() {
     TC_Stop(TC1, 0);
   #else
     hardwareTimer.end();
+  #endif
+}
+
+// Pulse Pal 2's microSD card shares the SPI bus with the DAC, and handler() writes the DAC from the timer interrupt:
+// in any cycle that changes an output, and when loop() has asked for a write with setDAC(), playing or not. A write in
+// the middle of one of the card's transfers left loop() waiting for ever (see the note above dacLoad()), and the card
+// so stuck that the device did not start again until it was unplugged. So loop() holds the timer interrupt off while
+// it uses the card: call pauseTimerForSD() before the card's functions and resumeTimerAfterSD() after them, around
+// those calls only, not around screen messages or waits. The pair may nest, and leaves the interrupt as it found it.
+// Meanwhile handler() does not run: a trigger is seen once it runs again (a pulse that ends first is missed), and a
+// channel playing would pause, so op 90 refuses to use the card while a channel plays (see playbackOngoing()).
+// Pulse Pal 3's card has a bus of its own (SDIO), and there these do nothing.
+#if (HARDWARE_VERSION == 2)
+  static byte sdTimerPauseDepth = 0; // Calls of pauseTimerForSD() not yet matched by resumeTimerAfterSD()
+  static bool sdTimerWasEnabled = false; // Whether the timer interrupt was on when the outermost pause began
+#endif
+
+static inline void pauseTimerForSD() {
+  #if (HARDWARE_VERSION == 2)
+    if (sdTimerPauseDepth++ == 0) {
+      sdTimerWasEnabled = (NVIC->ISER[((uint32_t)TC3_IRQn) >> 5] & (1UL << (((uint32_t)TC3_IRQn) & 0x1F))) != 0;
+      NVIC_DisableIRQ(TC3_IRQn); // A tick meanwhile stays pending, and runs handler() once the interrupt is back on
+    }
+  #endif
+}
+
+static inline void resumeTimerAfterSD() {
+  #if (HARDWARE_VERSION == 2)
+    if ((sdTimerPauseDepth > 0) && (--sdTimerPauseDepth == 0) && sdTimerWasEnabled) {
+      NVIC_EnableIRQ(TC3_IRQn);
+    }
   #endif
 }
 

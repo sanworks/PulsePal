@@ -116,7 +116,7 @@ P.trigger([1 2]);
 | DAC | 12-bit, 4.88 mV steps | 16-bit, 0.305 mV steps |
 | Custom trains | 2, of up to 5000 pulses | 4, of up to 10000 pulses |
 | Param sync trigger mode | No | Yes |
-| Settings files on the microSD card | Yes | Yes, and `format_microsd()` |
+| Programs on the microSD card | Yes, while no channel plays | Yes, and `format_microsd()` |
 | Screen saver, zero-code calibration | No | Yes |
 | Wave Pal and Synth Pal firmware | No | Yes |
 
@@ -375,6 +375,10 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
   the channel.)
 - **A failed load from the microSD card changes nothing.** `load_program_from_microsd()` raises
   an error for a missing or invalid file, and the device keeps its program.
+- **Pulse Pal 2 does not use its microSD card while a channel plays.** The card shares a bus with
+  the outputs, so saving, loading or deleting a program raises an error then: call `stop()`
+  first. While it uses the card, for a few milliseconds, a trigger waits until the operation
+  ends, and a trigger pulse shorter than that is missed. Pulse Pal 3 has neither limit.
 - **A non-zero resting voltage is output all the time** the channel is idle, from the moment
   it is set.
 - **Unplugging the USB cable during playback** stops it: the device shows "COMM. FAILURE!",

@@ -73,9 +73,11 @@ void LoadDefaultParameters() {
    TriggerMode[0] = 0; 
    TriggerMode[1] = 0;
    updateParamSyncPending(); // Neither trigger channel is in param sync mode now, so a waiting set is discarded
+   pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
    settingsFile.close();
    strcpy(currentSettingsFileNameChar, DEFAULT_SETTINGS_FILE_NAME);
    settingsFile.open(currentSettingsFileNameChar, O_READ);
+   resumeTimerAfterSD();
    outputRestingVoltages(); // After file operations: on Pulse Pal 2 the DAC and microSD card share the SPI bus
 }
 
@@ -133,8 +135,10 @@ byte readByteFromSD() {
 // Saves all parameters to the current settings file (currentSettingsFileNameChar), using the settings file layout
 // above. Returns true if the file was written, or false if it could not be (no card, or the card refused the write).
 FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from flash (see FLASHMEM in PulsePal3.ino)
+  pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
   settingsFile.close();
   if (!settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR)) {
+    resumeTimerAfterSD();
     return false;
   }
   for (int chan = 0; chan < 4; chan++) {
@@ -165,6 +169,7 @@ FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from fla
   bool written = !settingsFile.getWriteError();
   written = settingsFile.close() && written; // close() writes what is still cached, and reports whether it could
   settingsFile.open(currentSettingsFileNameChar, O_READ);
+  resumeTimerAfterSD();
   return written;
 }
 
@@ -243,6 +248,7 @@ bool findListedFile(uint16_t position, bool includeDefault) {
     }
     position--;
   }
+  pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
   candidateSettingsFile.close();
   rewindDirectory();
   uint16_t nListed = 0;
@@ -252,11 +258,13 @@ bool findListedFile(uint16_t position, bool includeDefault) {
     if (!isDefaultSettingsFile(candidateSettingsFileChar)) {
       nListed++;
       if (nListed == position) {
+        resumeTimerAfterSD();
         return true;
       }
     }
     memset(candidateSettingsFileChar, 0, sizeof(candidateSettingsFileChar));
   }
+  resumeTimerAfterSD();
   return false;
 }
 

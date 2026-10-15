@@ -643,6 +643,22 @@ def test_a_refused_settings_file_operation_says_what_failed():
         assert device.phase1_voltage[1] == 2.5
 
 
+def test_pulse_pal_2_refuses_microsd_while_playing():
+    """Pulse Pal 2 replies 2 to op 90 while a channel plays, because its microSD card shares the SPI bus with the
+    DAC. The error says so, and a refused load reads nothing back."""
+    for call, verb in ((lambda d: d.save_program_to_microsd("NEW.pps"), "saved"),
+                       (lambda d: d.load_program_from_microsd("NEW.pps"), "loaded"),
+                       (lambda d: d.delete_program_from_microsd("NEW.pps"), "deleted")):
+        device = make_device(hardware_version=2, n_trains=2, max_pulses=5000)
+        device.phase1_voltage[1] = 2.5
+        device.port.writes.clear()
+        device.port.ack = 2
+        error = expect_error(call, device)
+        assert "while a channel is playing" in str(error) and f"'NEW.pps' was not {verb}" in str(error), error
+        assert len(device.port.writes) == 1 and device.port.writes[0][1] == 90, device.port.writes
+        assert device.phase1_voltage[1] == 2.5
+
+
 def test_sync_from_device_reads_the_message_in_one_read():
     device = make_device()
     device.port.response = bytearray(parameter_message())

@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   AbortAllPulseTrains()
 //   updateUsesBursts()
 //   stopCustomTrainChannels()
+//   playbackOngoing() (HW2 only)
 
 #if (HARDWARE_VERSION == 2)
   // Interrupt service routine for timer counter TC3, configured in startHardwareTimer(). On Pulse Pal 3, IntervalTimer calls handler() directly.
@@ -611,3 +612,17 @@ void stopCustomTrainChannels(byte train, byte block) {
     }
   }
 }
+
+#if (HARDWARE_VERSION == 2)
+  // True if a channel is playing (its delay included), or a soft trigger is about to start one. Op 90 refuses to use
+  // the microSD card then (see pauseTimerForSD()). Call with the timer interrupt paused, so that no channel can start
+  // between this check and the card's use. Not StimulatingState: handler() clears it only in the cycle after a stop.
+  bool playbackOngoing() {
+    for (int x = 0; x < 4; x++) {
+      if (StimulusStatus[x] || PreStimulusStatus[x] || SoftTriggerScheduled[x] || SoftTriggered[x]) {
+        return true;
+      }
+    }
+    return false;
+  }
+#endif

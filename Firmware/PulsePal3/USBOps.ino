@@ -445,6 +445,14 @@ void processUSBCommands() {
             PPUSB.writeByte(0); // Unknown file operation, or empty file name
             break;
           }
+          pauseTimerForSD(); // Pulse Pal 2: handler() must not use the SPI bus while the card does
+          #if (HARDWARE_VERSION == 2)
+            if (playbackOngoing()) { // The card cannot be used without pausing playback, so nothing is done
+              resumeTimerAfterSD();
+              PPUSB.writeByte(2); // Refused while a channel plays (Pulse Pal 2 only, see /Firmware/PROTOCOL.md)
+              break;
+            }
+          #endif
           // The settings file the device had, to keep if this op does not make another one current
           char previousFileName[sizeof(currentSettingsFileNameChar)];
           strcpy(previousFileName, currentSettingsFileNameChar);
@@ -472,6 +480,7 @@ void processUSBCommands() {
             settingsFile.open(currentSettingsFileNameChar, O_READ);
           }
           settingsFile.rewind();
+          resumeTimerAfterSD();
           PPUSB.writeByte(confirmBit); // Send confirm byte (0 if the file could not be saved, loaded or deleted)
         } break;
 

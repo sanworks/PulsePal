@@ -114,7 +114,10 @@ the `--show` output before concluding that a function really changed.
    byte, returns zeros and sets `PPUSB.timedOut()`, which `loop()` checks once per pass.
    Replies are buffered until `loop()` calls `PPUSB.flush()`, so no reply leaves the device
    during an op. Array reads and writes are single block copies, which rely on both boards
-   being little-endian, like the wire format. See `ArCOM.h`.
+   being little-endian, like the wire format. See `ArCOM.h`. On Pulse Pal 2, ArCOM also takes
+   received packets off the USB controller itself (`receiveUSB()`), because the Due core's
+   `Serial_::accept()` drops a packet that arrives while it empties the one before; never read
+   `SerialUSB` directly, since `SerialUSB.read()` runs `accept()`.
 8. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
    `TIMER_PERIOD` (50 µs). Settings files store cycles, and legacy code and installed clients
    assume 50 µs, so a faster cycle (e.g. 25 µs on Pulse Pal 3) would have to be optional, with
@@ -152,13 +155,23 @@ the `--show` output before concluding that a function really changed.
     channel was playing once left the channel "playing" at rest. An empty block
     (`CustomTrainNpulses` 0) ends a train at once: on Pulse Pal 3 its memory is not zeroed at
     startup.
+13. **On Pulse Pal 2, use the microSD card from `loop()` only between `pauseTimerForSD()` and
+    `resumeTimerAfterSD()`** (`HardwareIO.ino`). The card shares the SPI bus with the DAC, and a
+    DAC write from `handler()` in the middle of one of the card's transfers left `loop()` waiting
+    for ever and the card stuck until the device was unplugged. `handler()` writes the DAC with
+    no channel playing too, when `loop()` has called `setDAC()`. The pause holds the timer
+    interrupt off, so a channel playing would pause with it: op 90 replies 2, and does nothing,
+    while `playbackOngoing()`, and the joystick menu runs only while no channel plays. Wrap the
+    card's calls only, not screen messages or waits: a trigger waits for the pause to end. The
+    calls nest, and are empty on Pulse Pal 3, whose card has a bus of its own (SDIO).
 
 ## What runs in the timer interrupt
 
 `handler()` runs every 50 µs. `TC3_Handler()` is its entry point on Pulse Pal 2; on Pulse
 Pal 3, `IntervalTimer` calls it directly. On Pulse Pal 2 the timer interrupt has a higher
-priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copies received bytes
-one at a time, and at equal priority it made the timer lose cycles. It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
+priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copied received bytes
+one at a time, and at equal priority it made the timer lose cycles. ArCOM now receives them in
+`loop()` instead (rule 7). It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()` and `endCustomTrainPass()`. On
 Pulse Pal 3 it also calls `startParamSync()` and `applyStoredCustomTrains()` when a trigger

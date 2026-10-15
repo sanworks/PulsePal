@@ -631,6 +631,8 @@ classdef PulsePalDevice < handle
             % P.saveProgramToMicroSD('MyProgram.pps'). fileName: 1 to 11 ASCII characters followed by .pps. A file of
             % the same name is replaced. loadProgramFromMicroSD() and the joystick menu's Load Program item load it.
             % To keep the parameters on this computer instead, see saveProgramToFile() and exportParams().
+            % Pulse Pal 2 raises an error while a channel is playing: its microSD card shares a bus with the outputs,
+            % so stop playback first. The same goes for loadProgramFromMicroSD() and deleteProgramFromMicroSD().
             obj.settingsFileOp(fileName, 1, 'saveProgramToMicroSD()');
         end
 
@@ -638,13 +640,14 @@ classdef PulsePalDevice < handle
             % Loads a program from the device's microSD card, e.g. P.loadProgramFromMicroSD('MyProgram.pps'). The
             % device plays the program, and the parameters are read back into the properties (see syncFromDevice).
             % The program is loaded at once, also in param sync mode. If there is no such file, or it is not a valid
-            % program, an error is raised, and the device and the properties keep their values.
+            % program, or (Pulse Pal 2) a channel is playing, an error is raised, and the device and the properties
+            % keep their values.
             obj.settingsFileOp(fileName, 2, 'loadProgramFromMicroSD()');
         end
 
         function deleteProgramFromMicroSD(obj, fileName)
             % Deletes a program from the device's microSD card, e.g. P.deleteProgramFromMicroSD('MyProgram.pps').
-            % Raises an error if there is no such file.
+            % Raises an error if there is no such file, or (Pulse Pal 2) a channel is playing.
             obj.settingsFileOp(fileName, 3, 'deleteProgramFromMicroSD()');
         end
 
@@ -1234,6 +1237,16 @@ classdef PulsePalDevice < handle
             if isempty(confirmed)
                 error(['Pulse Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
                        ' s. ' obj.NoReplyHint]);
+            elseif confirmed == 2
+                % Pulse Pal 2 refuses while a channel plays: its microSD card shares the SPI bus with the DAC
+                verbs = {'saved', 'loaded', 'deleted'};
+                message = ['Pulse Pal 2 does not use its microSD card while a channel is playing, because the card ' ...
+                           'shares a bus with the outputs, so ' fileName ' was not ' verbs{opByte} '. Stop playback ' ...
+                           'first, with stop().'];
+                if opByte == 2
+                    message = [message ' The device keeps its parameters.'];
+                end
+                error(message)
             elseif confirmed ~= 1
                 % The device refuses an operation it could not carry out, and changes nothing
                 switch opByte

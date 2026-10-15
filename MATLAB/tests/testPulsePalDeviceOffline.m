@@ -200,6 +200,20 @@ message = expectError(@() P.saveProgramToMicroSD('NEW.pps'));
 assert(contains(message, 'could not save NEW.pps'), message);
 message = expectError(@() P.deleteProgramFromMicroSD('MISSING.pps'));
 assert(contains(message, 'could not delete MISSING.pps'), message);
+% Pulse Pal 2 replies 2 while a channel plays: its microSD card shares the SPI bus with the DAC
+[P, port] = connect(2, 22);
+P.phase1Voltage(1) = 2.5;
+port.ack = 2;
+port.loadReply = 2;
+port.clearWrites();
+verbs = {'saved', 'loaded', 'deleted'};
+calls = {@() P.saveProgramToMicroSD('NEW.pps'), @() P.loadProgramFromMicroSD('NEW.pps'), ...
+         @() P.deleteProgramFromMicroSD('NEW.pps')};
+for i = 1:3
+    message = expectError(calls{i});
+    assert(contains(message, 'while a channel is playing') && contains(message, ['NEW.pps was not ' verbs{i}]), message);
+end
+assert(numel(port.writes) == 3 && P.phase1Voltage(1) == 2.5, 'a refused operation read the parameters back');
 end
 
 function testCalibrationNeedsPulsePal3()

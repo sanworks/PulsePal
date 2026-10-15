@@ -136,14 +136,18 @@ void UpdateSettingsMenu() {
               } break;
               case 8: { // Load program
                 inMenu = MENU_FILE_LOAD; // file load menu
+                pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
                 settingsFile.close();
                 myFilePos = 1;
                 RefreshFileMenu();
                 settingsFile.open(currentSettingsFileNameChar, O_READ);
+                resumeTimerAfterSD();
               } break;
               case 9: { // Erase program
                 inMenu = MENU_FILE_DELETE;
+                pauseTimerForSD();
                 settingsFile.close();
+                resumeTimerAfterSD();
                 myFilePos = 1;
                 RefreshFileMenu();
               } break;
@@ -280,14 +284,18 @@ void UpdateSettingsMenu() {
             myFilePos = 1;
           } else {
             // Load the settings file selected in RefreshFileMenu()
+            pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
             settingsFile.close();
             settingsFile.open(candidateSettingsFileChar, O_READ);
             validProgram = RestoreParametersFromSD();
+            resumeTimerAfterSD();
             if (validProgram != SETTINGS_FILE_END_MARKER) {
               write2Screen("!ERROR! INVALID ","PROGRAM FILE.");
               delayMicroseconds(1000000);
+              pauseTimerForSD();
               settingsFile.close(); // Nothing was loaded: the device keeps its parameters, and its settings file
               settingsFile.open(currentSettingsFileNameChar, O_READ);
+              resumeTimerAfterSD();
             } else {
               outputRestingVoltages();
               strcpy(currentSettingsFileNameChar, candidateSettingsFileChar);
@@ -403,7 +411,9 @@ void UpdateSettingsMenu() {
               if (isDefaultSettingsFile(currentSettingsFileName.c_str())) {
                 nameIsReserved = true;
               } else {
+                pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
                 settingsFile.close();
+                resumeTimerAfterSD();
                 currentSettingsFileName.toCharArray(currentSettingsFileNameChar, sizeof(currentSettingsFileNameChar));
               }
             } else { // Overwrite the file selected in RefreshFileMenu()
@@ -411,7 +421,7 @@ void UpdateSettingsMenu() {
             }
             if (nameIsReserved) {
               write2Screen("Name reserved.", " ");
-            } else if (SaveCurrentProgram2SD()) {
+            } else if (SaveCurrentProgram2SD()) { // Pauses the timer interrupt itself (Pulse Pal 2)
               write2Screen("Program saved."," ");
             } else {
               write2Screen("!ERROR! PROGRAM ","NOT SAVED.");
@@ -432,10 +442,13 @@ void UpdateSettingsMenu() {
             NeedUpdate = 1;
             myFilePos = 1;
           } else {
+            pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
             if (!isDefaultSettingsFile(candidateSettingsFileChar) && // Selected in RefreshFileMenu(), which does not list the default file
                 sd.remove(candidateSettingsFileChar)) {
+              resumeTimerAfterSD();
               write2Screen("Program erased."," ");
             } else {
+              resumeTimerAfterSD();
               write2Screen("!ERROR! PROGRAM ","NOT ERASED.");
             }
             delayMicroseconds(1000000);
@@ -618,7 +631,7 @@ void RefreshFileMenu() {
     case MENU_FILE_DELETE: {header = "<Click to erase>";} break;
   }
   if (myFilePos >= firstFilePos) {
-    if (!findListedFile(myFilePos - firstFilePos + 1, includeDefault)) {
+    if (!findListedFile(myFilePos - firstFilePos + 1, includeDefault)) { // Pauses the timer interrupt itself (Pulse Pal 2)
       myFilePos--;
     }
     if ((myFilePos >= firstFilePos) && findListedFile(myFilePos - firstFilePos + 1, includeDefault)) {

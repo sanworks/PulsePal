@@ -262,12 +262,24 @@ def test_commands_while_playing_keep_the_device_in_step(P, D, report):
         assert P.port.read(5)[:1] == b"K"
         P.port.write(bytes([OP, 89]) + b"HWTEST")  # Client name
         P.trigger([1, 2])                         # Ignored: the channels play
-        P.save_program_to_microsd("HWTEST1.pps")
-        P.load_program_from_microsd("HWTEST1.pps")       # The same program: each channel keeps its continuous loop
+        if P.info.hardware_version == 2:
+            # Pulse Pal 2 does not use its microSD card while a channel plays (op 90 replies 2): it shares the DAC's bus
+            for call in (P.save_program_to_microsd, P.load_program_from_microsd):
+                try:
+                    call("HWTEST1.pps")
+                except PulsePalError as error:
+                    assert "while a channel is playing" in str(error), error
+                else:
+                    raise AssertionError("Pulse Pal 2 used its microSD card while its channels played")
+        else:
+            P.save_program_to_microsd("HWTEST1.pps")
+            P.load_program_from_microsd("HWTEST1.pps")   # The same program: each channel keeps its continuous loop
     report(f"20 rounds of 9 commands while playing: {time.perf_counter() - start:.1f} s")
     assert_in_step(P, expected, "after commands while playing")
-    P.delete_program_from_microsd("HWTEST1.pps")
     P.stop()
+    if P.info.hardware_version == 2:
+        P.save_program_to_microsd("HWTEST1.pps")        # Allowed once the channels have stopped
+    P.delete_program_from_microsd("HWTEST1.pps")
     P.continuous_loop = [False] * 4
 
 
@@ -386,6 +398,46 @@ def test_trigger_storm(P, D, report):
     P.stop()
 
 
+def test_microsd_while_triggers_arrive(P, D, report):
+    """Programs saved and loaded for 5 s while TTL edges start short trains: every op 90 is answered, and the device
+    stays in step. Pulse Pal 2's microSD card shares the SPI bus with the DAC, and a DAC write in the middle of a card
+    transfer once hung it until it was unplugged. It now holds its timer interrupt off while it uses the card (so an
+    edge then waits, or is missed), and refuses op 90 (reply 2) while a channel plays."""
+    if D is None:
+        raise Skipped("needs --driver")
+    P.set_default_params()
+    with P.batch():
+        P.phase1_duration = [0.0002] * 4
+        P.inter_pulse_interval = [0.0002] * 4
+        P.pulse_train_duration = [0.002] * 4          # 2 ms trains, so the channels are idle most of the time
+        P.link_trigger_channel1 = [True, True, False, False]
+        P.link_trigger_channel2 = [False, False, True, True]
+    expected = raw_params(P)
+    P.save_program_to_microsd("HWTEST2.pps")
+    D.phase1_voltage = [4, 4, 0, 0]
+    D.phase1_duration = [0.0001] * 4
+    D.inter_pulse_interval = [0.0049] * 4           # An edge every 5 ms on each trigger channel
+    D.pulse_train_duration = [10.0] * 4
+    D.trigger([1, 2])
+    done = refused = 0
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        for call in (P.save_program_to_microsd, P.load_program_from_microsd):
+            try:
+                call("HWTEST2.pps")
+                done += 1
+            except PulsePalError as error:
+                if P.info.hardware_version != 2 or "while a channel is playing" not in str(error):
+                    raise
+                refused += 1
+    D.stop()
+    report(f"5 s of microSD saves and loads with an edge every 5 ms: {done} done, {refused} refused while playing")
+    assert done > 0, "no microSD operation was done"
+    assert_in_step(P, expected, "after microSD operations among trigger edges")
+    P.stop()
+    P.delete_program_from_microsd("HWTEST2.pps")
+
+
 def test_param_sync_edges(P, D, report):
     """In param sync mode, a stored set reaches the device's parameters (op 93) at the TTL edge, not before."""
     if D is None:
@@ -441,6 +493,7 @@ def main():
         test_many_commands_in_one_write,
         test_reconnects,
         test_trigger_storm,
+        test_microsd_while_triggers_arrive,
         test_param_sync_edges,
     ]
     if not arguments.quick:

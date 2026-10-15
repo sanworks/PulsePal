@@ -102,7 +102,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 86 | Write a pin (debugging) | Pin number, value | none |
 | 87 | Read a pin (debugging) | Pin number | Pin state (1 byte) |
 | 89 | Set the client name | 6 characters, shown as "NAME Connected" | none |
-| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0, after the file operation has finished. 0 if the file could not be written, loaded or deleted (see [Settings file](#settings-file)) |
+| 90 | Settings file operation | Operation (1 save, 2 load, 3 delete), name length, name characters | 1 / 0 / 2, after the file operation has finished. 0 if the file could not be written, loaded or deleted (see [Settings file](#settings-file)). 2 (Pulse Pal 2 only): refused, and nothing done, because a channel is playing |
 | 91 | Program one parameter on all channels | Parameter code, then one value per output channel (4 values), or per trigger channel (2 values) for code 128 | 1 / 0 |
 | 92 | Program all parameters | 182 bytes, grouped by parameter: each array holds one parameter for output channels 1-4. 8 uint32 arrays (times), 3 uint16 arrays (voltages), then byte arrays: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
 | 93 | Send all parameters | none | 178 bytes, in op 92 order without the continuous loop bytes |
@@ -369,6 +369,14 @@ load on Pulse Pal 2. A valid file is loaded at once, as op 92 loads a set outsid
 mode; each channel keeps its continuous loop mode. Op 90 replies 0 to a failed load, to a save
 the card did not take, and to the deletion of a file that does not exist. Deleting the current
 settings file makes `default.pps` current.
+
+On Pulse Pal 2 the microSD card shares the SPI bus with the DAC, and the timer interrupt that
+plays pulse trains writes the DAC, so the device holds that interrupt off while it uses the card
+(op 90, and the joystick menu's Save, Load and Erase Program items), for a few milliseconds. A
+channel playing would pause, so op 90 replies 2, and does nothing, while a channel plays, in its
+delay or train, or a soft trigger is about to start one. A trigger that arrives while the card
+is in use is acted on when the operation ends, and a trigger pulse that ends before then is
+missed. Pulse Pal 3's card has a bus of its own, and none of this applies to it.
 
 ## Timeouts and error handling
 
