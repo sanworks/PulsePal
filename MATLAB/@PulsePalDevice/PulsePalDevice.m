@@ -53,7 +53,8 @@
 %   customTrainID        0 plays the pulse train defined above. 1 or more plays that custom train instead, loaded
 %                        with sendCustomPulseTrain() or sendCustomWaveform(): 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2
 %   customTrainTarget    1x4 cell array. 'Pulses': a custom train's times are pulse onsets. 'Bursts': they are
-%                        burst onsets, and burstDuration must be above 0 (with autoSync on, set it first)
+%                        burst onsets, and burstDuration must be above 0 (with autoSync on, set it first). A burst
+%                        whose time comes while the burst before plays is dropped
 %   customTrainLoop      true repeats a custom train until pulseTrainDuration has elapsed. false plays it once
 %   continuousLoop       false plays the pulse train once per trigger. true plays it until the channel is stopped,
 %                        ignoring pulseTrainDuration (firmware v22 or newer)
@@ -476,8 +477,8 @@ classdef PulsePalDevice < handle
             % voltages: one per pulse, in volts, -10 to 10.
             % An output channel plays the train when its customTrainID property is set to the train's number. Each
             % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
-            % sign reversed. A biphasic pulse always plays whole: if it lasts longer than the gap to the next pulse,
-            % the next pulse starts as it ends, late. Example:
+            % sign reversed. A biphasic pulse always plays whole, and a pulse whose time comes while it plays is
+            % dropped, so that every pulse played is on time. Example:
             %   P.sendCustomPulseTrain(1, [0 0.1 0.25 0.5], [5 2.5 -2.5 -5]);
             %   P.customTrainID(2) = 1;
             % Loading a train stops the output channels playing it, and their next trigger plays the new train. On

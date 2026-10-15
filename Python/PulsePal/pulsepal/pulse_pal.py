@@ -435,9 +435,11 @@ class PulsePalDevice:
 
     `"Pulses"` if each time is the onset of a pulse, `"Bursts"` if each
     time is the onset of a burst of pulses, which lasts
-    `PulsePalDevice.burst_duration`. `"Bursts"` needs a burst duration
-    above 0: with `PulsePalDevice.auto_sync` on, set the burst duration
-    first, or set both in a `PulsePalDevice.batch` block.
+    `PulsePalDevice.burst_duration`. A burst whose time comes while the
+    burst before plays is dropped, so that every burst played is on
+    time. `"Bursts"` needs a burst duration above 0: with
+    `PulsePalDevice.auto_sync` on, set the burst duration first, or set
+    both in a `PulsePalDevice.batch` block.
     """)
 
     custom_train_loop = _channel_setting("custom_train_loop", """Whether a custom train repeats.
@@ -1029,9 +1031,9 @@ class PulsePalDevice:
         timing. Set `PulsePalDevice.custom_train_id` on an output channel
         to play the train there. Each pulse takes the channel's own phase
         durations; a biphasic pulse's second phase is its voltage with the
-        sign reversed. A biphasic pulse always plays whole: if it lasts
-        longer than the gap to the next pulse, the next pulse starts as it
-        ends, late.
+        sign reversed. A biphasic pulse always plays whole, and a pulse
+        whose time comes while it plays is dropped, so that every pulse
+        played is on time.
 
         ```python
         P.send_custom_pulse_train(

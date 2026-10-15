@@ -177,7 +177,9 @@ priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copied 
 one at a time, and at equal priority it made the timer lose cycles. ArCOM now receives them in
 `loop()` instead (rule 7). It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
-`digitalWriteDirect()`, `timeReached()`, `startCustomPulse()` and `endCustomTrainPass()`. On
+`digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
+`dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`)
+and `startBurst()`. On
 Pulse Pal 3 it also calls `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
@@ -245,8 +247,11 @@ playback, the menu or the USB ops, ask the user to check:
 - The joystick menu: edit a parameter; save, load and erase a settings file.
 - `stop()` during playback from Python, then trigger again.
 - Custom trains, including trains 3 and 4 on Pulse Pal 3: loading a train while a channel
-  plays it stops the channel, and the next trigger plays the new train; biphasic custom pulses
-  closer than their own length play whole, back to back; in param sync mode, a train loaded
+  plays it stops the channel, and the next trigger plays the new train; a biphasic custom pulse
+  that starts during the one before is dropped, and the pulses after it play at their own times
+  (in a looping train whose last pulse is dropped, the next pass starts when that pulse would
+  have ended); in a train targeting bursts, a burst that starts during the one before is
+  dropped, and one starting exactly as it ends follows with no rest; in param sync mode, a train loaded
   during a train plays from the trigger after the next param sync edge.
 - After a change to serial code: USB latency and throughput, with
   `/Python/PulsePal/tests/benchmark_serial.py`, before and after the change. Also unplug the

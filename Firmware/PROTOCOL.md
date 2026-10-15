@@ -135,8 +135,7 @@ channels playing that train, outside param sync mode (see [Custom trains](#custo
 
 Transitions are scheduled in timer cycles, and a channel makes each one in the first cycle at
 or after its time. A time that has already passed when it is scheduled (for example, a delay
-shortened during the delay, or a custom burst longer than the gap to the next burst onset) is
-made late, in the next cycle, rather than missed.
+shortened during the delay) is made late, in the next cycle, rather than missed.
 
 ### Custom trains
 
@@ -160,9 +159,17 @@ when it is triggered, and plays it to the end of its train.
 - A train whose data does not all arrive (a comm failure) is not stored: outside param sync
   mode it is left empty, and in param sync mode the current block plays on.
 
-A biphasic custom pulse always plays whole. If it lasts longer than the gap to the next pulse's
-time, the next pulse starts as it ends. A monophasic pulse whose next pulse starts no later than
-its phase 1 would end is a sample of a custom waveform: it holds until the next pulse's time.
+A biphasic custom pulse always plays whole, and a pulse whose time comes while it plays is
+dropped. A pulse exactly one pulse length later plays, with no rest between the two. A dropped
+pulse leaves its place in the train empty: the pulses after it play at their own times, and if
+the train's last pulse is dropped, the train (or this pass of a looping train) ends when that
+pulse would have ended. A monophasic pulse whose next pulse starts no later than its phase 1
+would end is a sample of a custom waveform: it holds until the next pulse's time.
+
+A train targeting bursts (custom train target 1) drops bursts the same way: a burst whose time
+comes while the burst before plays is dropped, a burst starting exactly as the one before ends
+follows it with no rest between them, and if the last burst is dropped, the train ends when that
+burst would have ended.
 
 ### Screen saver
 

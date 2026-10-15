@@ -366,9 +366,12 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
 - **Loading a custom train stops the channels playing it** (outside param sync mode), and their
   next trigger plays the new train. To change a train between trials without stopping the one
   playing, use param sync mode (see the recipe above).
-- **A biphasic custom pulse always plays whole.** If its phases last longer than the gap to the
-  next pulse's time, the next pulse starts late, as it ends. Space biphasic custom pulses at
-  least `phase1_duration + inter_phase_interval + phase2_duration` apart to keep their times.
+- **A biphasic custom pulse always plays whole, and a pulse that starts during it is dropped.**
+  Pulses that play are always on time. Space biphasic custom pulses at least
+  `phase1_duration + inter_phase_interval + phase2_duration` apart to play them all: for
+  intervals drawn at random, draw them with that minimum, or the pulses dropped will change
+  their distribution. Likewise, in a train targeting bursts, a burst that starts during the one
+  before is dropped: space burst onsets at least `burst_duration` apart.
 - **Continuous loop mode is not saved** in programs on the microSD card, and is not read back
   by `sync_from_device()`. It starts nothing either, from a script or from the joystick menu's
   Continuous item: the next trigger plays the train until it is stopped. (Firmware v21 started

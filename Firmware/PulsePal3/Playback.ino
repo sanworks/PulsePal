@@ -31,6 +31,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   pulseFitsInTrain()
 //   startCustomPulse()
 //   endCustomTrainPass()
+//   firstCustomTimeFrom()
+//   dropOverlappedCustomPulses()
+//   dropOverlappedCustomBursts()
+//   startBurst()
 //   handler()
 //   killChannel()
 //   AbortAllPulseTrains()
@@ -94,10 +98,11 @@ static inline bool pulseFitsInTrain(byte channel) {
 }
 
 // Starts the next pulse of a custom train whose times are pulse onsets (CustomTrainTarget 0) on an output channel (0-3),
-// from the memory block the channel plays. handler() calls it when the pulse's time has come, or when the pulse before
-// ended after that time. A looping train that has played its last pulse starts again from its first. A channel past the
-// last pulse of its train stops: the train is empty (an empty block holds no times), or its custom train ID changed
-// during the train to a shorter train.
+// from the memory block the channel plays. handler() calls it when the pulse's time has come, or, past the last pulse of
+// the train, when this pass of the train ends. A looping train that has played its last pulse starts again from its
+// first. A channel past the last pulse of its train stops: the train is empty (an empty block holds no times), its
+// custom train ID changed during the train to a shorter train, or its last pulse was dropped (see
+// dropOverlappedCustomPulses()) and the train does not loop.
 static inline void startCustomPulse(byte channel, byte block) {
   if ((CustomTrainLoop[channel] == 1) && (CustomPulseTimeIndex[channel] >= (int)CustomTrainNpulses[block])) {
     CustomPulseTimeIndex[channel] = 0;
@@ -112,8 +117,8 @@ static inline void startCustomPulse(byte channel, byte block) {
   // waveform: it holds until the next pulse's time, with no rest between them. The last pulse has no next pulse time
   // (the slot after the train is never loaded, and on Pulse Pal 3 not even zeroed at startup), so it lasts
   // Phase1Duration, and a looping train starts again when it ends (see endCustomTrainPass()). A biphasic pulse always
-  // plays whole: phase 1, the inter-phase interval and phase 2. If the next pulse's time passes meanwhile, the next pulse
-  // starts as this one ends.
+  // plays whole: phase 1, the inter-phase interval and phase 2. Pulses whose times come meanwhile are dropped (see
+  // dropOverlappedCustomPulses()).
   if ((IsBiphasic[channel] == 0) && (pulse + 1 < (int)CustomTrainNpulses[block]) &&
       ((CustomPulseTimes[block][pulse+1] - CustomPulseTimes[block][pulse]) <= Phase1Duration[channel])) {
     PulseStatus[channel] = PULSE_IDLE;
@@ -143,6 +148,95 @@ static inline void endCustomTrainPass(byte channel, byte block) {
     digitalWriteDirect(OutputLEDLines[channel], LOW);
     setDAC(channel, RestingVoltage[channel]);
   }
+}
+
+// Returns the first time in a custom train memory block, from index first (below the block's CustomTrainNpulses) on,
+// that is elapsed or later, or CustomTrainNpulses if there is none. Used to drop the custom pulses and bursts whose
+// times came while the one before played (see dropOverlappedCustomPulses()).
+//
+// Times increase (the clients check this), so a binary search finds it, with at most 14 reads for 10000 times. Checking
+// times one at a time could read thousands in one cycle (pulses 100us apart under one long pulse or burst), and hold up
+// the timer interrupt for several cycles. Times that do not increase give an unpredictable index, but take no longer.
+static inline int firstCustomTimeFrom(byte block, int first, uint32_t elapsed) {
+  if (CustomPulseTimes[block][first] >= elapsed) {
+    return first; // Nothing to drop: the usual case
+  }
+  int low = first + 1; // The index is in [low, high]
+  int high = (int)CustomTrainNpulses[block];
+  while (low < high) {
+    int mid = (low + high) / 2;
+    if (CustomPulseTimes[block][mid] < elapsed) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+
+// Called by handler() when a biphasic custom pulse that is not the last of its train ends, on an output channel (0-3)
+// playing a custom train whose times are pulse onsets. Drops the pulses whose times came while it played, and schedules
+// the next pulse at its own time: now, with no rest between the two, or later. If the train's last pulse is dropped,
+// it schedules the end of this pass of the train instead, when that pulse would have ended; startCustomPulse() then
+// ends the train, or starts a looping train again.
+//
+// Playing an overlapped pulse late, as the pulse before ended, changed the intervals between pulses: a train whose
+// intervals were drawn from a distribution played intervals of exactly one pulse length more often than it held them.
+// A dropped pulse leaves its place empty instead: the pulses that play are on time, and a looping train keeps its period.
+static inline void dropOverlappedCustomPulses(byte channel, byte block) {
+  int nPulses = (int)CustomTrainNpulses[block];
+  int next = firstCustomTimeFrom(block, CustomPulseTimeIndex[channel], SystemTime - PulseTrainTimestamps[channel]);
+  CustomPulseTimeIndex[channel] = next;
+  if (next < nPulses) {
+    NextPulseTransitionTime[channel] = PulseTrainTimestamps[channel] + CustomPulseTimes[block][next];
+  } else {
+    NextPulseTransitionTime[channel] = PulseTrainTimestamps[channel] + CustomPulseTimes[block][nPulses - 1] +
+                                       Phase1Duration[channel] + InterPhaseInterval[channel] + Phase2Duration[channel];
+  }
+}
+
+// Called by handler() when a burst that is not the last of its train ends, on an output channel (0-3) playing a custom
+// train whose times are burst onsets (CustomTrainTarget 1). As dropOverlappedCustomPulses() does for pulses, drops the
+// bursts whose times came while it played, and schedules the next burst at its own time: now, with no rest between the
+// two, or later. If the train's last burst is dropped, it schedules the end of the train instead, when that burst would
+// have ended; startBurst() then ends the train.
+static inline void dropOverlappedCustomBursts(byte channel, byte block) {
+  int nBursts = (int)CustomTrainNpulses[block];
+  int next = firstCustomTimeFrom(block, CustomPulseTimeIndex[channel], SystemTime - PulseTrainTimestamps[channel]);
+  CustomPulseTimeIndex[channel] = next;
+  if (next < nBursts) {
+    NextBurstTransitionTime[channel] = PulseTrainTimestamps[channel] + CustomPulseTimes[block][next];
+  } else {
+    NextBurstTransitionTime[channel] = PulseTrainTimestamps[channel] + CustomPulseTimes[block][nBursts - 1] +
+                                       BurstDuration[channel];
+  }
+  NextPulseTransitionTime[channel] = NextBurstTransitionTime[channel];
+}
+
+// Starts a burst on an output channel (0-3), from the custom train memory block the channel plays, with its first pulse
+// if that pulse fits (a monophasic pulse always starts: the end of the burst cuts it short). A channel playing a custom
+// train whose times are burst onsets ends instead if it is past the train's last burst: its last burst was dropped,
+// and this is when it would have ended (see dropOverlappedCustomBursts()), or its custom train ID changed during the
+// train to a shorter train.
+static inline void startBurst(byte channel, byte block) {
+  if ((CustomTrainID[channel] > 0) && (CustomTrainTarget[channel] == 1) &&
+      (CustomPulseTimeIndex[channel] >= (int)CustomTrainNpulses[block])) {
+    killChannel(channel);
+    return;
+  }
+  NextBurstTransitionTime[channel] = SystemTime + BurstDuration[channel];
+  NextPulseTransitionTime[channel] = SystemTime + Phase1Duration[channel];
+  if ((IsBiphasic[channel] == 0) || (pulseFitsInBurst(channel) && pulseFitsInTrain(channel))) {
+    PulseStatus[channel] = PULSE_PHASE1;
+    if ((CustomTrainID[channel] > 0) && (CustomTrainTarget[channel] == 1)) {
+      setDAC(channel, CustomVoltages[block][CustomPulseTimeIndex[channel]]);
+    } else {
+      setDAC(channel, Phase1Voltage[channel]);
+    }
+  } else {
+    PulseStatus[channel] = PULSE_IDLE; // A biphasic pulse cut short by the end of the burst or train would lose its phase 2 (see pulseFitsInBurst())
+  }
+  BurstStatus[channel] = 1;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -183,7 +277,9 @@ static inline void endCustomTrainPass(byte channel, byte block) {
 // Custom trains (CustomTrainID > 0) use CustomPulseTimes (relative to PulseTrainTimestamps) and CustomVoltages
 // in place of the parametric pulse timing and phase 1 voltage. CustomPulseTimeIndex tracks the current pulse.
 // If CustomTrainTarget is 0 each time starts a pulse; if 1 each time starts a burst of parametric pulses.
-// Phase 2 of a biphasic custom pulse is the phase 1 voltage mirrored about 0V. A channel reads its custom train from
+// Phase 2 of a biphasic custom pulse is the phase 1 voltage mirrored about 0V, and a biphasic custom pulse whose time
+// comes while the pulse before plays is dropped (see dropOverlappedCustomPulses()), as is a custom burst whose time comes
+// while the burst before plays (dropOverlappedCustomBursts()). A channel reads its custom train from
 // one memory block (customTrainPlayBlock), the train's current block when the channel started, or when its custom
 // train ID changed during the train: a train loaded meanwhile plays from the channel's next start. An empty train
 // (CustomTrainNpulses 0) ends at once.
@@ -477,12 +573,12 @@ void handler(void) {
             case PULSE_PHASE2: {
               if (timeReached(NextPulseTransitionTime[x])) {
                 if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 0)) {
-                  // A biphasic custom pulse has ended. The next one starts at its own time, or now if that time passed
-                  // while this pulse played, with no rest between them.
+                  // A biphasic custom pulse has ended. Pulses whose times came while it played are dropped, and the next
+                  // one starts at its own time: now, with no rest between them, or later.
                   if (CustomPulseTimeIndex[x] >= (int)CustomTrainNpulses[thisBlock]) {
                     endCustomTrainPass(x, thisBlock); // The last pulse has ended. A looping train plays pulse 0 now
                   } else {
-                    NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisBlock][CustomPulseTimeIndex[x]];
+                    dropOverlappedCustomPulses(x, thisBlock);
                     if (timeReached(NextPulseTransitionTime[x]) && pulseFitsInTrain(x)) {
                       startCustomPulse(x, thisBlock);
                     } else {
@@ -523,30 +619,21 @@ void handler(void) {
               CustomPulseTimeIndex[x] = CustomPulseTimeIndex[x] + 1;
               if (CustomPulseTimeIndex[x] >= (int)CustomTrainNpulses[thisBlock]){
                   killChannel(x);
+              } else {
+                // Bursts whose times came during this burst are dropped, and the next one starts at its own time: now
+                // (below), with no rest between them, or later
+                dropOverlappedCustomBursts(x, thisBlock);
               }
-              // The next burst starts at its own time, or at once if that time passed during this burst
-              NextPulseTransitionTime[x] = PulseTrainTimestamps[x] + CustomPulseTimes[thisBlock][CustomPulseTimeIndex[x]];
-              NextBurstTransitionTime[x] = NextPulseTransitionTime[x];
             }
               BurstStatus[x] = 0;
               setDAC(x, RestingVoltage[x]);
+              if ((StimulusStatus[x] == 1) && (CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1) &&
+                  timeReached(NextBurstTransitionTime[x])) {
+                startBurst(x, thisBlock);
+              }
           } else {
           // Determine if burst status should go to 1 now
-            NextBurstTransitionTime[x] = SystemTime + BurstDuration[x];
-            NextPulseTransitionTime[x] = SystemTime + Phase1Duration[x];
-            if ((IsBiphasic[x] == 0) || (pulseFitsInBurst(x) && pulseFitsInTrain(x))) {
-              PulseStatus[x] = PULSE_PHASE1;
-              if ((CustomTrainID[x] > 0) && (CustomTrainTarget[x] == 1)) {
-                if (CustomPulseTimeIndex[x] < (int)CustomTrainNpulses[thisBlock]){
-                    setDAC(x, CustomVoltages[thisBlock][CustomPulseTimeIndex[x]]);
-                }
-              } else {
-                   setDAC(x, Phase1Voltage[x]);
-              }
-            } else {
-              PulseStatus[x] = PULSE_IDLE; // A biphasic pulse cut short by the end of the burst or train would lose its phase 2 (see pulseFitsInBurst())
-            }
-            BurstStatus[x] = 1;
+            startBurst(x, thisBlock);
          }
         }
        }
