@@ -117,7 +117,11 @@ the `--show` output before concluding that a function really changed.
    being little-endian, like the wire format. See `ArCOM.h`. On Pulse Pal 2, ArCOM also takes
    received packets off the USB controller itself (`receiveUSB()`), because the Due core's
    `Serial_::accept()` drops a packet that arrives while it empties the one before; never read
-   `SerialUSB` directly, since `SerialUSB.read()` runs `accept()`.
+   `SerialUSB` directly, since `SerialUSB.read()` runs `accept()`. `setup()` also installs
+   `usbInterruptHook()` ahead of the core's USB interrupt: the core read each control request
+   further into endpoint 0's FIFO window, and after 4096 requests with the port closed (programs
+   that list USB devices poll it a few times a second) the device refused every request until it
+   restarted.
 8. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
    `TIMER_PERIOD` (50 µs). Settings files store cycles, and legacy code and installed clients
    assume 50 µs, so a faster cycle (e.g. 25 µs on Pulse Pal 3) would have to be optional, with

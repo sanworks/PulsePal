@@ -71,6 +71,36 @@ See the GNU General Public License for more details.
     volatile uint32_t tail; // Next byte to read. head == tail: empty; head one before tail: full
   };
   extern ring_buffer cdc_rx_buffer;
+
+  // The Due core can also stop answering the PC altogether, after a program polls the device with the port closed.
+  // Its USB interrupt reads each setup packet (the start of a control request, such as GET_DESCRIPTOR, or the
+  // SET_LINE_CODING a program sends when it opens the port) at an offset into endpoint 0's FIFO window that only
+  // grows: 8 bytes per request, reset only after a request that brings data from the PC, like SET_LINE_CODING. Programs
+  // that list USB devices read their descriptors over and over (about 4 requests a second on one PC with the Arduino
+  // IDE open), and with the port closed nothing resets the offset. After 4096 requests it passes the end of the window,
+  // and from then on the core reads every request from the wrong memory and refuses it (STALL): the port could not be
+  // opened again ("A device attached to the system is not functioning", on Windows) until the device restarted.
+  // usbInterruptHook() runs before the core's USB interrupt, through the core's gpf_isr pointer, and resets the offset
+  // with the core's UDD_ClearOUT() whenever a setup packet waits. A setup packet ends any request in progress, so the
+  // OUT data that UDD_ClearOUT() also clears belongs to no request any more. setup() calls installUSBInterruptHook().
+  extern "C" { extern void (*gpf_isr)(void); }
+  static void (*coreUSBInterrupt)(void) = nullptr;
+
+  static void usbInterruptHook(void) {
+    if (UOTGHS->UOTGHS_DEVEPTISR[0] & UOTGHS_DEVEPTISR_RXSTPI) {
+      UDD_ClearOUT(); // Endpoint 0's read offset back to the start of its FIFO, before the core reads the setup packet
+    }
+    coreUSBInterrupt();
+  }
+
+  static void installUSBInterruptHook() {
+    noInterrupts();
+    if (gpf_isr != usbInterruptHook) {
+      coreUSBInterrupt = gpf_isr;
+      gpf_isr = usbInterruptHook;
+    }
+    interrupts();
+  }
 #else
   typedef usb_serial_class ArCOMPort; // Teensy USB serial class, the type of Serial
 #endif

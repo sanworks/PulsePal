@@ -686,6 +686,7 @@ void setup() {
 
   #if (HARDWARE_VERSION == 2)
     SerialUSB.begin(115200); // Initialize Serial USB interface at 115.2kbps
+    installUSBInterruptHook(); // Works around a Due core bug that left the device deaf to the PC (see ArCOM.h)
   #endif
 
   // set up the LCD
