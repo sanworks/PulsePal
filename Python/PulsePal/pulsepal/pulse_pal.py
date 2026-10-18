@@ -27,9 +27,11 @@ Each parameter is a list on the device object, indexed by channel
 number: index 0 is unused and holds `None`, and indices 1 to 4 hold the
 values for output channels 1-4. `PulsePalDevice.trigger_mode` is indexed
 the same way by trigger channel, 1 or 2. Assigning an element, a slice
-or the whole list programs the device at once. The whole list takes one
-value per channel: a single value raises an error, because it does not
-say which channels it is meant for.
+or the whole list programs the device at once, on the channels whose
+value it changes: the others keep what the device holds, which may have
+been set with its joystick. The whole list takes one value per channel:
+a single value raises an error, because it does not say which channels it
+is meant for.
 
 ```python
 P.phase1_voltage[2] = 7                  # channel 2 only
@@ -124,7 +126,7 @@ import serial
 from . import _common
 from ._common import ChannelSettings, PulsePalError, to_bool, to_name
 
-__all__ = ["PulsePalDevice", "DeviceInfo", "TRIGGER_MODES", "CUSTOM_TRAIN_TARGETS", "MAX_TIME"]
+__all__ = ["PulsePalDevice", "DeviceInfo", "DeviceStatus", "TRIGGER_MODES", "CUSTOM_TRAIN_TARGETS", "MAX_TIME"]
 __docformat__ = "google"
 
 MAX_TIME = 9999.9999
@@ -175,7 +177,7 @@ _TIME_PARAMETERS = ("phase1_duration", "inter_phase_interval", "phase2_duration"
                     "burst_duration", "inter_burst_interval", "pulse_train_duration", "pulse_train_delay")
 _VOLTAGE_PARAMETERS = ("phase1_voltage", "phase2_voltage", "resting_voltage")
 
-# The default parameters: the device's own (LoadDefaultParameters() in /Firmware/PulsePal3/SDSettings.ino), which it
+# The default parameters: the device's own (LoadDefaultParameters() in /Firmware/PulsePal/SDSettings.ino), which it
 # loads at startup, after a comm failure and after formatting its microSD card, so that it plays the same program
 # whichever way it got its defaults. The MATLAB class has the same; the legacy clients keep their own.
 _DEFAULT_OUTPUT_VALUES = {
@@ -190,7 +192,7 @@ _DEFAULT_OUTPUT_VALUES = {
     "inter_burst_interval": 0.0,
     "pulse_train_duration": 1.0,
     "pulse_train_delay": 0.0,
-    "link_trigger_channel1": True,
+    "link_trigger_channel1": False,  # Until 2026-10 True, so a TTL played these pulses on every output channel
     "link_trigger_channel2": False,
     "custom_train_id": 0,
     "custom_train_target": "Pulses",
@@ -249,6 +251,16 @@ class DeviceInfo:
     copy `hardware_version` and `circuit_board_revision` to your data.
     """
 
+    serial_number: str = None
+    """USB serial number of the device, e.g. `"20345420"`: the Teensy's,
+    unique to each Pulse Pal 3, and the same whichever firmware it runs.
+
+    Connect by it, wherever the device is plugged in, with
+    `PulsePalDevice(serial_number="20345420")`. To record exactly which unit ran an
+    experiment, copy it to your data. Pulse Pal 2 has none, and
+    firmware older than v22 cannot report one: `""`.
+    """
+
     max_custom_pulses: int = None
     """Maximum number of pulses in a single custom pulse train."""
 
@@ -277,6 +289,37 @@ class DeviceInfo:
     max_time: float = MAX_TIME
     """Longest time parameter or custom pulse time, in seconds. See
     `MAX_TIME`."""
+
+
+@dataclass
+class DeviceStatus:
+    """What the device is doing, and what has happened to it, from
+    `PulsePalDevice.status`.
+
+    The counters count from the previous call to `PulsePalDevice.status`,
+    by this or any earlier connection, or from the device's startup: each
+    call clears them, and reports what happened since the one before.
+    """
+
+    playing: list
+    """Numbers of the output channels playing, e.g. `[1, 3]`: from a
+    channel's start, its pulse train delay included, until its train
+    ends."""
+
+    trigger_edges: list
+    """Rising edges on each trigger channel, indexed by trigger channel
+    number (index 0 is unused), whatever its trigger mode and whether or
+    not they started an output channel."""
+
+    channel_starts: list
+    """Times each output channel started, indexed by channel number
+    (index 0 is unused): by a trigger channel, `PulsePalDevice.trigger`
+    or the joystick menu. A trigger that a channel ignored, because it
+    was already playing, is not a start."""
+
+    comm_failures: int
+    """Commands that reached the device only in part, after which it
+    showed COMM. FAILURE! and waited for its joystick to be clicked."""
 
 
 def _channel_setting(name, doc):
@@ -413,7 +456,8 @@ class PulsePalDevice:
     link_trigger_channel1 = _channel_setting("link_trigger_channel1", """Whether each output channel is triggered by trigger channel 1.
 
     `True` links the output channel to trigger channel 1, `False` unlinks
-    it.
+    it. By default no output channel is linked to either trigger channel,
+    so a TTL starts nothing until a script links it.
     """)
 
     link_trigger_channel2 = _channel_setting("link_trigger_channel2", """Whether each output channel is triggered by trigger channel 2.
@@ -446,7 +490,9 @@ class PulsePalDevice:
 
     `True` loops the custom train until
     `PulsePalDevice.pulse_train_duration` has elapsed, `False` plays it
-    once.
+    once. Each pass starts as the last pulse (or burst, for a train
+    targeting bursts) of the pass before ends.
+    `PulsePalDevice.continuous_loop` does not apply to custom trains.
     """)
 
     continuous_loop = _channel_setting("continuous_loop", """Whether each output channel plays its pulse train until stopped.
@@ -454,7 +500,9 @@ class PulsePalDevice:
     `False` plays the pulse train once per trigger, for
     `PulsePalDevice.pulse_train_duration`. `True` plays it until the
     channel is stopped, ignoring `PulsePalDevice.pulse_train_duration`.
-    Requires firmware v22 or newer. The device does not report it, so
+    For parametric trains only: a custom train ignores it, and plays as
+    `PulsePalDevice.custom_train_loop` says. Requires firmware v22 or
+    newer. The device does not report it, so
     `PulsePalDevice.sync_from_device` leaves it as it is.
     """)
 
@@ -529,6 +577,7 @@ class PulsePalDevice:
     _HANDSHAKE_RESPONSE = 75  # 'K'
     _DAC_BITMAX = 65535
     _PARAM_MESSAGE_BYTES = 178  # Length of the parameter set sent by op 93
+    _STATUS_MESSAGE_BYTES = 29  # Length of the reply to op 101: playing channels, then 7 uint32 counters
     # Phase 1 and 2 durations, inter-pulse interval and train duration last at least this many
     # timer cycles, as in the MATLAB and C++ classes and the joystick menu. A trigger channel reads
     # its input once per cycle, so a one cycle pulse from another Pulse Pal could fall between two
@@ -553,7 +602,7 @@ class PulsePalDevice:
         "int32": (-(2**31), 2**31 - 1),
     }
 
-    def __init__(self, port_name, *, timeout=10):
+    def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Pulse Pal device.
 
         Opens the serial port, exchanges the handshake, verifies the
@@ -561,9 +610,17 @@ class PulsePalDevice:
         `PulsePalDevice.info`, and programs the device with the default
         parameters.
 
+        ```python
+        P = PulsePalDevice("COM3")
+        P = PulsePalDevice(serial_number="20345420")  # Wherever it is plugged in
+        ```
+
         Args:
             port_name: USB serial port for the Pulse Pal device, such as
                 `COM3` on Windows or `/dev/ttyACM0` on Linux.
+            serial_number: Instead of `port_name`, the device's USB serial
+                number (`DeviceInfo.serial_number`), which finds its port.
+                Pulse Pal 3 only: Pulse Pal 2 has none.
             timeout: Serial read timeout, in seconds.
 
         Firmware newer than this module knows (`v22`) is used with a
@@ -573,20 +630,28 @@ class PulsePalDevice:
         Raises:
             PulsePalError: If the device does not return the expected
                 handshake (for example, it runs Wave Pal or Synth Pal
-                firmware), or its firmware is older than v21. The port is
-                closed again before any error is raised.
-            serial.SerialException: If the serial port cannot be opened.
+                firmware), or its firmware is older than v21, or no port
+                has the serial number given. The port is closed again
+                before any error is raised.
+            serial.SerialException: If the serial port cannot be opened,
+                e.g. because another program has it open (on Linux and
+                macOS, another session of these classes, which lock it).
         """
         self._closed = True
         self._gui = None
         self._auto_sync = True
         self.info = DeviceInfo()
         self._create_settings()
+        port_name = _common.port_name_from(port_name, serial_number, "PulsePalDevice")
         self.port = serial.Serial(
             port_name,
             self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
+            # Windows opens a port for one program only. Linux and macOS let a second program open it too, and two
+            # sessions' bytes would then interleave; exclusive locks it (flock), so a second session that also locks
+            # it, such as another of these classes, gets an error instead
+            exclusive=True,
         )
         self._closed = False
         try:
@@ -666,9 +731,12 @@ class PulsePalDevice:
                     f"The Pulse Pal on {port_name} did not report its circuit board revision."
                 )
             self.info.circuit_board_revision = revision[0]
+            self._write_serial((self._OP_MENU_BYTE, _common.OP_SERIAL_NUMBER), "uint8")
+            self.info.serial_number = _common.read_serial_number(self._read_raw)
         else:
             self.info.hardware_version = 2
             self.info.circuit_board_revision = 0
+            self.info.serial_number = ""  # v21 runs on Pulse Pal 2, which has none
             self.info.cycle_period_us = 50
             self.info.cycle_frequency = 20000
             self.info.n_custom_pulse_trains = 2
@@ -726,7 +794,11 @@ class PulsePalDevice:
 
         `True` (the default): each assignment, such as
         `P.phase1_voltage[1] = 5`, programs the device at once, also while
-        a trigger channel is in param sync mode.
+        a trigger channel is in param sync mode. It sends the channels
+        whose value it changes, and nothing for a channel that already
+        holds the value assigned: the other channels keep what the device
+        holds, e.g. values set with its joystick (read them with
+        `PulsePalDevice.sync_from_device`).
 
         `False`: assignments change only this object's copy of the
         parameters, checking each value, and
@@ -814,9 +886,10 @@ class PulsePalDevice:
 
         The defaults are monophasic +5 V pulses of 0.1 ms, 1 ms apart
         (about 909 a second), for 1 second, resting at 0 V, on all four
-        output channels, linked to trigger channel 1, with both trigger
-        channels in normal mode; for biphasic pulses, a phase 2 of -5 V
-        and 0.1 ms after 0.1 ms at rest. They are the device's own
+        output channels; for biphasic pulses, a phase 2 of -5 V and 0.1 ms
+        after 0.1 ms at rest. No output channel is linked to a trigger
+        channel, so a TTL starts nothing until a script links it, and both
+        trigger channels are in normal mode. They are the device's own
         defaults, which it also loads at startup, after a comm failure
         and after formatting its microSD card. They are sent at once,
         also while `PulsePalDevice.auto_sync` is off. The constructor
@@ -1201,6 +1274,41 @@ class PulsePalDevice:
         bits = 0x0F if channels is None else _common.channel_bits(channels)
         self._write_serial((self._OP_MENU_BYTE, 98, bits), "uint8")
 
+    def status(self):
+        """Read which channels are playing, and the counters since the last call.
+
+        The counters (see `DeviceStatus`) count from the previous call, or
+        from the device's startup, and each call clears them. Calling it
+        before and after a trial checks that the TTLs the trial sent
+        arrived, and started the trains they should:
+
+        ```python
+        P.status()                     # Clears the counters
+        run_trial()                    # Your code: one TTL on trigger channel 1, linked to channels 1 and 2
+        s = P.status()
+        if s.trigger_edges[1] != 1 or s.channel_starts[1:3] != [1, 1]:
+            print("The trial's trains did not all start")
+        ```
+
+        Requires firmware v22 or newer.
+
+        Returns:
+            A `DeviceStatus`.
+
+        Raises:
+            PulsePalError: If the firmware is older than v22, or the device
+                does not reply.
+        """
+        self._require_firmware(22, "status()")
+        self._write_serial((self._OP_MENU_BYTE, 101), "uint8")
+        values = struct.unpack(f"{self._ENDIANNESS}B7I", self._read_raw(self._STATUS_MESSAGE_BYTES))
+        return DeviceStatus(
+            playing=[ch for ch in range(1, 5) if values[0] & (1 << (ch - 1))],
+            trigger_edges=[None, *values[1:3]],
+            channel_starts=[None, *values[3:7]],
+            comm_failures=values[7],
+        )
+
     def save_program_to_microsd(self, file_name):
         """Save the parameters to the device's microSD card, as a program.
 
@@ -1517,7 +1625,7 @@ class PulsePalDevice:
 
         Raises PulsePalError, before anything is sent, for a value the device cannot play. The
         device refuses most of them too, but it also resets them (see validateOutputParams() in
-        /Firmware/PulsePal3/USBOps.ino), so the local copy would describe a different program.
+        /Firmware/PulsePal/USBOps.ino), so the local copy would describe a different program.
         """
         name, kind = _OUTPUT_PARAMETERS[code]
         label = f"{name} on channel {channel}"
@@ -1568,41 +1676,60 @@ class PulsePalDevice:
 
     def _apply_output_param(self, code, values):
         """Check new values for all four channels of an output parameter, and with auto_sync on,
-        program them. Returns them as the parameter's list holds them."""
+        program the channels whose value changes. Returns them as the parameter's list holds them."""
         values = [self._normalize_output_value(code, v, ch) for ch, v in enumerate(values, start=1)]
         if self._auto_sync:
+            name = _OUTPUT_PARAMETERS[code][0]
             if code in (_BURST_DURATION_CODE, _CUSTOM_TRAIN_TARGET_CODE):
                 # Sent alone, so it must suit the other parameter as the device holds it. In a batch() block, or
                 # with auto_sync off, both are checked together by sync_to_device().
-                new = {_OUTPUT_PARAMETERS[code][0]: values}
+                new = {name: values}
                 self._check_custom_bursts(new.get("custom_train_target", list(self._custom_train_target)[1:]),
                                           new.get("burst_duration", list(self._burst_duration)[1:]))
-            if self.info.firmware_version > 21:
-                self._send_output_param(code, values, f"setting {_OUTPUT_PARAMETERS[code][0]}")
-            else:
-                for ch in range(1, 5):
-                    self._send_output_param_to_channel(code, ch, values[ch - 1],
-                                                       f"setting {_OUTPUT_PARAMETERS[code][0]}")
+            # Compared as the device receives them: 5 and 5.00001 V are the same DAC code
+            old_data, _ = self._encode_output_param(code, list(getattr(self, name))[1:])
+            new_data, _ = self._encode_output_param(code, values)
+            channels = [ch for ch in range(1, 5) if old_data[ch - 1] != new_data[ch - 1]]
+            self._send_output_param(code, values, channels, f"setting {name}")
         return values
 
-    def _send_output_param(self, code, values, context):
-        """Program one output parameter on all four channels with one command (op 91)."""
-        data, datatype = self._encode_output_param(code, values)
-        self._write_serial((self._OP_MENU_BYTE, 91, code), "uint8", data, datatype)
-        self._read_ack(context, on_refusal=lambda: self._refresh_output_param(code, (1, 2, 3, 4)))
+    def _send_output_param(self, code, values, channels, context):
+        """Program one output parameter on some output channels: op 91 if all four change, op 74 for each otherwise.
 
-    def _send_output_param_to_channel(self, code, channel, value, context):
+        The other channels are left as the device holds them. Sending all four (op 91) for a change to one put this
+        object's copy of the others back on the device, undoing what the joystick menu, or a program loaded with it,
+        had set there.
+        """
+        if self.info.firmware_version > 21 and len(channels) == 4:
+            data, datatype = self._encode_output_param(code, values)
+            self._write_serial((self._OP_MENU_BYTE, 91, code), "uint8", data, datatype)
+            self._read_ack(context, on_refusal=lambda: self._refresh_output_param(code, channels))
+            return
+        for channel in channels:
+            # A refusal reads back every channel this assignment changes, so that the copy describes the device for
+            # those already sent too
+            self._send_output_param_to_channel(code, channel, values[channel - 1], context, refresh_channels=channels)
+
+    def _send_output_param_to_channel(self, code, channel, value, context, refresh_channels=None):
         """Program one output parameter on one channel (op 74)."""
         if code == _CONTINUOUS_LOOP_CODE and self.info.firmware_version < 22:
             return  # Firmware v21 has no parameter 18, and _normalize_output_value() lets only False through
         data, datatype = self._encode_output_param(code, [value])
         self._write_serial((self._OP_MENU_BYTE, 74, code, channel), "uint8", data, datatype)
-        self._read_ack(context, on_refusal=lambda: self._refresh_output_param(code, (channel,)))
+        self._read_ack(context, on_refusal=lambda: self._refresh_output_param(code, refresh_channels or (channel,)))
 
     def _apply_trigger_mode(self, values):
+        """Check new trigger modes, and with auto_sync on, program the trigger channels whose mode changes."""
         modes = [self._normalize_trigger_mode(v) for v in values]
         if self._auto_sync:
-            self._send_trigger_modes(modes, "setting trigger_mode")
+            channels = [ch for ch in (1, 2) if modes[ch - 1] != self._trigger_mode[ch]]
+            if len(channels) == 2:
+                self._send_trigger_modes(modes, "setting trigger_mode")
+            elif channels:  # One: op 74, which leaves the other trigger channel as the device holds it
+                channel = channels[0]
+                self._write_serial((self._OP_MENU_BYTE, 74, _TRIGGER_MODE_CODE, channel,
+                                    TRIGGER_MODES.index(modes[channel - 1])), "uint8")
+                self._read_ack("setting trigger_mode", on_refusal=self._refresh_trigger_mode)
         return modes
 
     def _send_trigger_modes(self, modes, context):

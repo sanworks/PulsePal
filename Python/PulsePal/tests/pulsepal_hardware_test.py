@@ -20,7 +20,7 @@ the PC expects. The tests send commands while channels play, commands the device
 must refuse, bytes that are no command, many commands in one write, and
 reconnects; and they time USB round trips and custom train uploads with the PC's
 CPU idle and fully loaded. Playback timing itself needs a scope (see
-/Firmware/PulsePal3/AGENTS.md).
+/Firmware/PulsePal/AGENTS.md).
 
 The test saves and deletes HWTEST*.pps on the microSD card. It never formats the
 card, writes the DAC calibration or uses the debugging ops (86, 87).
@@ -142,6 +142,11 @@ def test_connection(P, D, report):
     assert P.info.firmware_version == 22, P.info.firmware_version
     assert P.info.hardware_version in (2, 3)
     assert 0 <= P.info.circuit_board_revision <= 31
+    # The USB serial number: the Teensy's on Pulse Pal 3, the same one the computer lists the port with; none on Pulse Pal 2
+    if P.info.hardware_version == 3:
+        assert P.info.serial_number.isdigit(), P.info.serial_number
+    else:
+        assert P.info.serial_number == "", P.info.serial_number
     assert P.info.cycle_period_us == 50
     assert P.info.max_custom_pulses == (10000 if P.info.hardware_version == 3 else 5000)
     assert_in_step(P, what="after connecting")
@@ -239,7 +244,7 @@ def test_bytes_that_are_no_command_are_ignored(P, D, report):
     noise = bytes(b for b in (rng.randrange(256) for _ in range(20000)) if b != OP)
     P.port.write(noise)
     assert_in_step(P, expected, "after 20000 bytes of noise")
-    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 101)]
+    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 103)]  # Ops 72-102 exist
     for op in unknown:
         P.port.write(bytes([OP, op]))
     assert_in_step(P, expected, "after every unknown op code")

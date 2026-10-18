@@ -426,7 +426,9 @@ void LoadDefaultSettings() {
   setRampDurations(noRamps, noRamps);
   noInterrupts();
   for (byte i = 0; i < N_CHANNELS; i++) {
-    TriggerAddress[0][i] = 1; // All output channels are triggered by trigger channel 1
+    // No output channel is linked to a trigger channel, so that a TTL after power-up or a comm failure starts nothing
+    // until a client links it. Until October 2026, every output channel was linked to trigger channel 1.
+    TriggerAddress[0][i] = 0;
     TriggerAddress[1][i] = 0;
   }
   TriggerMode[0] = TRIGGER_MODE_NORMAL;

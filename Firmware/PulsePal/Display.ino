@@ -168,7 +168,7 @@ void endScreenSaver() {
 
 // Reads the screen saver settings from the EEPROM (Pulse Pal 3), at setup. Bytes never written read 0xFF, which is not
 // a valid state, so a new device keeps the defaults: on, with SCREEN_SAVER_DEFAULT_TIMEOUT.
-FLASHMEM void loadScreenSaverSettings() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal3.ino)
+FLASHMEM void loadScreenSaverSettings() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal.ino)
   #if (HARDWARE_VERSION > 2)
     byte enabled = 0;
     uint16_t timeout = 0;
@@ -192,7 +192,7 @@ void saveScreenSaverSettings() {
   #endif
 }
 
-FLASHMEM void runSplashScreen() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal3.ino)
+FLASHMEM void runSplashScreen() { // Startup only, so it runs from flash (see FLASHMEM in PulsePal.ino)
   #if (HARDWARE_VERSION == 3)
     // SplashScreen
       u8g2.clearBuffer();

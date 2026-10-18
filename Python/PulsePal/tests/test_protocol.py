@@ -21,12 +21,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pulsepal import pulse_pal  # noqa: E402
+from pulsepal import _common, pulse_pal  # noqa: E402
 from pulsepal import PulsePalDevice, PulsePalError  # noqa: E402
 
 OP_MENU_BYTE = 213
-# The replies of a Pulse Pal 3 to op 94 (hardware info) and op 100 (circuit board revision, here 5)
-PULSE_PAL_3_INFO = struct.pack("<BIBI", 3, 50, 4, 10000) + bytes([5])
+# The replies of a Pulse Pal 3 to op 94 (hardware info), op 100 (circuit board revision, here 5) and op 102 (USB
+# serial number, here 20345420)
+PULSE_PAL_3_INFO = struct.pack("<BIBI", 3, 50, 4, 10000) + bytes([5]) + bytes([8]) + b"20345420"
 
 
 class FakePort:
@@ -91,9 +92,9 @@ def volts_to_bits(volts):
     return round((volts + 10) / 20 * 65535)
 
 
-def expect_error(function, *args, error=PulsePalError):
+def expect_error(function, *args, error=PulsePalError, **kwargs):
     try:
-        function(*args)
+        function(*args, **kwargs)
     except error as exc:
         return exc
     raise AssertionError(f"{function} did not raise {error}")
@@ -121,22 +122,27 @@ def test_connection_programs_the_defaults():
     port = ClosablePort()
     port.response = bytearray([75]) + struct.pack("<I", 22) + PULSE_PAL_3_INFO
     original_serial = pulse_pal.serial.Serial
-    pulse_pal.serial.Serial = lambda *args, **kwargs: port
+    opened = []
+    pulse_pal.serial.Serial = lambda *args, **kwargs: opened.append(kwargs) or port
     try:
         device = PulsePalDevice("COM9")
     finally:
         pulse_pal.serial.Serial = original_serial
-    assert port.writes[:5] == [
+    # Locked for this session on Linux and macOS too: another session that locks the port cannot open it
+    assert opened[0].get("exclusive") is True, opened
+    assert port.writes[:6] == [
         bytes([OP_MENU_BYTE, 72]),
         bytes([OP_MENU_BYTE, 94]),
         bytes([OP_MENU_BYTE, 100]),
+        bytes([OP_MENU_BYTE, 102]),
         bytes([OP_MENU_BYTE, 89]) + b"PYTHON",
         bytes([OP_MENU_BYTE, 91, 128, 0, 0]),
     ], port.writes
-    assert port.writes[5][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 6
+    assert port.writes[6][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 7
     assert port.resets == [0], "unread input was not discarded before the handshake"
     assert device.info.hardware_version == 3 and device.info.min_pulse_width_us == 100
     assert device.info.circuit_board_revision == 5 and not port.response, "a reply was left unread"
+    assert device.info.serial_number == "20345420"
     assert device.info.trigger_modes == ("Normal", "Toggle", "Gated", "Param Sync")
     assert device.is_biphasic == [None, False, False, False, False]
     assert device.phase1_voltage == [None, 5, 5, 5, 5]
@@ -154,6 +160,77 @@ def connect_to(port, *args, **kwargs):
         return PulsePalDevice("COM9", *args, **kwargs)
     finally:
         pulse_pal.serial.Serial = original_serial
+
+
+def test_connecting_by_usb_serial_number():
+    """serial_number= opens the port whose device has that USB serial number (an int or a str), and
+    info.serial_number holds the one the device reports (op 102). Exactly one of the port name and the
+    serial number is given."""
+    class PortInfo:
+        def __init__(self, device, serial_number):
+            self.device = device
+            self.serial_number = serial_number
+
+    original_comports = _common.serial.tools.list_ports.comports
+    original_serial = pulse_pal.serial.Serial
+    opened = []
+    port = ClosablePort()
+    port.response = bytearray([75]) + struct.pack("<I", 22) + PULSE_PAL_3_INFO
+    _common.serial.tools.list_ports.comports = lambda: [PortInfo("COM4", None), PortInfo("COM9", "20345420"),
+                                                         PortInfo("COM12", "20885790")]
+    pulse_pal.serial.Serial = lambda name, *args, **kwargs: opened.append(name) or port
+    try:
+        device = PulsePalDevice(serial_number=20345420)
+        assert opened == ["COM9"] and device.info.serial_number == "20345420"
+        device.close()
+        error = expect_error(PulsePalDevice, serial_number="1234")
+        assert "COM9 (20345420), COM12 (20885790)" in str(error), error
+        for args, kwargs in (((), {}), (("COM9",), {"serial_number": "20345420"})):
+            error = expect_error(PulsePalDevice, *args, **kwargs)
+            assert "not both" in str(error), error
+        assert opened == ["COM9"], "a port was opened for a refused connection"
+    finally:
+        _common.serial.tools.list_ports.comports = original_comports
+        pulse_pal.serial.Serial = original_serial
+
+
+def test_serialportlist_skips_ports_another_session_holds():
+    """serialportlist() ("available") probes each USB port with an exclusive open, as the classes open theirs: on
+    Linux and macOS, a port another session holds, locked, then counts as in use, as any open port does on Windows."""
+    class PortInfo:
+        def __init__(self, device):
+            self.device = device
+            self.vid = 0x16C0
+            self.hwid = "USB VID:PID=16C0:0483"
+            self.serial_number = None
+
+    probes = []
+
+    class ProbePort:
+        def __init__(self):
+            self.port = None
+            self.dtr = self.rts = True
+            self.exclusive = None
+
+        def open(self):
+            probes.append((self.port, self.exclusive))
+            if self.port == "COM5":
+                raise _common.serial.SerialException("Could not exclusively lock port COM5")
+
+        def close(self):
+            pass
+
+    original_comports = _common.serial.tools.list_ports.comports
+    original_serial = _common.serial.Serial
+    _common.serial.tools.list_ports.comports = lambda: [PortInfo("COM4"), PortInfo("COM5")]
+    _common.serial.Serial = ProbePort
+    try:
+        assert PulsePalDevice.serialportlist() == ["COM4"]
+        assert PulsePalDevice.serialportlist("all") == ["COM4", "COM5"]
+    finally:
+        _common.serial.tools.list_ports.comports = original_comports
+        _common.serial.Serial = original_serial
+    assert probes == [("COM4", True), ("COM5", True)], probes
 
 
 def test_other_firmware_versions_warn():
@@ -188,33 +265,47 @@ def test_the_public_surface_is_trimmed():
 
 
 def test_assigning_a_parameter_programs_the_device():
-    """With auto_sync on (the default), an assignment sends the parameter for all four channels in one
-    op 91, whether it is to one element, a slice or the whole list."""
+    """With auto_sync on (the default), an assignment sends the channels whose value it changes: op 74 for
+    each, or op 91 when all four change, whether it is to one element, a slice or the whole list. The
+    other channels keep what the device holds, e.g. values set with the joystick, which sending all four
+    would undo."""
     device = make_device()
     device.phase1_voltage[2] = 7
     device.inter_pulse_interval[1:5] = [0.2] * 4
     device.phase1_duration = [0.002] * 4           # The whole list
     device.is_biphasic[3] = True
     device.trigger_mode[2] = "Toggle"
+    device.phase1_voltage[1:5] = [6, 7, 5.00001, 4]  # Channels 1 and 4: 5.00001 V is 5 V's DAC code
+    device.trigger_mode = ["Gated", "Normal"]
     assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 91, 2]) + struct.pack("<4H", volts_to_bits(5), volts_to_bits(7),
-                                                   volts_to_bits(5), volts_to_bits(5)),
+        bytes([OP_MENU_BYTE, 74, 2, 2]) + struct.pack("<H", volts_to_bits(7)),
         bytes([OP_MENU_BYTE, 91, 7]) + struct.pack("<4I", *[4000] * 4),
         bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", *[40] * 4),
-        bytes([OP_MENU_BYTE, 91, 1, 0, 0, 1, 0]),
-        bytes([OP_MENU_BYTE, 91, 128, 0, 1]),
+        bytes([OP_MENU_BYTE, 74, 1, 3, 1]),
+        bytes([OP_MENU_BYTE, 74, 128, 2, 1]),
+        bytes([OP_MENU_BYTE, 74, 2, 1]) + struct.pack("<H", volts_to_bits(6)),
+        bytes([OP_MENU_BYTE, 74, 2, 4]) + struct.pack("<H", volts_to_bits(4)),
+        bytes([OP_MENU_BYTE, 91, 128, 2, 0]),
     ]
-    assert device.phase1_voltage == [None, 5, 7, 5, 5]
+    assert device.phase1_voltage == [None, 6, 7, 5.00001, 4]
     assert device.phase1_duration == [None, 0.002, 0.002, 0.002, 0.002]
+
+    # A value a channel already holds sends nothing
+    n_writes = len(device.port.writes)
+    device.phase1_voltage[2] = 7
+    device.trigger_mode[1] = "gated"
+    device.is_biphasic = [False, False, True, False]
+    assert len(device.port.writes) == n_writes
 
 
 def test_assigning_on_firmware_v21_uses_op_74_per_channel():
     device = make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000)
     device.resting_voltage[1] = 1
     device.trigger_mode[1] = "Gated"
+    device.phase1_voltage = [1, 2, 3, 4]
     assert [w[:4] for w in device.port.writes] == [
-        bytes([OP_MENU_BYTE, 74, 17, channel]) for channel in (1, 2, 3, 4)
-    ] + [bytes([OP_MENU_BYTE, 74, 128, 1]), bytes([OP_MENU_BYTE, 74, 128, 2])]
+        bytes([OP_MENU_BYTE, 74, 17, 1]), bytes([OP_MENU_BYTE, 74, 128, 1])
+    ] + [bytes([OP_MENU_BYTE, 74, 2, channel]) for channel in (1, 2, 3, 4)]
     expect_error(device.continuous_loop.__setitem__, 1, True)  # Firmware v22 or newer
 
 
@@ -337,7 +428,8 @@ def test_times_hold_the_value_the_device_plays():
     assert device.phase1_duration[1] == 0.0001
     assert device.pulse_train_delay[2] == 0.0002
     assert device.burst_duration[3] == 1.00005
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 2, 2, 2)
+    # 0.00012 s plays as the default 0.0001 s, so it sends nothing
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 11, 2]) + struct.pack("<I", 4)
 
 
 def test_times_are_at_most_9999_9999_seconds():
@@ -346,7 +438,7 @@ def test_times_are_at_most_9999_9999_seconds():
     device.pulse_train_duration[1] = 9999.9999
     device.pulse_train_delay[1] = 9999.99992     # Rounds to 9999.9999
     assert device.pulse_train_delay[1] == 9999.9999
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 10]) + struct.pack("<4I", 199999998, *[20000] * 3)
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 10, 1]) + struct.pack("<I", 199999998)
     n_writes = len(device.port.writes)
     for bad in (10000, 9999.99995, 3e5):
         error = expect_error(device.pulse_train_duration.__setitem__, 1, bad)
@@ -468,7 +560,7 @@ def test_a_rejected_command_raises():
     """The firmware replies 0 when it rejects a command (see /Firmware/PROTOCOL.md)."""
     device = make_device(ack=0)
     device.port.response = bytearray(bytes([0]) + parameter_message())
-    error = expect_error(device.phase1_voltage.__setitem__, 1, 5)
+    error = expect_error(device.phase1_voltage.__setitem__, 1, 6)
     assert "rejected" in str(error)
 
 
@@ -566,11 +658,12 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     device = make_device()
     for name in ("phase1_duration", "phase2_duration", "inter_pulse_interval", "pulse_train_duration"):
         getattr(device, name)[1] = 0.0001
-        getattr(device, name)[1] = 100 * 1e-6  # Just under 0.0001, but 2 cycles
+        getattr(device, name)[2] = 100 * 1e-6  # Just under 0.0001, but 2 cycles
+        assert getattr(device, name)[1:3] == [0.0001, 0.0001], name
     for name in ("inter_phase_interval", "burst_duration", "inter_burst_interval", "pulse_train_delay"):
         getattr(device, name)[1] = 0
-        getattr(device, name)[1] = 0.00005
-    assert len(device.port.writes) == 16
+        getattr(device, name)[2] = 0.00005
+        assert getattr(device, name)[1:3] == [0, 0.00005], name
     error = expect_error(device.inter_pulse_interval.__setitem__, 1, 0)
     assert "at least 0.0001 s (2 cycles" in str(error), error
 
@@ -580,7 +673,7 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     device.info.min_pulse_width_us = 50
     device.phase1_duration[1] = 0.00005  # 2 cycles of 25 us
     device.send_custom_waveform(1, 0.00005, [1, 2, 3])
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 4, 4, 4)
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2)
     error = expect_error(device.phase1_duration.__setitem__, 1, 0.000025)
     assert "at least 5e-05 s (2 cycles of the device's 25 us timer)" in str(error), error
 
@@ -589,11 +682,11 @@ def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
     """All three classes round a value exactly halfway to the even one, so a script gives the
     same train in each: 125 us (2.5 cycles) is 2 cycles, and +4 V (DAC code 45874.5) is 45874."""
     device = make_device()
-    device.phase1_duration[1] = 0.000125
+    device.pulse_train_delay[1] = 0.000125
     device.phase1_voltage[1] = 4
     assert device.port.writes == [
-        bytes([OP_MENU_BYTE, 91, 4]) + struct.pack("<4I", 2, 2, 2, 2),
-        bytes([OP_MENU_BYTE, 91, 2]) + struct.pack("<4H", 45874, *[volts_to_bits(5)] * 3),
+        bytes([OP_MENU_BYTE, 74, 11, 1]) + struct.pack("<I", 2),
+        bytes([OP_MENU_BYTE, 74, 2, 1]) + struct.pack("<H", 45874),
     ]
 
 
@@ -610,20 +703,32 @@ def parameter_message(cycles=200, volt_bits=None, byte_value=1):
 
 
 def test_a_refused_value_is_read_back_from_the_device():
-    """The firmware resets a value it refuses, so the class reads that parameter back (op 93), and
-    leaves every other parameter as it was."""
+    """The firmware resets a value it refuses, so the class reads that parameter back (op 93) on the
+    channels it sent, and leaves every other parameter and channel as it was."""
     device = make_device(ack=0)
     device.port.response = bytearray(bytes([0]) + parameter_message(volt_bits=volts_to_bits(2.5), byte_value=1))
     error = expect_error(device.custom_train_id.__setitem__, 2, 3)
     assert "rejected" in str(error)
     assert device.port.writes[1] == bytes([OP_MENU_BYTE, 93])
-    assert device.custom_train_id[1:5] == [1, 1, 1, 1]   # From the device
+    assert device.custom_train_id[1:5] == [0, 1, 0, 0]   # Channel 2 from the device
     assert device.phase1_voltage[1:5] == [5] * 4         # Not read back: the device holds 2.5 V in this reply
 
     # On firmware v21, which has no op 93, the local copy is left as it was
     device = make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000, ack=0)
     expect_error(device.custom_train_loop.__setitem__, 2, True)
     assert device.custom_train_loop == [None, False, False, False, False]
+
+
+def test_status_reads_op_101():
+    """status() sends op 101 and reads its 29 bytes: the channels playing, then the counters since the last
+    op 101 (rising edges per trigger channel, starts per output channel, comm failures)."""
+    device = make_device()
+    device.port.response = bytearray([0b0101]) + struct.pack("<7I", 3, 0, 2, 0, 1, 0, 1)
+    status = device.status()
+    assert device.port.writes == [bytes([OP_MENU_BYTE, 101])] and device.port.reads == [29]
+    assert status == pulse_pal.DeviceStatus(playing=[1, 3], trigger_edges=[None, 3, 0],
+                                            channel_starts=[None, 2, 0, 1, 0], comm_failures=1), status
+    expect_error(make_device(firmware_version=21, hardware_version=2, n_trains=2, max_pulses=5000).status)
 
 
 def test_a_refused_settings_file_operation_says_what_failed():
@@ -755,7 +860,8 @@ def test_export_and_import_params():
 def test_the_defaults_are_the_firmware_defaults():
     """The class programs the defaults the device loads itself (LoadDefaultParameters() in the firmware), so
     the device plays the same program after a comm failure or a format as after connecting: monophasic 5 V
-    pulses of 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for 20000 cycles (1 s)."""
+    pulses of 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for 20000 cycles (1 s), on output channels linked
+    to no trigger channel, so that a TTL starts nothing until a script links a channel."""
     device = make_device()
     device.set_default_params()
     message = device.port.writes[-1][2:]
@@ -763,6 +869,8 @@ def test_the_defaults_are_the_firmware_defaults():
     assert times == (2,) * 4 + (2,) * 4 + (2,) * 4 + (20,) * 4 + (0,) * 8 + (20000,) * 4 + (0,) * 4, times
     voltages = struct.unpack("<12H", message[128:152])
     assert voltages == (volts_to_bits(5),) * 4 + (volts_to_bits(-5),) * 4 + (32768,) * 4, voltages
+    assert message[152:182] == bytes(30), message[152:182]  # Byte parameters, trigger links and modes: all 0
+    assert device.link_trigger_channel1 == [None] + [False] * 4
 
 
 def test_custom_bursts_need_a_burst_duration():

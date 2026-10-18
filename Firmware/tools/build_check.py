@@ -52,9 +52,9 @@ STUB_LIBRARIES = Path(__file__).resolve().parent / "stub_libraries"
 # The sketches this script builds. paths_in_git lists the folder's names in git history, for --compare
 SKETCHES = {
     "pulsepal": {
-        "dir": REPO_ROOT / "Firmware" / "PulsePal3",
-        # Revisions before the folder was renamed from PulsePal_3 to PulsePal3
-        "paths_in_git": ["Firmware/PulsePal3", "Firmware/PulsePal_3"],
+        "dir": REPO_ROOT / "Firmware" / "PulsePal",
+        # Revisions before the folder was renamed to PulsePal (2026-10) had it as PulsePal3, and before that PulsePal_3
+        "paths_in_git": ["Firmware/PulsePal", "Firmware/PulsePal3", "Firmware/PulsePal_3"],
         "hardware": [2, 3],
     },
     "wavepal": {
@@ -255,7 +255,7 @@ def checkout(git_reference, destination, paths_in_git):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sketch", choices=sorted(SKETCHES), default="pulsepal",
-                        help="Firmware to build: pulsepal (Firmware/PulsePal3, the default), wavepal "
+                        help="Firmware to build: pulsepal (Firmware/PulsePal, the default), wavepal "
                              "(Firmware/WavePal) or synthpal (Firmware/SynthPal). Wave Pal and Synth Pal run on "
                              "Pulse Pal 3 only")
     parser.add_argument("--hardware", choices=["2", "3", "both"], default="both",

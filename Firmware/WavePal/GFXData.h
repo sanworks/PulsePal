@@ -20,7 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 uint8_t GFX_logo_width = 128;
 uint8_t GFX_logo_height = 64;
-// Wave Pal logo. Its letters P, a, e and l are those of the Pulse Pal logo (GFX_PPlogo in /Firmware/PulsePal3),
+// Wave Pal logo. Its letters P, a, e and l are those of the Pulse Pal logo (GFX_PPlogo in /Firmware/PulsePal),
 // and W and v were drawn to match: 2 pixel strokes, the same cap and x heights and baseline.
 static const uint8_t GFX_WPlogo[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

@@ -261,6 +261,7 @@ bool PulsePal::initialize(std::string portString)
     firmwareVersion = 0;
     hardwareVersion = 0;
     hardwareRevision = 0;
+    serialNumber.clear();
 
     if (!serial->open(portString)) {
         reportError(serial->lastError() + ". Check the port name, and that no other program is using the port.");
@@ -342,6 +343,18 @@ bool PulsePal::initialize(std::string portString)
             return false;
         }
         hardwareRevision = revision;
+
+        // Op 102: the USB serial number, as its length (byte), then its characters. Pulse Pal 2 has none: length 0.
+        const uint8_t serialNumberRequest[2] = {OpMenuByte, OP_SEND_SERIAL_NUMBER};
+        uint8_t length = 0;
+        uint8_t characters[255];
+        if (!serial->write(serialNumberRequest, 2) || (serial->read(&length, 1, ReplyTimeoutMs) < 1) ||
+            ((length > 0) && (serial->read(characters, length, ReplyTimeoutMs) < length))) {
+            reportError("Pulse Pal on port " + portString + " did not return its USB serial number.");
+            serial->close();
+            return false;
+        }
+        serialNumber.assign((const char*)characters, length);
     } else {
         hardwareVersion = 2; // Firmware v21 runs only on Pulse Pal 2, whose circuit board encodes no revision
         cycleFrequency = 20000;
@@ -392,6 +405,11 @@ uint32_t PulsePal::getHardwareVersion()
 uint32_t PulsePal::getHardwareRevision()
 {
     return hardwareRevision;
+}
+
+std::string PulsePal::getSerialNumber()
+{
+    return serialNumber;
 }
 
 void PulsePal::disconnectClient()

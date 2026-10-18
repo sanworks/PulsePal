@@ -31,7 +31,13 @@ what is new.
    `from pulsepal import PulsePalDevice`. MATLAB R2020b or newer: add `/MATLAB` to the path.
 2. **Find the port.** `PulsePalDevice.serialportlist()` in Python, `serialportlist` in MATLAB.
    If several are listed, unplug the device and see which one disappears. Only one program at a
-   time can have the port open.
+   time can have the port open: Windows refuses a second one, and on Linux and macOS the Python
+   classes lock the port, so a second Python session gets an error rather than sharing it. A
+   port name can change when the device is plugged into another USB socket, so a rig script can
+   connect by the device's USB serial number instead, which `P.info.serial_number`
+   (`P.info.serialNumber`) shows: `PulsePalDevice(serial_number="20345420")` in Python,
+   `PulsePalDevice('SerialNumber', '20345420')` in MATLAB (Windows and Linux). Pulse Pal 3 only:
+   Pulse Pal 2 has none. The same works for Wave Pal and Synth Pal.
 3. **Check what the outputs drive.** The outputs swing from -10 V to +10 V. Keep every voltage
    within what the connected equipment accepts: a laser or LED driver that takes 0-5 V can be
    damaged by a voltage the Pulse Pal plays without complaint.
@@ -41,7 +47,10 @@ what is new.
    joystick, or by an earlier script) is replaced. To keep a program, save it to the device's
    microSD card and load it after connecting (see "Run without a computer" below). On
    Pulse Pal they are the device's own defaults, which it also loads at startup: 5 V pulses of
-   0.1 ms, 1 ms apart, for 1 s, on every output channel.
+   0.1 ms, 1 ms apart, for 1 s, on every output channel, **linked to no trigger channel**, so
+   a TTL starts nothing until your script links the channels it should start
+   (`link_trigger_channel1`, `link_trigger_channel2`). Firmware before October 2026 linked every
+   output channel to trigger channel 1, and the legacy MATLAB and Python interfaces still do.
 6. **Closing stops the outputs**, on all three firmwares: `P.close()`, the end of a `with`
    block, or the object being garbage collected in Python; `clear P` or `delete(P)` in MATLAB.
    Keep the object for as long as the outputs should play. The settings stay on the device, so
@@ -59,8 +68,11 @@ Python and camelCase in MATLAB.
 - **Address channels.** Set one channel by its number, or all of them with one value per
   channel. A single value for a whole setting (`P.phase1_voltage = 5`) raises an error, because
   it does not say which channels it is meant for.
-- **Assigning a setting programs the device at once.** To send several changes in one command,
-  use a `batch()` block in Python, or turn `autoSync` off in MATLAB and call `syncToDevice()`.
+- **Assigning a setting programs the device at once,** on the channels whose value it changes.
+  The other channels keep what the device holds, even if it was set with the joystick, and
+  assigning a value a channel already holds sends nothing. To send several changes in one
+  command, use a `batch()` block in Python, or turn `autoSync` off in MATLAB and call
+  `syncToDevice()`.
 - **Modes are names** (`"Gated"`, `"Sine"`; not case sensitive), and on/off settings are
   `True`/`False` (`true`/`false`).
 - **Values are checked before anything is sent.** A value the device cannot play raises an
@@ -153,11 +165,11 @@ biphasic:    |phase 1|ipi|phase 2|-- inter_pulse_interval --|phase 1|ipi|phase 2
 | `phase2_voltage`, `phase2_duration` | `phase2Voltage`, `phase2Duration` | The second phase (biphasic only) | -5 V, 0.1 ms |
 | `burst_duration` | `burstDuration` | Pulses play in bursts of this length. 0: no bursts | 0 |
 | `inter_burst_interval` | `interBurstInterval` | Rest between bursts | 0 |
-| `link_trigger_channel1`, `link_trigger_channel2` | `linkTriggerChannel1`, `linkTriggerChannel2` | Whether trigger channel 1 (or 2) starts this output channel | channel 1: `True`; channel 2: `False` |
+| `link_trigger_channel1`, `link_trigger_channel2` | `linkTriggerChannel1`, `linkTriggerChannel2` | Whether trigger channel 1 (or 2) starts this output channel | `False`: a TTL starts nothing until a channel is linked |
 | `custom_train_id` | `customTrainID` | 0: the train above. 1-4: a custom train (see below) | 0 |
 | `custom_train_target` | `customTrainTarget` | `"Pulses"`: custom times are pulse onsets. `"Bursts"`: they are burst onsets, which needs a `burst_duration` | `"Pulses"` |
-| `custom_train_loop` | `customTrainLoop` | `True`: repeat the custom train until the train duration ends | `False` |
-| `continuous_loop` | `continuousLoop` | `True`: play until stopped, ignoring the train duration | `False` |
+| `custom_train_loop` | `customTrainLoop` | `True`: repeat the custom train until the train duration ends. Each pass starts as the last pulse (or burst) of the one before ends | `False` |
+| `continuous_loop` | `continuousLoop` | `True`: play the parametric train until stopped, ignoring the train duration. Custom trains ignore it: they have `custom_train_loop` | `False` |
 | `trigger_mode` | `triggerMode` | Per trigger channel, see "Trigger modes" | `"Normal"` |
 
 A monophasic train plays one pulse every `phase1_duration + inter_pulse_interval` seconds. A
@@ -178,6 +190,7 @@ inter_pulse_interval` seconds.
 | `P.export_params()` | `P.exportParams()` | Every parameter, as a dict or struct, e.g. to save with your data |
 | `P.import_params(params)` | `P.importParams(params);` | Programs the parameters `export_params()` returned |
 | `P.sync_from_device()` | `P.syncFromDevice();` | Reads the device's parameters into the object, e.g. after using the joystick |
+| `s = P.status()` | `s = P.status();` | Which channels are playing, and counters since the last call: TTL rising edges per trigger channel, starts per output channel, comm failures. Call it before and after a trial to check that the trial's TTLs started its trains |
 | `P.set_default_params()` | `P.setDefaultParams();` | Programs the defaults |
 | `P.save_program_to_microsd("A.pps")` | `P.saveProgramToMicroSD('A.pps');` | Saves the parameters to the microSD card, as a program the joystick menu can load; also `load_program_from_microsd`, `delete_program_from_microsd` |
 | `P.set_screen_saver(True, 300)` | `P.setScreenSaver(true, 300);` | Dims the screen after 300 s without activity (Pulse Pal 3). Kept on the device |
@@ -207,7 +220,7 @@ P.phase1_voltage[1] = 5               # V
 P.phase1_duration[1] = 0.005          # 5 ms pulses
 P.inter_pulse_interval[1] = 0.045     # 45 ms from the end of one pulse to the next: 20 Hz
 P.pulse_train_duration[1] = 1         # 20 pulses
-P.link_trigger_channel1[1] = True     # the default
+P.link_trigger_channel1[1] = True     # trigger channel 1 starts output channel 1 (by default, nothing is linked)
 P.trigger_mode[1] = "Normal"          # the default: TTLs during the train are ignored
 ```
 
@@ -217,6 +230,7 @@ P.phase1Voltage(1) = 5;
 P.phase1Duration(1) = 0.005;
 P.interPulseInterval(1) = 0.045;
 P.pulseTrainDuration(1) = 1;
+P.linkTriggerChannel1(1) = true;      % Trigger channel 1 starts output channel 1 (by default, nothing is linked)
 ```
 
 **Play while a TTL is high.** Gated mode stops the train at the TTL's falling edge, and
@@ -245,6 +259,7 @@ P.trigger_mode[2] = "Normal"          # leaving param sync mode: assigned outsid
 ```
 
 ```matlab
+P.linkTriggerChannel1(1) = true;
 P.triggerMode{2} = 'Param Sync';
 for voltage = [2.5 5 7.5]
     P.autoSync = false;
@@ -311,9 +326,10 @@ with open("session_params.json", "w") as f:
 In MATLAB, `P.saveProgramToFile('session.json')` saves them as a program file (below), or
 `params = P.exportParams(); save('session.mat', 'params')`.
 
-To record which hardware played them, save `P.info.hardware_version` and
-`P.info.circuit_board_revision` (MATLAB: `info.hardwareVersion`, `info.circuitBoardRevision`) with
-your data too. Program files hold them in `device_info`.
+To record which hardware played them, save `P.info.hardware_version`,
+`P.info.circuit_board_revision` and `P.info.serial_number` (MATLAB: `info.hardwareVersion`,
+`info.circuitBoardRevision`, `info.serialNumber`) with your data too. Program files hold them in
+`device_info`.
 
 **Program files.** The Python and MATLAB GUIs save and open the same `.json` program files, and
 MATLAB's `saveProgramToFile()` and `loadProgramFromFile()` write and read them too. A program file holds
@@ -352,14 +368,17 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
   that train mid-way, except its duration: a train's end is set when it starts, so a new
   `pulse_train_duration` applies from the next train. Only param sync waits for the next trial.
 - **A channel that is playing ignores a new trigger,** soft or TTL in normal mode, and so does
-  one waiting out its pulse train delay. Stop it first, or let the train end.
+  one waiting out its pulse train delay. Stop it first, or let the train end. `status()` shows
+  it: the TTL counts as a trigger edge, but not as a channel start.
 - **Connecting replaces the device's program** with the defaults, and a program set with the
   joystick afterwards is not in the object until `sync_from_device()` reads it.
 - **In param sync mode, only `sync_to_device()` waits for the TTL** (including the end of a
   `batch()` block). An assignment with `auto_sync` on programs the device at once. The param
   sync channel itself starts nothing.
-- **Custom trains.** A custom train that does not loop plays all its pulses and ends, whatever
-  the train duration; one that loops stops at the train duration. Custom pulse times must be
+- **Custom trains.** A custom train that does not loop plays all its pulses (or bursts) and
+  ends, whatever the train duration; one that loops stops at the train duration, and continuous
+  loop mode does not change either. Each pass of a looping train starts as the last pulse of the
+  pass before ends: the first pulse's time is not repeated as a gap. Custom pulse times must be
   multiples of 100 µs: a time in between raises an error rather than being rounded. A train
   needs at least one pulse. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
   burst duration above 0: set `burst_duration` first, or both in a `batch()` block.
@@ -410,7 +429,7 @@ output channel plays one of them: its `current_waveform`, or none.
 
 | Python | MATLAB | Does |
 |---|---|---|
-| `W = WavePalDevice("COM3")` | `W = WavePalDevice('COM3');` | Connects, stops playback, programs the defaults (10 kHz, -10 V to 10 V, no channel playing a waveform) |
+| `W = WavePalDevice("COM3")` | `W = WavePalDevice('COM3');` | Connects, stops playback, programs the defaults (10 kHz, -10 V to 10 V, no channel playing a waveform, no channel linked to a trigger channel) |
 | `W.sampling_rate = 50000` | `W.samplingRate = 50000;` | Sets the sampling rate, Hz |
 | `W.output_range = "-5V:5V"` | `W.outputRange = '-5V:5V';` | Sets the output range |
 | `W.load_waveform(1, volts, [1, 3])` | `W.loadWaveform(1, volts, [1 3]);` | Loads waveform 1, in volts, and has channels 1 and 3 play it. Without channels, no channel changes |
@@ -434,7 +453,7 @@ W.sampling_rate = 25000
 W.output_range = "-5V:5V"                                  # finer steps than -10V:10V, for a waveform within +/-5 V
 t = np.arange(25000) / W.actual_sampling_rate               # 1 s
 W.load_waveform(1, 3 * np.sin(2 * np.pi * 8 * t), [1, 2])  # an 8 Hz sine, +/-3 V, on channels 1 and 2
-W.link_trigger_channel1[1:3] = [True, True]                # the default: trigger channel 1 starts them
+W.link_trigger_channel1[1:3] = [True, True]                # trigger channel 1 starts them (by default, nothing is linked)
 ```
 
 ### Recipe: a new waveform for each trial, with param sync
@@ -447,6 +466,7 @@ trigger channel 1 starts it on the same edge (the param sync edge is handled fir
 ```python
 W = WavePalDevice("COM3")
 W.load_waveform(1, first_trial_wave, 1)   # outside param sync mode: current at once
+W.link_trigger_channel1[1] = True         # trigger channel 1 starts channel 1 (by default, nothing is linked)
 W.trigger_mode[2] = "Param Sync"           # sent at once
 for wave in next_trial_waves:
     W.load_waveform(1, wave)               # stored: channel 1 plays the current waveform 1 meanwhile
@@ -456,6 +476,7 @@ W.trigger_mode[2] = "Normal"               # leaving param sync mode makes anyth
 
 ```matlab
 W.loadWaveform(1, firstTrialWave, 1);
+W.linkTriggerChannel1(1) = true;
 W.triggerMode{2} = 'Param Sync';
 for i = 1:nTrials
     W.loadWaveform(1, nextTrialWaves{i});
@@ -512,7 +533,7 @@ ramps.
 
 | Python | MATLAB | Does |
 |---|---|---|
-| `S = SynthPalDevice("COM3")` | `S = SynthPalDevice('COM3');` | Connects, stops playback, programs the defaults (100 Hz sine, 5 V peak to peak, 1 s) |
+| `S = SynthPalDevice("COM3")` | `S = SynthPalDevice('COM3');` | Connects, stops playback, programs the defaults (100 Hz sine, 5 V peak to peak, 1 s, no channel linked to a trigger channel) |
 | `S.frequency = 40` | `S.frequency = 40;` | Sets the frequency of all channels, Hz |
 | `S.configure(1, waveform="Sine", peak_to_peak=4, mean_voltage=1)` | `S.configure(1, 'waveform', 'Sine', 'peakToPeak', 4, 'meanVoltage', 1);` | Sets several of a channel's settings, checked together |
 | `S.play_duration[1] = 2` | `S.playDuration(1) = 2;` | Seconds at full amplitude after each trigger |
@@ -541,7 +562,8 @@ S.trigger(1)            # from trigger to rest: 2 + 30 + 2 = 34 s
 ```
 
 **Trial-by-trial frequency with param sync.** As in Pulse Pal: trigger channel 2 in param sync
-mode, the trial-start TTL wired to both trigger channels, and each trial's settings sent in a
+mode, the trial-start TTL wired to both trigger channels, the output channels linked to trigger
+channel 1, and each trial's settings sent in a
 `batch()` block during the trial before. At the edge, the frequency and the trigger modes
 change at once; a channel at rest takes its new settings at once, and one still playing
 finishes on its old settings (at the new frequency) and takes the new ones when it reaches its

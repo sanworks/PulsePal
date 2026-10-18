@@ -16,13 +16,13 @@ a change alters what users see.
 | Path | Contents |
 |---|---|
 | `/USING.md` | Using the devices from Python and MATLAB: limits, standard calls, recipes, pitfalls |
-| `/Firmware/PulsePal3/` | Current firmware, for **both** Pulse Pal 2 and Pulse Pal 3. Read its `AGENTS.md` before changing it |
+| `/Firmware/PulsePal/` | Current firmware, for **both** Pulse Pal 2 and Pulse Pal 3. Read its `AGENTS.md` before changing it |
 | `/Firmware/PROTOCOL.md` | The USB serial protocol: op codes, parameter codes, replies, settings file layout |
 | `/Firmware/WavePal/` | Wave Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform player. Its own `AGENTS.md` and `PROTOCOL.md` |
 | `/Firmware/SynthPal/` | Synth Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (sine, triangle, square, sawtooth, fixed voltage), with Pulse Pal's trigger modes, param sync included. Its own `AGENTS.md` and `PROTOCOL.md` |
 | `/Firmware/tools/` | `build_check.py`: compiles both hardware versions (or Wave Pal and Synth Pal, with `--sketch wavepal` and `--sketch synthpal`), and compares compiled functions between git revisions |
 | `/Firmware/Old/` | Archived firmware, no longer developed |
-| `/Python/PulsePal/` | The `pulsepal` Python package (`pulsepal/`: `pulse_pal.py`, `wave_pal.py`, `synth_pal.py`, the GUI in `gui.py`, shared code in `_common.py`), examples and offline tests |
+| `/Python/PulsePal/` | The `pulsepal` Python package (`pulsepal/`: `pulse_pal.py`, `wave_pal.py`, `synth_pal.py`, the GUI in `gui.py`, shared code in `_common.py`), examples and offline tests. `/Python/Legacy/Python3/` holds the previous Python class, for existing rig code (the Python 2 class was removed in October 2026) |
 | `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/tests/testPulsePalDeviceOffline.m` tests it against a simulated device. `/MATLAB/Legacy/` holds the older function-based interface |
 | `/MATLAB/@WavePalDevice/` | MATLAB class for Wave Pal. `/MATLAB/tests/testWavePalDevice.m` tests it on a device |
 | `/MATLAB/@SynthPalDevice/` | MATLAB class for Synth Pal. `/MATLAB/tests/testSynthPalDevice.m` tests it on a device |
@@ -45,8 +45,10 @@ does Synth Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients
 `/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
 bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is not its own.
 All three answer op 100 with the circuit board revision, which they read from five pins at
-startup (`readHardwareRevision()`). The Python and MATLAB classes read it into `info` when they
-connect, and the C++ class into `getHardwareRevision()`.
+startup (`readHardwareRevision()`), and op 102 with the USB serial number. The Python and MATLAB
+classes read both into `info` when they connect, and the C++ class into `getHardwareRevision()`
+and `getSerialNumber()`. The Python and MATLAB classes also connect by serial number
+(`pulsepal._common.port_for_serial_number()`, `pulsepal.portForSerialNumber`).
 
 Past bugs came from this coupling, so check both sides:
 
@@ -66,6 +68,9 @@ share these conventions. Keep them in new code.
 
 - **One way to use all six.** Settings are properties indexed by channel number (Python lists
   with index 0 unused, MATLAB 1x4 arrays), and assigning one programs the device at once.
+  Pulse Pal's classes send only the channels whose value the assignment changes (op 74 for
+  each, op 91 when all four change), so that values set on the other channels with the
+  joystick stay; Wave Pal's and Synth Pal's ops carry every channel.
   Assigning a whole setting takes one value per channel: a single value (`P.phase1Voltage = 5`)
   raises an error, because it does not say which channels it is meant for, so scripts always
   address channels (`P.phase1Voltage(1) = 5`, `P.phase1Voltage(:) = 5`). With
@@ -178,7 +183,7 @@ played against a model of its synthesis, and `/MATLAB/tests/testSynthPalDevice.m
 MATLAB class.
 
 When you finish a change, state plainly what was and was not tested, and give the user a
-short list of things to check on the device. `/Firmware/PulsePal3/AGENTS.md` lists the
+short list of things to check on the device. `/Firmware/PulsePal/AGENTS.md` lists the
 usual checks.
 
 ## Style

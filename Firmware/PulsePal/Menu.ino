@@ -61,7 +61,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // MENU_OUTPUT_CHANNEL   SelectedAction       1     Trigger now -> MENU_OUTPUT_TRIGGER (MENU_ACTION_TRIGGER)
 //                                            2-17  Edit a parameter. Which parameters, in which order, and their
 //                                                  labels, limits and storage, all come from menuActionParams and
-//                                                  outputParams in PulsePal3.ino. Parameters marked biphasicOnly
+//                                                  outputParams in PulsePal.ino. Parameters marked biphasicOnly
 //                                                  are skipped when the channel is monophasic.
 //                                            18    Exit -> MENU_CHANNEL_LIST (MENU_ACTION_EXIT)
 // MENU_OUTPUT_TRIGGER   SelectedStimMode     1     Single train
@@ -69,6 +69,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                                            3     Continuous on/off. On sets continuous loop mode, and starts
 //                                                  nothing: the next trigger plays the train until a stop (as op 82
 //                                                  does; firmware v21 started the train). Off stops the channel.
+//                                                  Custom trains ignore continuous loop mode (see endContinuousLoop()).
 //                                            4     Exit -> MENU_OUTPUT_CHANNEL
 // MENU_TRIGGER_CHANNEL  SelectedInputAction  1     Trigger linked output channels
 //                                            2     Edit trigger mode
@@ -86,7 +87,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //                       use its name, so the default parameters can always be loaded. File lists come from
 //                       findListedFile(), and are drawn by RefreshFileMenu().
 //
-// To add an output channel parameter to the menu, add its code to menuActionParams in PulsePal3.ino; nothing in
+// To add an output channel parameter to the menu, add its code to menuActionParams in PulsePal.ino; nothing in
 // this file needs to change. To add an option to any other level: update the click handler below, the wrap-around
 // limits in the left/right scroll handlers below, and the Refresh...Menu() function that draws the option.
 // ---------------------------------------------------------------------------------------------------------------
@@ -530,7 +531,7 @@ void UpdateSettingsMenu() {
 
 }
 
-// Returns the parameter that an output channel menu action edits. See the parameter table in PulsePal3.ino.
+// Returns the parameter that an output channel menu action edits. See the parameter table in PulsePal.ino.
 const OutputParam& menuActionParam(int action) {
   return outputParams[menuActionParams[action - MENU_ACTION_FIRST_PARAM] - 1];
 }
@@ -604,7 +605,7 @@ void RefreshActionMenu(int ThisAction) {
     write2Screen("< Trigger Now  >"," ");
   } else if (SelectedAction == MENU_ACTION_EXIT) {
     write2Screen("<     Exit     >"," ");
-  } else { // Label and value of the parameter this action edits, from the table in PulsePal3.ino
+  } else { // Label and value of the parameter this action edits, from the table in PulsePal.ino
     const OutputParam &param = menuActionParam(SelectedAction);
     write2Screen(param.label, FormatNumberForDisplay(getOutputParam(param, SelectedChannel-1), param.units));
   }

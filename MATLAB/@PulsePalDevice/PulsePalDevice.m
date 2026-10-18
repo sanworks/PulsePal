@@ -16,9 +16,10 @@
 % P.phase1Voltage(2) belongs to output channel 2, and triggerMode is a 1x2 cell array, one element per trigger
 % channel. Assigning a whole parameter takes one value per channel: P.phase1Voltage = 5 raises an error, because a
 % single value does not say which channels it is meant for. P.phase1Voltage = [5 5 5 5] or P.phase1Voltage(:) = 5
-% sets all four. With autoSync on (the default), assigning a parameter programs the device at once. With autoSync
-% off, assignments change only this object's copy of the parameters, and syncToDevice() sends all of them in one
-% command:
+% sets all four. With autoSync on (the default), assigning a parameter programs the device at once, on the channels
+% whose value it changes: the others keep what the device holds, which may have been set with its joystick
+% (syncFromDevice() reads it). With autoSync off, assignments change only this object's copy of the parameters, and
+% syncToDevice() sends all of them in one command:
 %   P.autoSync = false;
 %   P.phase1Voltage = [5 5 2.5 2.5];
 %   P.phase1Duration = [0.001 0.001 0.002 0.002];
@@ -48,15 +49,18 @@
 %   pulseTrainDuration   Duration of the pulse train. A train's end is set when it starts: a new duration applies from the
 %                        next train
 %   pulseTrainDelay      Time from the trigger to the start of the pulse train
-%   linkTriggerChannel1  true if a TTL on trigger channel 1 triggers the output channel
+%   linkTriggerChannel1  true if a TTL on trigger channel 1 triggers the output channel. By default no output channel
+%                        is linked to either trigger channel, so a TTL starts nothing until a script links it
 %   linkTriggerChannel2  true if a TTL on trigger channel 2 triggers the output channel
 %   customTrainID        0 plays the pulse train defined above. 1 or more plays that custom train instead, loaded
 %                        with sendCustomPulseTrain() or sendCustomWaveform(): 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2
 %   customTrainTarget    1x4 cell array. 'Pulses': a custom train's times are pulse onsets. 'Bursts': they are
 %                        burst onsets, and burstDuration must be above 0 (with autoSync on, set it first). A burst
 %                        whose time comes while the burst before plays is dropped
-%   customTrainLoop      true repeats a custom train until pulseTrainDuration has elapsed. false plays it once
-%   continuousLoop       false plays the pulse train once per trigger. true plays it until the channel is stopped,
+%   customTrainLoop      true repeats a custom train until pulseTrainDuration has elapsed. false plays it once. Each
+%                        pass starts as the last pulse (or burst) of the pass before ends
+%   continuousLoop       false plays the pulse train once per trigger. true plays it until the channel is stopped
+%                        (parametric trains only: custom trains ignore it, and follow customTrainLoop),
 %                        ignoring pulseTrainDuration (firmware v22 or newer)
 % A pulse starts only if it fits. In a burst, its first phase, or a biphasic pulse's whole pulse, must end before the
 % burst does. A biphasic pulse must also end by the end of the train; the end of the train cuts a monophasic pulse
@@ -94,6 +98,8 @@
 %   sendCustomWaveform(customTrainID, samplingPeriod, voltages)  Loads a sampled waveform, as a custom pulse train
 %   syncToDevice()                       Sends every parameter to the device in one command
 %   syncFromDevice()                     Reads every parameter from the device into the properties
+%   status()                             Which channels are playing, and counters since the last call: TTL edges per
+%                                        trigger channel, starts per output channel, comm failures
 %   setDefaultParams()                   Programs the default parameters
 %   exportParams()                       Returns every parameter as a struct, e.g. to save with your data;
 %                                        importParams(params) programs the device with one
@@ -106,8 +112,11 @@
 %   setScreenSaver(enabled, timeout), setCalibration(channel, voltageOffset), formatMicroSD()
 % info holds the connected device's hardware and firmware versions, and its limits. info.circuitBoardRevision is the
 % revision of its circuit board, 0-31: Pulse Pal 3 boards encode it on five pins, which the firmware reads at startup.
-% A board that encodes none, and Pulse Pal 2, report 0. To record exactly which hardware ran an experiment, copy
-% info.hardwareVersion and info.circuitBoardRevision to your data.
+% A board that encodes none, and Pulse Pal 2, report 0. info.serialNumber is the device's USB serial number, e.g.
+% '20345420': the Teensy's, unique to each Pulse Pal 3 ('' on Pulse Pal 2). To record exactly which hardware ran an
+% experiment, copy info.hardwareVersion, info.circuitBoardRevision and info.serialNumber to your data. To connect to a
+% device wherever it is plugged in, give its serial number instead of a port name (Windows and Linux):
+%   P = PulsePalDevice('SerialNumber', '20345420');
 %
 % The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
 % (/Python/PulsePal/pulsepal/pulse_pal.py), works the same way, with snake_case names.
@@ -211,6 +220,8 @@ classdef PulsePalDevice < handle
             % info, shows "MATLAB Connected" on its screen, and programs the default parameters (see
             % setDefaultParams). portName may also be an open port object with the methods of
             % pulsepal.DotNetSerialPort, as in /MATLAB/tests/testPulsePalDeviceOffline.m, which simulates a device.
+            % P = PulsePalDevice('SerialNumber', serialNumber) connects to the Pulse Pal 3 with that USB serial number
+            % (info.serialNumber), wherever it is plugged in: see pulsepal.portForSerialNumber.
 
             % Check for minimum MATLAB version
             MinVer = '9.9';
@@ -218,6 +229,10 @@ classdef PulsePalDevice < handle
             if verLessThan('matlab', MinVer)
                 error(['PulsePalDevice requires MATLAB ' MinVerName ' or newer.'...
                     char(10) 'If you must use previous MATLAB versions, please consider using the legacy interface.'])
+            end
+
+            if nargin == 2 && (ischar(varargin{1}) || isstring(varargin{1})) && strcmpi(varargin{1}, 'SerialNumber')
+                varargin = {pulsepal.portForSerialNumber(varargin{2})};
             end
 
             % Find USB serial ports
@@ -305,9 +320,20 @@ classdef PulsePalDevice < handle
                         obj.port = [];
                         error(['The Pulse Pal at port ' portString ' did not report its circuit board revision.'])
                     end
+                    obj.port.write([obj.OpMenuByte 102], 'uint8'); % Request the USB serial number
+                    serialNumberLength = obj.port.read(1, 'uint8'); % Then that many characters
+                    serialNumber = '';
+                    if ~isempty(serialNumberLength) && serialNumberLength > 0
+                        serialNumber = char(obj.port.read(serialNumberLength, 'uint8'));
+                    end
+                    if isempty(serialNumberLength) || numel(serialNumber) < serialNumberLength
+                        obj.port = [];
+                        error(['The Pulse Pal at port ' portString ' did not report its USB serial number.'])
+                    end
                 else
                     obj.hardwareVersion = 2;
                     circuitBoardRevision = 0; % v21 has no op 100. It runs on Pulse Pal 2, which encodes no revision
+                    serialNumber = ''; % Nor op 102, and Pulse Pal 2 has no USB serial number
                     obj.cyclePeriod = 50;
                     obj.cycleFrequency = 20000;
                     obj.nCustomPulseTrains = 2;
@@ -322,6 +348,7 @@ classdef PulsePalDevice < handle
                 obj.info.firmwareVersion = obj.firmwareVersion;
                 obj.info.hardwareVersion = obj.hardwareVersion;
                 obj.info.circuitBoardRevision = circuitBoardRevision; % 0-31. 0 if the board encodes none
+                obj.info.serialNumber = serialNumber; % USB serial number, '' on Pulse Pal 2
                 obj.info.maxCustomPulses = obj.maxCustomPulses;
                 obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
                 obj.info.cycleFrequency = obj.cycleFrequency;
@@ -399,6 +426,41 @@ classdef PulsePalDevice < handle
             % joystick or by loading a program from the microSD card. Requires firmware v22 or newer. continuousLoop is
             % left as it is: the device does not report it.
             obj.importCurrentParamsFromPulsePal;
+        end
+
+        function deviceStatus = status(obj)
+            % Returns which output channels are playing, and counters since the previous call to status(), by this or
+            % any earlier connection, or since the device started, as a struct with fields:
+            % playing: numbers of the output channels playing, e.g. [1 3], from a channel's start, its pulse train
+            %          delay included, until its train ends
+            % triggerEdges: 1x2, rising edges on trigger channels 1 and 2, whatever their trigger mode, and whether or
+            %               not they started an output channel
+            % channelStarts: 1x4, the times each output channel started: by a trigger channel, trigger() or the
+            %                joystick menu. A trigger that a channel ignored, because it was already playing, is not a
+            %                start
+            % commFailures: commands that reached the device only in part, after which it showed COMM. FAILURE!
+            % Each call clears the counters. Calling it before and after a trial checks that the trial's TTLs arrived
+            % and started the trains they should:
+            %   P.status();                                % Clears the counters
+            %   runTrial();                                % One TTL on trigger channel 1, linked to channels 1 and 2
+            %   s = P.status();
+            %   ok = s.triggerEdges(1) == 1 && isequal(s.channelStarts(1:2), [1 1]);
+            % Requires firmware v22 or newer.
+            if obj.firmwareVersion < 22
+                error('status() requires firmware v22 or newer.')
+            end
+            obj.port.write([obj.OpMenuByte 101], 'uint8');
+            reply = obj.port.read(29, 'uint8'); % Channels playing, then 7 uint32 counters
+            if numel(reply) < 29
+                error(['Pulse Pal sent ' num2str(numel(reply)) ' of the 29 bytes of its status within ' ...
+                       num2str(obj.port.Timeout) ' s. ' obj.NoReplyHint]);
+            end
+            counts = double(typecast(uint8(reply(2:29)), 'uint32'));
+            deviceStatus = struct;
+            deviceStatus.playing = find(bitget(reply(1), 1:4));
+            deviceStatus.triggerEdges = counts(1:2);
+            deviceStatus.channelStarts = counts(3:6);
+            deviceStatus.commFailures = counts(7);
         end
 
         function setFixedVoltage(obj, channels, voltage)
@@ -509,20 +571,19 @@ classdef PulsePalDevice < handle
 
         function setDefaultParams(obj)
             % Programs the default parameters: on all four output channels, monophasic 5 V pulses of 0.1 ms, 1 ms
-            % apart (about 909 a second), for 1 second, resting at 0 V and linked to trigger channel 1; for biphasic
-            % pulses, a phase 2 of -5 V and 0.1 ms after 0.1 ms at rest; both trigger channels in normal mode. They are
-            % the device's own defaults, which it also loads at startup, after a comm failure and after formatting its
-            % microSD card. They are sent at once, also while autoSync is off. The constructor calls it.
+            % apart (about 909 a second), for 1 second, resting at 0 V; for biphasic pulses, a phase 2 of -5 V and
+            % 0.1 ms after 0.1 ms at rest; no output channel linked to a trigger channel, so that a TTL starts nothing
+            % until a script links it; both trigger channels in normal mode. They are the device's own defaults, which
+            % it also loads at startup, after a comm failure and after formatting its microSD card. They are sent at
+            % once, also while autoSync is off. The constructor calls it.
             if obj.hardwareVersion > 2
-                % A device left in param sync mode would store the sync below instead of running it,
-                % leaving the device on its old program until a TTL arrived. Assigning triggerMode is
-                % not deferred that way, so take both trigger channels out of param sync mode first.
+                % A device left in param sync mode would store the sync below instead of running it, leaving the
+                % device on its old program until a TTL arrived. A trigger mode sent on its own (op 91) is not deferred
+                % that way, so both trigger channels leave param sync mode first. Sent whatever triggerMode holds: an
+                % assignment sends only what it changes, and the joystick menu may have changed the device's modes.
                 % See "Trigger modes" in help PulsePalDevice.
-                autoSyncState = obj.autoSync;
-                cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
-                obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
-                obj.triggerMode = {'Normal', 'Normal'};
-                clear cleanup
+                obj.port.write([obj.OpMenuByte 91 obj.TriggerModeCode 0 0], 'uint8'); % 0 = 'Normal'
+                obj.confirmWrite;
             end
             obj.importParams(obj.defaultParams);
         end
@@ -942,7 +1003,10 @@ classdef PulsePalDevice < handle
         end
 
         function value = setOutputParam(obj, paramCode, val)
-            % Checks a parameter's new value (see checkOutputParam()), and with autoSync on, programs it on the device.
+            % Checks a parameter's new value (see checkOutputParam()), and with autoSync on, programs it on the device:
+            % on the channels whose value changes, with op 91 if all of them do and op 74 for each otherwise. The other
+            % channels keep what the device holds. Sending all of them for a change to one put this object's copy of
+            % the others back on the device, undoing what the joystick menu, or a program loaded with it, had set.
             % Returns the value as the property holds it. Values read from the device are stored as they are.
             if obj.storing
                 value = val;
@@ -950,6 +1014,20 @@ classdef PulsePalDevice < handle
             end
             [value, deviceValues] = obj.checkOutputParam(paramCode, val);
             if ~obj.autoSync
+                return
+            end
+            if paramCode == obj.TriggerModeCode
+                oldValue = obj.triggerMode;
+            else
+                oldValue = obj.(obj.ParamNames{paramCode});
+            end
+            try
+                [~, oldDeviceValues] = obj.checkOutputParam(paramCode, oldValue); % Compared as the device receives them
+                changed = find(oldDeviceValues ~= deviceValues);
+            catch
+                changed = 1:numel(deviceValues); % No value yet, or one read from the device that an assignment refuses
+            end
+            if isempty(changed)
                 return
             end
             if paramCode == 8 || paramCode == 15
@@ -973,13 +1051,14 @@ classdef PulsePalDevice < handle
                 otherwise
                     bytes = @(v) uint8(v);
             end
-            if obj.firmwareVersion > 21
+            if obj.firmwareVersion > 21 && numel(changed) == numel(deviceValues)
                 obj.port.write([obj.OpMenuByte 91 paramCode bytes(deviceValues)], 'uint8'); % All channels at once
                 obj.confirmWrite;
-            elseif paramCode ~= 18 % Firmware v21 has no parameter 18, and checkOutputParam() lets only false through
-                for i = 1:numel(deviceValues)
+            elseif paramCode ~= 18 || obj.firmwareVersion > 21 % Firmware v21 has no parameter 18, and checkOutputParam()
+                                                                % lets only false through
+                for i = changed
                     obj.port.write([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))], 'uint8');
-                    obj.confirmWrite; % Firmware v21 confirms each op 74
+                    obj.confirmWrite;
                 end
             end
         end
@@ -1452,7 +1531,7 @@ classdef PulsePalDevice < handle
         function params = defaultParams
             % The default parameters, as the GUI keeps them: numbers, with each mode as its code (0 = 'Normal',
             % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them. They are the device's
-            % own defaults (LoadDefaultParameters() in /Firmware/PulsePal3/SDSettings.ino), which it loads at startup,
+            % own defaults (LoadDefaultParameters() in /Firmware/PulsePal/SDSettings.ino), which it loads at startup,
             % after a comm failure and after formatting its microSD card, as in the Python class. The legacy functions
             % in /MATLAB/Legacy keep their own.
             params = struct;
@@ -1468,7 +1547,7 @@ classdef PulsePalDevice < handle
             params.interBurstInterval = zeros(1,4);
             params.pulseTrainDuration = ones(1,4);
             params.pulseTrainDelay = zeros(1,4);
-            params.linkTriggerChannel1 = ones(1,4);
+            params.linkTriggerChannel1 = zeros(1,4); % Until 2026-10: ones(1,4), so a TTL played these pulses on every output
             params.linkTriggerChannel2 = zeros(1,4);
             params.customTrainID = zeros(1,4);
             params.customTrainTarget = zeros(1,4);

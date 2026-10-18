@@ -115,7 +115,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Interrupt rules. handler() and the trigger interrupts run at the same priority (PLAYBACK_IRQ_PRIORITY), so neither
 // can interrupt the other. That makes it safe for both to write to the DAC over SPI. loop() calls the functions below
 // only with interrupts disabled (noInterrupts() ... interrupts()), for the same reason: an SPI transfer interrupted by
-// another SPI transfer leaves the first waiting forever (see rule 1 in /Firmware/PulsePal3/AGENTS.md). Keep those
+// another SPI transfer leaves the first waiting forever (see rule 1 in /Firmware/PulsePal/AGENTS.md). Keep those
 // sections short: they delay every interrupt, including the sample clock.
 // ---------------------------------------------------------------------------------------------------------------
 

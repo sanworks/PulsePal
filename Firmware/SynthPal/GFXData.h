@@ -20,7 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 uint8_t GFX_logo_width = 128;
 uint8_t GFX_logo_height = 64;
-// Synth Pal logo. Its letters P, a and l are those of the Pulse Pal logo (GFX_PPlogo in /Firmware/PulsePal3), and
+// Synth Pal logo. Its letters P, a and l are those of the Pulse Pal logo (GFX_PPlogo in /Firmware/PulsePal), and
 // S, y, n, t and h were drawn to match: 2 pixel strokes, the same cap and x heights and baseline. The tail of the y
 // ends at row 45, above the loading bar that runSplashScreen() draws from row 50.
 static const uint8_t GFX_SPlogo[] = {

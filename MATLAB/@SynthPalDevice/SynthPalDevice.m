@@ -136,7 +136,8 @@ classdef SynthPalDevice < handle
         onRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades in after a trigger, up to
                                    % info.maxPlayDuration. 0 for no ramp. See "Ramps" above.
         offRampDuration = [0 0 0 0] % 1x4, in seconds: how long the channel fades out when it stops. 0 for no ramp.
-        linkTriggerChannel1 = true(1,4) % 1x4. true if trigger channel 1 triggers the output channel
+        linkTriggerChannel1 = false(1,4) % 1x4. true if trigger channel 1 triggers the output channel. By default no
+                                         % output channel is linked: a TTL starts nothing until a script links it
         linkTriggerChannel2 = false(1,4) % 1x4. true if trigger channel 2 triggers the output channel
         triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or
                                            % 'Param Sync'. See "Triggers" above. Not case sensitive.
@@ -174,6 +175,7 @@ classdef SynthPalDevice < handle
         OpSetClientName = 89 % Followed by 6 characters, shown as "NAME Connected"
         OpSetScreenSaver = 99
         OpHardwareRevision = 100 % The circuit board revision, as Pulse Pal firmware's op 100
+        OpSerialNumber = 102 % The USB serial number, as Pulse Pal firmware's op 102
         OpHardwareInfo = 'N'
         OpSetFrequency = 'F'
         OpSetWaveform = 'W'
@@ -209,10 +211,12 @@ classdef SynthPalDevice < handle
     end
 
     methods
-        function obj = SynthPalDevice(portString)
+        function obj = SynthPalDevice(portString, serialNumber)
             % S = SynthPalDevice(portName) opens the serial port, checks that the device runs Synth Pal firmware,
             % reads its properties into info, shows "MATLAB Connected" on the device's screen, stops any playback and
             % programs the default settings (see setDefaultParams).
+            % S = SynthPalDevice('SerialNumber', serialNumber) connects to the device with that USB serial number
+            % (info.serialNumber), wherever it is plugged in: see pulsepal.portForSerialNumber.
 
             % Check for minimum MATLAB version. verLessThan works in releases older than the minimum, where
             % isMATLABReleaseOlderThan (introduced in R2020b) does not exist.
@@ -222,6 +226,13 @@ classdef SynthPalDevice < handle
                 error(['SynthPalDevice requires MATLAB ' MinVerName ' or newer.'])
             end
 
+            if nargin == 2
+                if ~((ischar(portString) || isstring(portString)) && strcmpi(portString, 'SerialNumber'))
+                    error(['SynthPalDevice takes a port name, e.g. SynthPalDevice(''COM3''), or a serial number, e.g. '...
+                           'SynthPalDevice(''SerialNumber'', ''20345420'').'])
+                end
+                portString = pulsepal.portForSerialNumber(serialNumber);
+            end
             if nargin < 1
                 portList = serialportlist('available');
                 if ~isempty(portList)
@@ -273,7 +284,8 @@ classdef SynthPalDevice < handle
             % Programs the default settings on the device: a frequency of 100 Hz, and on every output channel a
             % sine wave of 5 V peak to peak around a mean voltage of 0 V, resting at 0 V, played for 1 second with no
             % ramps, and a fixed voltage of 5 V for when the waveform is 'Fixed Voltage'. Both trigger channels in
-            % 'Normal' mode, and all output channels linked to trigger channel 1 and not to trigger channel 2. They
+            % 'Normal' mode, and no output channel linked to a trigger channel (a TTL starts nothing until a script
+            % links it). They
             % match the settings the device starts with. They are sent at once, also while autoSync is off.
             autoSyncState = obj.autoSync;
             obj.autoSync = true;
@@ -288,7 +300,7 @@ classdef SynthPalDevice < handle
             obj.onRampDuration = zeros(1,4);
             obj.offRampDuration = zeros(1,4);
             obj.triggerMode = {'Normal', 'Normal'};
-            obj.linkTriggerChannel1 = true(1,4);
+            obj.linkTriggerChannel1 = false(1,4);
             obj.linkTriggerChannel2 = false(1,4);
             clear cleanup
         end
@@ -775,11 +787,20 @@ classdef SynthPalDevice < handle
             reply = obj.readBytes(22, 'reading the hardware info');
             obj.writeCommand(obj.OpHardwareRevision, []);
             circuitBoardRevision = obj.readBytes(1, 'reading the circuit board revision');
+            obj.writeCommand(obj.OpSerialNumber, []);
+            serialNumberLength = obj.readBytes(1, 'reading the USB serial number'); % Then that many characters
+            serialNumber = '';
+            if serialNumberLength > 0
+                serialNumber = char(obj.readBytes(serialNumberLength, 'reading the USB serial number'));
+            end
             values = double(typecast(uint8(reply(3:end)), 'uint32'));
             obj.info.hardwareVersion = reply(1);
             % 0-31: the board encodes its revision on five pins, which the firmware reads at startup. 0 if it encodes
             % none. Copy it to your data, with hardwareVersion, to record exactly which hardware ran an experiment.
             obj.info.circuitBoardRevision = circuitBoardRevision;
+            % The USB serial number, e.g. '20345420': the Teensy's, unique to each device. Copy it to your data too. The
+            % constructor takes it in place of a port name: see pulsepal.portForSerialNumber
+            obj.info.serialNumber = serialNumber;
             obj.info.nChannels = reply(2);
             obj.info.minFrequency = values(1)/100; % Hz
             obj.info.maxFrequency = values(2)/100; % Hz

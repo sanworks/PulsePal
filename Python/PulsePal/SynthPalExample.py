@@ -81,11 +81,12 @@ S.frequency = 880            # Takes effect during playback
 time.sleep(1)
 S.stop(1)                    # The output returns to its resting voltage
 
-# TTL triggers. By default, a rising edge on trigger channel 1 plays all four
-# channels. Here channel 4 is moved to trigger channel 2, which is put in
-# gated mode: with a play duration of 0, channel 4 holds its fixed voltage
-# for as long as the TTL is high.
-S.link_trigger_channel1[4] = False
+# TTL triggers. By default, no output channel is linked to a trigger channel,
+# so a TTL starts nothing. Here a rising edge on trigger channel 1 plays
+# channels 1-3, and channel 4 is linked to trigger channel 2, which is put in
+# gated mode: with a play duration of 0, channel 4 holds its fixed voltage for
+# as long as the TTL is high.
+S.link_trigger_channel1 = [True, True, True, False]
 S.link_trigger_channel2[4] = True
 S.trigger_mode[2] = "Gated"
 S.play_duration[4] = 0

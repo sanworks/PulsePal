@@ -46,7 +46,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   Display.ino      Screen output, screen saver and splash screen
 //   HardwareIO.ino   DAC writes, the output range and software reset
 // Supporting classes: ArCOM (USB serial data types), LiquidCrystal_U8G2 (screen). Both are copies of the ones in
-// /Firmware/PulsePal3.
+// /Firmware/PulsePal.
 
 #define FIRMWARE_VERSION 1
 
@@ -79,6 +79,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ArCOM.h"
 #include "LiquidCrystal_U8G2.h"
 #include "GFXData.h"
+#include <usb_names.h> // usb_string_serial_number, which op 102 sends
 
 #define STRINGIFY(x) #x // This and the following line enable conversion of macros to strings (e.g. for displaying firmware version)
 #define TOSTRING(x) STRINGIFY(x)
@@ -96,6 +97,7 @@ enum OpCode {
   OP_SET_CLIENT_NAME = 89,            // Set the 6-character client name shown on the top screen, as "NAME Connected"
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM)
   OP_SEND_HARDWARE_REVISION = 100,    // Returns the circuit board revision, read at startup
+  OP_SEND_SERIAL_NUMBER = 102,        // 'f'. Returns the USB serial number, as Pulse Pal firmware's op 102 does
   OP_HARDWARE_INFO = 'N',             // 78. Returns the hardware properties
   OP_SET_SAMPLING_RATE = 'S',         // 83. Sampling rate of all output channels, in Hz
   OP_SET_OUTPUT_RANGE = 'R',          // 82. Output range of all output channels. See enum OutputRange
@@ -165,7 +167,7 @@ enum MenuItem {
                               // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
 #define SCREEN_SAVER_DIM_BRIGHTNESS 8 // Brightness while the screen saver dims the screen
 
-// EEPROM layout. These are Pulse Pal firmware's addresses (/Firmware/PulsePal3/PulsePal3.ino), so the calibration and
+// EEPROM layout. These are Pulse Pal firmware's addresses (/Firmware/PulsePal/PulsePal.ino), so the calibration and
 // the screen saver settings carry over when a device changes firmware.
 #define EEPROM_ZERO_CODE_CALIBRATION_ADDRESS 0 // ZeroCodeCalibration (int16 x 4), set by Pulse Pal firmware's op 96
 #define EEPROM_SCREEN_SAVER_ADDRESS 16 // screenSaverEnabled (byte), then screenSaverTimeout (uint16)

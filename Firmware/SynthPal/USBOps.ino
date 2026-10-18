@@ -97,6 +97,15 @@ void processUSBCommands() {
       PPUSB.writeByte(hardwareRevision);
     } break;
 
+    case OP_SEND_SERIAL_NUMBER: { // Op 102, as in Pulse Pal firmware: the USB serial number the computer sees, which
+                                  // the Teensy core sets from the chip's unique ID. Its length (byte), then its characters
+      byte length = (usb_string_serial_number.bLength - 2) / 2; // UTF-16 characters after the descriptor's 2-byte header
+      PPUSB.writeByte(length);
+      for (byte i = 0; i < length; i++) {
+        PPUSB.writeByte((byte)usb_string_serial_number.wString[i]); // Digits: ASCII in UTF-16
+      }
+    } break;
+
     case OP_HARDWARE_INFO: { // Op 78 ('N')
       PPUSB.writeByte(HARDWARE_VERSION);
       PPUSB.writeByte(N_CHANNELS);

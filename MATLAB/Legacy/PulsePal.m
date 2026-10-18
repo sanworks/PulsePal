@@ -112,17 +112,30 @@ catch
         end
         pause(.1);
         SetPulsePalVersion;
-        if (PulsePalSystem.FirmwareVersion > 21) && (PulsePalSystem.HardwareVersion > 2)
-            % Trigger mode 3 (param sync, Pulse Pal 3 only) can be left on by the current MATLAB or Python class. A
-            % trigger channel in that mode starts no pulse trains, and this interface cannot use it, so it is returned
-            % to normal mode (0). Byte 177 of op 93's reply is trigger channel 1's mode, and byte 178 trigger channel 2's.
+        if PulsePalSystem.FirmwareVersion > 21
             PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 93], 'uint8');
             CurrentParams = PulsePalSerialInterface('read', 178, 'uint8');
-            for i = 1:2
-                if CurrentParams(176+i) == 3
-                    PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 74 128 i 0], 'uint8');
-                    PulsePalSerialInterface('read', 1, 'uint8');
+            if PulsePalSystem.HardwareVersion > 2
+                % Trigger mode 3 (param sync, Pulse Pal 3 only) can be left on by the current MATLAB or Python class. A
+                % trigger channel in that mode starts no pulse trains, and this interface cannot use it, so it is
+                % returned to normal mode (0). Byte 177 of op 93's reply is trigger channel 1's mode, and byte 178
+                % trigger channel 2's.
+                for i = 1:2
+                    if CurrentParams(176+i) == 3
+                        PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 74 128 i 0], 'uint8');
+                        PulsePalSerialInterface('read', 1, 'uint8');
+                    end
                 end
+            end
+            % Since October 2026 the device's own defaults link no output channel to a trigger channel, so that a TTL
+            % after an unplanned power cycle starts nothing. This interface programs nothing when it connects, and was
+            % written for earlier firmware, whose defaults linked every output channel to trigger channel 1, as
+            % DefaultPulsePalParameters still does. So a device with no link at all (bytes 169-176 of op 93's reply)
+            % gets those links back, and rig code written for earlier firmware plays on a TTL as it did. A device
+            % with some links, e.g. from its joystick menu, keeps them.
+            if ~any(CurrentParams(169:176))
+                PulsePalSerialInterface('write', [PulsePalSystem.OpMenuByte 91 12 1 1 1 1], 'uint8');
+                PulsePalSerialInterface('read', 1, 'uint8');
             end
         end
     catch

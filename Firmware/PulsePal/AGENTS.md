@@ -7,12 +7,12 @@ The USB protocol it implements is documented in `/Firmware/PROTOCOL.md`.
 ## Where things are
 
 The sketch is split into tabs. Arduino joins them into one file before compiling:
-`PulsePal3.ino` first, then the rest alphabetically. All tabs share the globals declared in
-`PulsePal3.ino`, and can call each other's functions.
+`PulsePal.ino` first, then the rest alphabetically. All tabs share the globals declared in
+`PulsePal.ino`, and can call each other's functions.
 
 | Tab | Contents |
 |---|---|
-| `PulsePal3.ino` | Build configuration, pin maps, named constants, global variables, the output parameter table, `setup()`, `loop()` |
+| `PulsePal.ino` | Build configuration, pin maps, named constants, global variables, the output parameter table, `setup()`, `loop()` |
 | `Playback.ino` | `handler()`, the timer callback that plays pulse trains. Start here for timing questions |
 | `USBOps.ino` | Commands from the PC (`processUSBCommands()`), input validation, param sync mode |
 | `Menu.ino` | Thumb joystick menu and the parameter value editor. The menu map is above `UpdateSettingsMenu()` |
@@ -39,7 +39,7 @@ python ../tools/build_check.py --compare HEAD --show handler
 `build_check.py` needs arduino-cli with the `teensy:avr` and `arduino:sam` cores; its
 docstring lists the details.
 
-- **Target.** Two macros at the top of `PulsePal3.ino` select the build: `HARDWARE_VERSION`
+- **Target.** Two macros at the top of `PulsePal.ino` select the build: `HARDWARE_VERSION`
   (2 or 3) and, on Pulse Pal 3, `PIN_MAP_VERSION`. Every Pulse Pal 3 in use takes pin map 1,
   the default. Pin map 0 is the pinout of a pre-release board variant that was scrapped: it is
   kept in case one of those boards is ever re-outfitted, and is otherwise unused and untested.
@@ -49,7 +49,7 @@ docstring lists the details.
 - **Libraries.** Pulse Pal 2 needs SdFat v2 (verified with v2.1.2 and v2.3.0) and
   LiquidCrystal. Pulse Pal 3 needs U8g2 (verified with v2.36.19), unmodified; its SdFat comes
   with the Teensy core. If U8g2 ever stops supporting the second SPI bus, an `#error` in
-  `PulsePal3.ino` stops the build, because the screen would otherwise stay dark.
+  `PulsePal.ino` stops the build, because the screen would otherwise stay dark.
 - **Never flash a Pulse Pal 2 binary from a default `build_check.py` run.** It links a
   do-nothing LiquidCrystal stub so the build can be checked without the library. Pass
   `--real-libraries` to build one that can be flashed.
@@ -140,7 +140,7 @@ the `--show` output before concluding that a function really changed.
     erased (tens of ms by the datasheet, so the timer loses cycles). Write only bytes
     that changed (`EEPROM.put()` does), and only while no channel is playing, as
     `saveScreenSaverSettings()` does through `screenSaverSavePending`. Op 96 still writes the
-    calibration at once. The layout is the `EEPROM_..._ADDRESS` constants in `PulsePal3.ino`;
+    calibration at once. The layout is the `EEPROM_..._ADDRESS` constants in `PulsePal.ino`;
     addresses are fixed, because the EEPROM keeps its contents through firmware updates.
 11. **Test a scheduled time with `timeReached()`, never `==`.** `handler()` makes a transition in
     the first cycle at or after its time. With `SystemTime ==`, a time scheduled in the past was
@@ -150,15 +150,18 @@ the `--show` output before concluding that a function really changed.
     during the delay. `timeReached()` also works across `SystemTime`'s wrap after 2^32 cycles
     (59.6 hours); compare two times by their difference, as `pulseFitsInBurst()` does, for the
     same reason.
-12. **Custom trains have memory blocks** (see "Custom train memory" in `PulsePal3.ino`). Pulse
+12. **Custom trains have memory blocks** (see "Custom train memory" in `PulsePal.ino`). Pulse
     Pal 3 keeps two per train, Pulse Pal 2 one. `handler()` reads a channel's train through
     `customTrainPlayBlock`, chosen when the channel starts, never through the train number, and
     `loadCustomPulseTrain()` writes only a block no channel plays: outside param sync mode it
     stops the channels playing the train first, and in param sync mode it loads the other block,
     which a param sync edge (`applyStoredCustomTrains()`) makes current. Writing a block a
     channel was playing once left the channel "playing" at rest. An empty block
-    (`CustomTrainNpulses` 0) ends a train at once: on Pulse Pal 3 its memory is not zeroed at
-    startup.
+    (`CustomTrainNpulses` 0) ends a train at once. Read a block only below its
+    `CustomTrainNpulses`: past it is what an earlier load left. A pulse or burst reads its
+    voltage once, when it starts, into `customPulseVoltage`; phase 2 and a burst's later pulses
+    play that. Reading the train again there read past the end of a shorter train, after a custom
+    train ID changed during a pulse, and played whatever was in memory, up to ±10 V.
 13. **On Pulse Pal 2, use the microSD card from `loop()` only between `pauseTimerForSD()` and
     `resumeTimerAfterSD()`** (`HardwareIO.ino`). The card shares the SPI bus with the DAC, and a
     DAC write from `handler()` in the middle of one of the card's transfers left `loop()` waiting
@@ -178,8 +181,8 @@ one at a time, and at equal priority it made the timer lose cycles. ArCOM now re
 `loop()` instead (rule 7). It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
-`dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`)
-and `startBurst()`. On
+`dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`),
+`startBurst()` and `startCustomBurstPass()`. On
 Pulse Pal 3 it also calls `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
@@ -200,7 +203,8 @@ for a few instructions (op 77 schedules its channels' `SoftTriggerScheduled` fla
 so they start in the same cycle). A tick that arrives meanwhile runs as soon as interrupts
 are back on; only interrupts off for longer than a cycle lose one. Shared variables
 include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
-`SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, all output channel parameters, the custom trains
+`SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, `triggerEdgeCount`, `channelStartCount` (op 101 reads
+and clears them with interrupts off), all output channel parameters, the custom trains
 (`CustomPulseTimes`, `CustomVoltages`, `CustomTrainNpulses`, `currentCustomTrainBlock`) and, on Pulse Pal 3,
 `paramBuffer`, `paramSyncPending`, `paramSyncChannelsWaiting` and `customTrainLoadsStored`.
 
@@ -208,10 +212,10 @@ include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
 
 **Adding an output channel parameter.** The wire format makes this wide-reaching.
 
-1. `PulsePal3.ino`: the global array, a `ParamID` entry with the next free code, and a row in
+1. `PulsePal.ino`: the global array, a `ParamID` entry with the next free code, and a row in
    the `outputParams` table. Rows are in parameter code order; a `static_assert` checks the
    count.
-2. `PulsePal3.ino`: to show it in the joystick menu, add its code to `menuActionParams`. The
+2. `PulsePal.ino`: to show it in the joystick menu, add its code to `menuActionParams`. The
    menu needs nothing else: labels, limits, units, storage and the monophasic skip all come
    from the table.
 3. `USBOps.ino`: op 74 and op 91. `paramValueBytes()` reads the table, so it needs no change.
@@ -251,8 +255,13 @@ playback, the menu or the USB ops, ask the user to check:
   that starts during the one before is dropped, and the pulses after it play at their own times
   (in a looping train whose last pulse is dropped, the next pass starts when that pulse would
   have ended); in a train targeting bursts, a burst that starts during the one before is
-  dropped, and one starting exactly as it ends follows with no rest; in param sync mode, a train loaded
-  during a train plays from the trigger after the next param sync edge.
+  dropped, and one starting exactly as it ends follows with no rest; a looping train targeting
+  bursts starts again as its last burst ends, until the train duration; continuous loop mode
+  changes nothing for a custom train; in param sync mode, a train loaded during a train plays
+  from the trigger after the next param sync edge.
+- Ops 101 and 102: with TTLs from a second Pulse Pal, `status()` counts each rising edge, and a
+  start only for a linked channel that was not already playing; `info.serial_number` is the
+  serial number the computer lists the port with.
 - After a change to serial code: USB latency and throughput, with
   `/Python/PulsePal/tests/benchmark_serial.py`, before and after the change. Also unplug the
   USB cable during a pulse: the device shows "COMM. FAILURE!" and the outputs return to their

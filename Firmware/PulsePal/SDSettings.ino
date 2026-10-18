@@ -39,13 +39,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // Loads the default parameters, sets the outputs to their resting voltage, and makes the default settings file the current
 // settings file. It does not write to the microSD card: setup() and op 97 write the default settings file with SaveCurrentProgram2SD().
 // The MATLAB and Python classes' default parameters are the same (set_default_params()), so after a comm failure or a
-// format the device plays what a client that just connected programs. Continuous loop mode goes off, and a channel
-// playing in continuous loop mode stops, as op 92 stops it.
+// format the device plays what a client that just connected programs. No output channel is linked to a trigger channel.
+// Continuous loop mode goes off, and a parametric train playing in continuous loop mode stops, as op 92 stops it.
 void LoadDefaultParameters() {
   for (int x = 0; x < 4; x++) {
       if (ContinuousLoopMode[x]) {
         ContinuousLoopMode[x] = 0;
-        killChannel(x);
+        endContinuousLoop(x);
       }
       Phase1Duration[x] = 2;
       InterPhaseInterval[x] = 2;
@@ -64,8 +64,11 @@ void LoadDefaultParameters() {
       CustomTrainLoop[x] = 0;
       updateUsesBursts(x);
     }
+    // No output channel is linked to a trigger channel, so that a TTL after power-up, a comm failure or a format starts
+    // nothing until a program links it. Until 2026-10, every output channel was linked to trigger channel 1, and any TTL
+    // played the default pulses on all four outputs into whatever they were wired to.
     for (int y = 0; y < 4; y++) {
-      TriggerAddress[0][y] = 1;
+      TriggerAddress[0][y] = 0;
     }
     for (int y = 0; y < 4; y++) {
       TriggerAddress[1][y] = 0;
@@ -134,7 +137,7 @@ byte readByteFromSD() {
 // ---------------------------------------------------------------------------------------------------------------
 // Saves all parameters to the current settings file (currentSettingsFileNameChar), using the settings file layout
 // above. Returns true if the file was written, or false if it could not be (no card, or the card refused the write).
-FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from flash (see FLASHMEM in PulsePal3.ino)
+FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from flash (see FLASHMEM in PulsePal.ino)
   pauseTimerForSD(); // Pulse Pal 2: the card shares the SPI bus with the DAC
   settingsFile.close();
   if (!settingsFile.open(currentSettingsFileNameChar, O_CREAT | O_TRUNC | O_RDWR)) {

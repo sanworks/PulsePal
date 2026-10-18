@@ -204,6 +204,15 @@ class DeviceInfo:
     `circuit_board_revision` to your data.
     """
 
+    serial_number: str = None
+    """USB serial number of the device, e.g. `"20345420"`: the Teensy's,
+    unique to each Pulse Pal 3, and the same whichever firmware it runs.
+
+    Connect by it, wherever the device is plugged in, with
+    `SynthPalDevice(serial_number="20345420")`. To record exactly which unit ran an
+    experiment, copy it to your data.
+    """
+
     n_channels: int = None
     """Number of output channels."""
 
@@ -340,12 +349,15 @@ class SynthPalDevice:
     _STATUS_FORMAT = "<BI4BII"
     _ALL_CHANNELS = 0x0F
 
-    def __init__(self, port_name, *, timeout=10):
+    def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Synth Pal.
 
         Args:
             port_name: USB serial port of the device, such as `COM3` on
                 Windows or `/dev/ttyACM0` on Linux.
+            serial_number: Instead of `port_name`, the device's USB serial
+                number (`DeviceInfo.serial_number`), which finds its port
+                wherever it is plugged in.
             timeout: Serial read timeout, in seconds.
 
         Firmware newer than this module knows is used with a warning: new
@@ -354,7 +366,9 @@ class SynthPalDevice:
         Raises:
             PulsePalError: If the device does not reply to the handshake, or
                 runs other firmware.
-            serial.SerialException: If the serial port cannot be opened.
+            serial.SerialException: If the serial port cannot be opened,
+                e.g. because another program has it open (on Linux and
+                macOS, another session of these classes, which lock it).
         """
         self._closed = True
         self._auto_sync = True
@@ -386,17 +400,22 @@ class SynthPalDevice:
         self._trigger_mode = ChannelSettings(
             "trigger_mode", ["Normal"] * 2, self, "_apply_trigger_mode")
         self._link_trigger_channel1 = ChannelSettings(
-            "link_trigger_channel1", [True] * 4, self,
+            "link_trigger_channel1", [False] * 4, self,
             "_apply_trigger_channel1_links")
         self._link_trigger_channel2 = ChannelSettings(
             "link_trigger_channel2", [False] * 4, self,
             "_apply_trigger_channel2_links")
 
+        port_name = _common.port_name_from(port_name, serial_number, "SynthPalDevice")
         self.port = serial.Serial(
             port_name,
             self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
+            # Windows opens a port for one program only. Linux and macOS let a second program open it too, and two
+            # sessions' bytes would then interleave; exclusive locks it (flock), so a second session that also locks
+            # it, such as another of these classes, gets an error instead
+            exclusive=True,
         )
         self._closed = False
         try:
@@ -445,9 +464,9 @@ class SynthPalDevice:
         channel a sine wave of 5 V peak to peak around a mean voltage of
         0 V, resting at 0 V, played for 1 second with no ramps, and a
         fixed voltage of 5 V for when the waveform is "Fixed Voltage".
-        Both trigger channels are in normal mode, and all output channels
-        are linked to trigger channel 1 and not to trigger channel 2. They
-        match the settings the device starts with. They are sent at once,
+        Both trigger channels are in normal mode, and no output channel is
+        linked to a trigger channel, so a TTL starts nothing until a script
+        links it. They match the settings the device starts with. They are sent at once,
         also while `SynthPalDevice.auto_sync` is off.
         """
         auto_sync = self._auto_sync
@@ -466,7 +485,7 @@ class SynthPalDevice:
             self.on_ramp_duration = [0] * 4
             self.off_ramp_duration = [0] * 4
             self.trigger_mode = ["Normal"] * 2
-            self._set_trigger_links([True] * 4, [False] * 4)
+            self._set_trigger_links([False] * 4, [False] * 4)
         finally:
             self._auto_sync = auto_sync
 
@@ -1001,7 +1020,9 @@ class SynthPalDevice:
     def link_trigger_channel1(self):
         """Whether each output channel is triggered by trigger channel 1.
 
-        Indexed by channel number (see "Channel settings" above).
+        Indexed by channel number (see "Channel settings" above). By
+        default no output channel is linked to either trigger channel, so
+        a TTL starts nothing until a script links it.
         """
         return self._link_trigger_channel1
 
@@ -1238,6 +1259,8 @@ class SynthPalDevice:
         self.info.max_play_duration = max_duration_us / 1e6
         self._write_command(self._OP_HARDWARE_REVISION)
         self.info.circuit_board_revision = self._read_raw(1)[0]
+        self._write_command(_common.OP_SERIAL_NUMBER)
+        self.info.serial_number = _common.read_serial_number(self._read_raw)
 
     def _normalize(self, name, values):
         """Check new values for all four channels of a setting, and return them as its list holds them."""

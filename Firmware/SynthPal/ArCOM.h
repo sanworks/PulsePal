@@ -19,7 +19,7 @@ See the GNU General Public License for more details.
 // ArCOM reads and writes the data types of the Pulse Pal USB protocol (see /Firmware/PROTOCOL.md).
 // It was derived from the general purpose ArCOM library, and has since been tailored to this firmware.
 //
-// This is a copy of /Firmware/PulsePal3/ArCOM.h for Synth Pal, which uses it for its own protocol (PROTOCOL.md in
+// This is a copy of /Firmware/PulsePal/ArCOM.h for Synth Pal, which uses it for its own protocol (PROTOCOL.md in
 // this folder). The only change is the comment on ARCOM_WRITE_BUFFER_SIZE. Keep the copies in step: Wave Pal has one
 // too.
 //

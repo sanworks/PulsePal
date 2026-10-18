@@ -40,7 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // This sketch is split into tabs (the .ino files in this folder). Before compiling, Arduino joins them into a single
 // file (this file first, then the others in alphabetical order), so all tabs share the constants and global
 // variables defined in this file.
-//   PulsePal3.ino    Build configuration, pin maps, named constants, global variables, setup() and loop()
+//   PulsePal.ino     Build configuration, pin maps, named constants, global variables, setup() and loop()
 //   Playback.ino     Pulse train playback in the hardware timer callback, handler(). Start here for timing questions.
 //   USBOps.ino       Commands from the PC, processUSBCommands()
 //   Menu.ino         Thumb joystick menu, UpdateSettingsMenu(), with a map of all menu options, and the editor
@@ -99,6 +99,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
   #include "LiquidCrystal_U8G2.h"
   #include "GFXData.h"
   #include <EEPROM.h>
+  #include <usb_names.h> // usb_string_serial_number, which op 102 sends
   #define SD_CONFIG SdioConfig(FIFO_SDIO)
 #endif
 
@@ -153,7 +154,9 @@ enum OpCode {
   OP_FORMAT_SD_CARD = 97,             // Format the microSD card (HW3 only). Followed by FORMAT_SD_CARD_KEY
   OP_ABORT_CHANNELS = 98,             // Stop playback on specific output channels (1 bit per channel)
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
-  OP_SEND_HARDWARE_REVISION = 100     // Return the circuit board revision read at startup (HW3; 0 on HW2)
+  OP_SEND_HARDWARE_REVISION = 100,    // Return the circuit board revision read at startup (HW3; 0 on HW2)
+  OP_SEND_STATUS = 101,               // Return the output channels playing, and counters since startup or the last op 101
+  OP_SEND_SERIAL_NUMBER = 102         // Return the USB serial number (HW3; HW2 has none, and sends an empty one)
 };
 
 // The 4 bytes that must follow op 97 for it to format the card, so that two stray bytes, e.g. 213 and 97 in the data of
@@ -530,8 +533,9 @@ unsigned long PulseTrainTimestamps[4] = {0};
 unsigned long NextPulseTransitionTime[4] = {0}; // Stores next pulse-high or pulse-low timestamp for each channel
 unsigned long NextBurstTransitionTime[4] = {0}; // Stores next burst-on or burst-off timestamp for each channel
 unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is supposed to end
-// Pulse times and voltages of the custom train memory blocks (see "Custom train memory" above). On Pulse Pal 3, DMAMEM
-// is not zeroed at startup: a block holds pulses only up to CustomTrainNpulses.
+// Pulse times and voltages of the custom train memory blocks (see "Custom train memory" above). A block holds pulses
+// only up to CustomTrainNpulses: beyond it, what an earlier load left. On Pulse Pal 3, DMAMEM is not zeroed at startup,
+// and a code of 0 is -10V, so setup() fills both arrays with time 0 and 0V.
 #if (HARDWARE_VERSION == 2)
   uint32_t CustomPulseTimes[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
   uint16_t CustomVoltages[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
@@ -540,6 +544,11 @@ unsigned long PulseTrainEndTime[4] = {0}; // Stores time the stimulus train is s
   DMAMEM uint16_t CustomVoltages[N_CUSTOM_TRAIN_BLOCKS][MAX_CUSTOM_PULSES+1] = {0};
 #endif
 int CustomPulseTimeIndex[4] = {0}; // Keeps track of the pulse number of the custom train currently being played on each channel
+// The DAC code of the custom pulse or custom burst playing on each channel, set when it starts. Phase 2 of a biphasic
+// custom pulse plays it mirrored, and each pulse of a custom burst plays it. Reading the train again at phase 2, or at
+// a burst's later pulses, could read past the train's end after its custom train ID changed to a shorter train: memory
+// an earlier load left there, or never loaded, played at up to +/-10V.
+uint16_t customPulseVoltage[4] = {32768, 32768, 32768, 32768};
 byte PulseStatus[4] = {0}; // Phase of the current pulse on each channel. See enum PulseStatusValue
 boolean BurstStatus[4] = {0}; // This is "true" during bursts and false during inter-burst intervals.
 boolean StimulusStatus[4] = {0}; // This is "true" for a channel when the stimulus train is actively being delivered
@@ -654,6 +663,13 @@ unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_P
 void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
+// Counters that op 101 reports and clears (see sendStatus() in USBOps.ino), so each reply counts from the one before,
+// or from startup. handler() counts the rising edges on each trigger channel, in any trigger mode, and the times each
+// output channel starts (by a trigger channel, a soft trigger or the joystick menu; a trigger the channel ignores
+// because it is playing is not a start). loop() counts comm failures.
+volatile uint32_t triggerEdgeCount[2] = {0};
+volatile uint32_t channelStartCount[4] = {0};
+uint32_t commFailureCount = 0;
 volatile byte usbLoadTarget = 0;
 volatile boolean usbLoadFlag = 0;
 volatile boolean abortRequested = 0; // Set by handler() when the joystick button stops playback. loop() then shows the message.
@@ -747,6 +763,12 @@ void setup() {
   for (int i = 0; i < N_CUSTOM_PULSE_TRAINS; i++) {
     currentCustomTrainBlock[i] = i; // Each custom train starts on its first block, empty (see "Custom train memory" above)
   }
+  for (int b = 0; b < N_CUSTOM_TRAIN_BLOCKS; b++) { // Never read past CustomTrainNpulses: a safeguard. 32768 = 0V
+    for (int i = 0; i < MAX_CUSTOM_PULSES + 1; i++) {
+      CustomPulseTimes[b][i] = 0;
+      CustomVoltages[b][i] = 32768;
+    }
+  }
   // Start with default parameters, and write them to the default settings file. The joystick menu cannot overwrite
   // or erase this file, so the default parameters can always be loaded from it.
   LoadDefaultParameters();
@@ -788,6 +810,7 @@ void loop() {
     }
     dacWrite();
     DACFlag = 0;
+    commFailureCount++; // Reported by op 101
     HandleReadTimeout(); // Notifies user of error, then prompts to click and restores DEFAULT channel settings.
     screenSaverActivity = true; // The click that ended the message. The screen saver's idle time starts again here.
     PPUSB.clearTimedOut(); // First: until it is cleared, reads return at once without taking any bytes

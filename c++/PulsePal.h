@@ -73,6 +73,10 @@ public:
     // is 0 there too. Read by initialize(), and 0 before it has connected. To record exactly which hardware ran an
     // experiment, save it with getHardwareVersion().
     uint32_t getHardwareRevision();
+    // The device's USB serial number, e.g. "20345420": the Teensy's, unique to each Pulse Pal 3, and the same whichever
+    // firmware it runs. Empty on Pulse Pal 2, which has none, on firmware v21, and before initialize() has connected.
+    // To record exactly which unit ran an experiment, save it too.
+    std::string getSerialNumber();
     void disconnectClient(); // Stops all channels and restores the device's own screen. The port stays open
 
     // Resets the local copy of the parameters (currentOutputParams and currentInputParams) to the defaults: a 1ms,
@@ -131,7 +135,8 @@ public:
     bool updateDisplay(const std::string& line1, const std::string& line2); // The screen shows 16 characters per line
     bool setFixedVoltage(uint8_t channel, float voltage); // Held until the channel is triggered or set again
     bool abortPulseTrains(); // Stops all output channels, which return to their resting voltages
-    bool setContinuousLoop(uint8_t channel, uint8_t state); // state = 1: the pulse train plays until aborted. 0: it plays for its duration
+    bool setContinuousLoop(uint8_t channel, uint8_t state); // state = 1: the parametric pulse train plays until aborted. 0: it plays for its duration.
+                                                            // Custom trains ignore it: they follow customTrainLoop
     bool setTriggerMode(uint8_t channel, uint8_t mode); // Trigger channel 1-2. mode = 0: normal, 1: toggle, 2: pulse gated, 3: param sync (Pulse Pal 3 only)
     bool setClientIDString(const std::string& idString); // Exactly 6 characters, shown on the device's screen as "xxxxxx Connected"
 
@@ -162,7 +167,7 @@ public:
 
 private:
     // Op codes and parameter codes are fixed by the serial protocol (/Firmware/PROTOCOL.md) and match the OpCode and
-    // ParamID enums in /Firmware/PulsePal3/PulsePal3.ino. They are listed explicitly, never derived from a position.
+    // ParamID enums in /Firmware/PulsePal/PulsePal.ino. They are listed explicitly, never derived from a position.
     enum OpCode {
         OP_HANDSHAKE = 72,
         OP_PROGRAM_ALL_PARAMS_LEGACY = 73,  // Firmware v21. Replaced by op 92
@@ -180,7 +185,8 @@ private:
         OP_PROGRAM_ALL_PARAMS = 92,         // Firmware v22
         OP_SEND_HARDWARE_INFO = 94,         // Firmware v22
         OP_LOAD_CUSTOM_TRAIN = 95,          // Firmware v22
-        OP_SEND_HARDWARE_REVISION = 100     // Firmware v22
+        OP_SEND_HARDWARE_REVISION = 100,    // Firmware v22
+        OP_SEND_SERIAL_NUMBER = 102         // Firmware v22
     };
     enum ParamCode {
         PARAM_IS_BIPHASIC = 1,
@@ -223,6 +229,7 @@ private:
     uint32_t firmwareVersion;
     uint32_t hardwareVersion;
     uint32_t hardwareRevision; // Of the circuit board. See getHardwareRevision()
+    std::string serialNumber; // USB serial number. See getSerialNumber()
     double cycleFrequency;   // Hardware timer cycles per second
     uint8_t nCustomTrains;
     uint32_t maxCustomPulses;

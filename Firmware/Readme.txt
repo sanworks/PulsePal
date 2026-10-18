@@ -9,13 +9,13 @@ Loading firmware without Arduino:
 2. With MATLAB: the firmware loading tool in /MATLAB/FirmwareLoader/
 
 Compiling it yourself: the board support and libraries must be installed first. They are listed
-at the top of PulsePal3/PulsePal3.ino, and in the "Building" section of PulsePal3/AGENTS.md.
+at the top of PulsePal/PulsePal.ino, and in the "Building" section of PulsePal/AGENTS.md.
 
 Folders and files:
 
-/PulsePal3
+/PulsePal
 The current firmware. It compiles for both Pulse Pal 2 (Arduino Due) and Pulse Pal 3 (Teensy 4.1),
-selected with the HARDWARE_VERSION macro at the top of PulsePal3.ino. AGENTS.md in that folder has
+selected with the HARDWARE_VERSION macro at the top of PulsePal.ino. AGENTS.md in that folder has
 the code map, build instructions and the rules to follow when changing the firmware.
 
 /WavePal

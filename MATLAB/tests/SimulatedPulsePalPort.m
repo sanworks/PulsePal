@@ -35,6 +35,8 @@ classdef SimulatedPulsePalPort < handle
                               % left queued on the device
         circuitBoardRevision % The circuit board revision op 100 reports: 5 on Pulse Pal 3, 0 on Pulse Pal 2
         silent = false % true: reply to nothing, as a device showing COMM. FAILURE! until its joystick is clicked
+        status = uint8([5 typecast(uint32([3 0 2 0 1 0 1]), 'uint8')]) % The reply to op 101: channels 1 and 3 playing,
+                                                                       % then the counters
     end
 
     properties (SetAccess = private)
@@ -130,6 +132,14 @@ classdef SimulatedPulsePalPort < handle
                                typecast(uint32(maxPulses), 'uint8')]);
                 case 100 % Circuit board revision
                     obj.reply(obj.circuitBoardRevision);
+                case 101 % Status
+                    obj.reply(obj.status);
+                case 102 % USB serial number: its length, then its characters. Pulse Pal 2 has none
+                    if obj.hardwareVersion > 2
+                        obj.reply([8 uint8('20345420')]);
+                    else
+                        obj.reply(0);
+                    end
                 case 92 % All parameters
                     obj.lastParams = bytes(3:end);
                     obj.reply(obj.ack);

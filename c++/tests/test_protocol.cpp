@@ -92,6 +92,13 @@ public:
                                 (uint8_t)maxPulses, (uint8_t)(maxPulses >> 8), 0, 0};
             replies.insert(replies.end(), info, info + 10);
             replies.push_back((hardwareVersion > 2) ? 5 : 0);
+            if (hardwareVersion > 2) { // Op 102: the USB serial number's length, then its characters
+                const char serialNumber[] = "20345420";
+                replies.push_back(8);
+                replies.insert(replies.end(), serialNumber, serialNumber + 8);
+            } else {
+                replies.push_back(0); // Pulse Pal 2 has none
+            }
         }
     }
 
@@ -259,18 +266,21 @@ static void test_connect_to_pulse_pal_3()
     CHECK(pulsePal.getFirmwareVersion() == 22);
     CHECK(pulsePal.getHardwareVersion() == 3);
     CHECK(pulsePal.getHardwareRevision() == 5);
-    // Handshake, hardware info, circuit board revision, both trigger channels out of param sync mode (op 91), then
-    // defaults. No client name (op 89): the program sets that with setClientIDString()
-    CHECK(port.writes.size() == 5);
-    if (port.writes.size() == 5) {
+    CHECK(pulsePal.getSerialNumber() == "20345420");
+    // Handshake, hardware info, circuit board revision, USB serial number, both trigger channels out of param sync mode
+    // (op 91), then defaults. No client name (op 89): the program sets that with setClientIDString()
+    CHECK(port.writes.size() == 6);
+    if (port.writes.size() == 6) {
         CHECK_BYTES(port.writes[0], bytes({213, 72}));
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
         CHECK_BYTES(port.writes[2], bytes({213, 100}));
-        CHECK_BYTES(port.writes[3], bytes({213, 91, 128, 0, 0}));
-        CHECK_BYTES(port.writes[4], Bytes(PythonOp92ForCppDefaults, PythonOp92ForCppDefaults + 184));
+        CHECK_BYTES(port.writes[3], bytes({213, 102}));
+        CHECK_BYTES(port.writes[4], bytes({213, 91, 128, 0, 0}));
+        CHECK_BYTES(port.writes[5], Bytes(PythonOp92ForCppDefaults, PythonOp92ForCppDefaults + 184));
     }
-    // Handshake reply, hardware info, circuit board revision, and the confirm bytes of ops 91 and 92
-    CHECK((port.reads == std::vector<size_t>{5, 10, 1, 1, 1}));
+    // Handshake reply, hardware info, circuit board revision, serial number length and characters, and the confirm
+    // bytes of ops 91 and 92
+    CHECK((port.reads == std::vector<size_t>{5, 10, 1, 1, 8, 1, 1}));
     CHECK(port.replies.empty());
 }
 
@@ -282,12 +292,14 @@ static void test_connect_to_pulse_pal_2_on_firmware_v22()
     CHECK(pulsePal.initialize("COM1"));
     CHECK(pulsePal.getHardwareVersion() == 2);
     CHECK(pulsePal.getHardwareRevision() == 0);
+    CHECK(pulsePal.getSerialNumber().empty());
     // Pulse Pal 2 has no param sync mode, so there is no op 91
-    CHECK(port.writes.size() == 4);
-    if (port.writes.size() == 4) {
+    CHECK(port.writes.size() == 5);
+    if (port.writes.size() == 5) {
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
         CHECK_BYTES(port.writes[2], bytes({213, 100}));
-        CHECK(port.writes[3][1] == 92);
+        CHECK_BYTES(port.writes[3], bytes({213, 102}));
+        CHECK(port.writes[4][1] == 92);
     }
 }
 

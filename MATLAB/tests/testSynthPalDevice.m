@@ -78,6 +78,7 @@ function testConnectionAndDefaults(S)
 assert(S.info.firmwareVersion == 1, 'firmware version');
 assert(S.info.hardwareVersion == 3, 'hardware version');
 assert(S.info.circuitBoardRevision >= 0 && S.info.circuitBoardRevision <= 31, 'hardware revision');
+assert(~isempty(S.info.serialNumber) && all(isstrprop(S.info.serialNumber, 'digit')), 'USB serial number');
 assert(S.info.minFrequency == 1 && S.info.maxFrequency == 20000, 'frequency limits');
 assert(S.info.maxPlayDuration == 3600, 'maximum play duration');
 assert(S.frequency == 100 && S.samplesPerCycle == 1000 && S.samplingRate == 100000, 'default frequency');
@@ -87,7 +88,7 @@ assert(isequal(S.peakToPeak, [5 5 5 5]) && isequal(S.fixedVoltage, [5 5 5 5]) &&
 assert(isequal(S.playDuration, [1 1 1 1]), 'default play duration');
 assert(isequal(S.onRampDuration, [0 0 0 0]) && isequal(S.offRampDuration, [0 0 0 0]), 'default ramps');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
-assert(isequal(S.linkTriggerChannel1, true(1,4)) && isequal(S.linkTriggerChannel2, false(1,4)), 'default links');
+assert(isequal(S.linkTriggerChannel1, false(1,4)) && isequal(S.linkTriggerChannel2, false(1,4)), 'default links');
 status = S.status();
 assert(isempty(status.playing), 'a channel is playing after connecting');
 assert(isequal(status.outputRanges, {'-5V:5V', '-5V:5V', '-5V:5V', '-5V:5V'}), 'default output ranges');

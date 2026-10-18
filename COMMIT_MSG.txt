@@ -1,3 +1,9 @@
--Firmware: Fixed custom trains that froze an output or hung a channel: transitions fire once their time is reached, biphasic custom pulses play whole, empty trains refused; custom trains double-buffered on Pulse Pal 3 for param sync; a failed settings file load keeps the parameters; op 97 needs a key
--Python, MATLAB: Defaults match the firmware's; stricter custom train checks; clearer errors; Wave/Synth import_params; faster custom train upload (Python)
--C++, MATLAB Legacy, Tests, Docs: Updated to match
+-Firmware: Folder and main tab renamed from PulsePal3 to PulsePal, as WavePal and SynthPal; custom pulses and bursts play the voltage they started with (phase 2 and a burst's later pulses could read past a train's end after a custom train ID change, and play whatever was in memory), and custom train memory starts at 0 V; looping custom trains targeting bursts loop; continuous loop mode applies to parametric trains only (custom trains follow their own loop setting); the default parameters link no output channel to a trigger channel; new op 101 (status: channels playing, and counts of trigger edges, channel starts and comm failures since the last op 101) and op 102 (USB serial number)
+-WavePal, SynthPal: The default settings link no output channel to a trigger channel; op 102 (USB serial number); hex rebuilt
+-Python, MATLAB: An assignment sends only the channels whose value it changes (op 74, or op 91 when all four change), so values set on other channels with the joystick stay; defaults unlinked; status(); info.serial_number / info.serialNumber, and connecting by USB serial number (serial_number=, 'SerialNumber', pulsepal.portForSerialNumber)
+-Python: Ports opened with exclusive=True, so on Linux and macOS a second session cannot share one; serialportlist() skips ports another session holds
+-MATLAB Legacy: Links every output channel to trigger channel 1 when it connects to a device with no links, as earlier firmware's defaults did
+-MATLAB FirmwareLoader: Rebuilt PulsePal_HW2_v022.bin and PulsePal_HW3_v022.hex
+-C++: getSerialNumber()
+-Python Legacy: Removed the Python 2 class
+-Tests, Docs: Updated to match (PROTOCOL.md: ops 101 and 102, custom train loops, defaults and their legacy behavior)

@@ -26,7 +26,7 @@ that reason.
 | `Display.ino` | Screen output, the screen saver and the splash screen |
 | `HardwareIO.ino` | DAC writes, output ranges, the sample clock's timer and its time base, software reset |
 
-`ArCOM.h` and `LiquidCrystal_U8G2` are copies of the files in `/Firmware/PulsePal3`, as Wave
+`ArCOM.h` and `LiquidCrystal_U8G2` are copies of the files in `/Firmware/PulsePal`, as Wave
 Pal's are. Keep them in step: a fix to one usually belongs in all three. `GFXData.h` holds the
 Sanworks logo and the Synth Pal logo.
 

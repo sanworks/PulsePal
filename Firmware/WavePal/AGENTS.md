@@ -24,7 +24,7 @@ The sketch is split into tabs. Arduino joins them into one file before compiling
 | `Display.ino` | Screen output, the screen saver and the splash screen |
 | `HardwareIO.ino` | DAC writes, the output range, software reset |
 
-`ArCOM.h` and `LiquidCrystal_U8G2` are copies of the files in `/Firmware/PulsePal3`. Keep them
+`ArCOM.h` and `LiquidCrystal_U8G2` are copies of the files in `/Firmware/PulsePal`. Keep them
 in step: a fix to one usually belongs in both. `GFXData.h` holds the Sanworks logo and the Wave
 Pal logo.
 

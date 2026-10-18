@@ -12,8 +12,8 @@ Four clients use this protocol, and all of them must agree with the firmware:
 | MATLAB legacy functions | `/MATLAB/Legacy/` |
 | C++ class | `/c++/PulsePal.cpp` |
 
-On the device, `processUSBCommands()` in `/Firmware/PulsePal3/USBOps.ino` executes commands,
-and the `OpCode` and `ParamID` enums in `/Firmware/PulsePal3/PulsePal3.ino` define the codes.
+On the device, `processUSBCommands()` in `/Firmware/PulsePal/USBOps.ino` executes commands,
+and the `OpCode` and `ParamID` enums in `/Firmware/PulsePal/PulsePal.ino` define the codes.
 
 **The numbers on this page are fixed.** Installed copies of the clients use these op codes,
 parameter codes and message layouts, so they must never be renumbered or reordered. New
@@ -53,6 +53,7 @@ The Python, MATLAB and C++ classes connect in this order:
    connecting.
 2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
 3. Op 100, on firmware v22 and newer: the [circuit board revision](#circuit-board-revision).
+   Then op 102: the [USB serial number](#usb-serial-number).
 4. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
    class leaves this to the program, which calls `setClientIDString()`.
 5. On Pulse Pal 3: set both trigger modes to normal, with op 74 (Python) or op 91 (MATLAB and
@@ -113,6 +114,8 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 98 | Stop channels | 1 byte, one bit per output channel | none |
 | 99 | Set the [screen saver](#screen-saver) | State (0 off, 1 on; Pulse Pal 2 accepts 0 only), timeout in seconds (uint16, 1-65535). Pulse Pal 3 keeps both in its EEPROM; a new device starts with the screen saver on and 1800 s. Used by the MATLAB and Python classes | 1 / 0 |
 | 100 | Send the [circuit board revision](#circuit-board-revision) | none | Revision (byte, 0-31), read at startup. Pulse Pal 2 sends 0 |
+| 101 | Send the [status](#status) | none | Output channels playing (byte, one bit per channel, bit 0 = channel 1), then counters since startup or the previous op 101 (uint32 each): rising edges on trigger channels 1 and 2, starts of output channels 1-4, comm failures. 29 bytes |
+| 102 | Send the [USB serial number](#usb-serial-number) | none | Length (byte, 0 on Pulse Pal 2), then that many ASCII characters |
 
 ### Soft triggers and stops
 
@@ -168,8 +171,55 @@ would end is a sample of a custom waveform: it holds until the next pulse's time
 
 A train targeting bursts (custom train target 1) drops bursts the same way: a burst whose time
 comes while the burst before plays is dropped, a burst starting exactly as the one before ends
-follows it with no rest between them, and if the last burst is dropped, the train ends when that
-burst would have ended.
+follows it with no rest between them, and if the last burst is dropped, the train (or this pass of
+a looping train) ends when that burst would have ended.
+
+A pulse or burst plays the voltage it started with to its end: phase 2 of a biphasic custom pulse
+is that voltage mirrored about 0 V, and every pulse of a custom burst plays it, even if the custom
+train ID changes meanwhile. (Reading the train again at phase 2 read past the end of a shorter train
+after such a change, and played whatever was in memory, up to ±10 V.)
+
+**Loops.** A custom train that does not loop (custom train loop 0) plays once and ends after its last
+pulse or burst, whatever the pulse train duration. One that loops plays until the pulse train
+duration ends. Each later pass starts as the last pulse (or burst) of the pass before ends, so the
+period of a looping train is its last time plus that pulse's (or burst's) duration, and the first
+time is not repeated as a gap: a looping train of one pulse at time 0 holds its voltage for the
+whole train. Firmware before October 2026 played a looping train targeting bursts only once.
+Continuous loop mode (parameter 18) applies to parametric trains only: a custom train ignores it,
+and switching it off does not stop a channel playing a custom train.
+
+### USB serial number
+
+Op 102 sends the serial number in the device's USB descriptor, which the computer sees too: its
+length (byte), then its characters. On Pulse Pal 3 it is the Teensy's, which the Teensy core sets
+from the chip's unique ID: a number of up to 10 digits, unique to each device, and the same with
+every firmware. Wave Pal and Synth Pal firmware have the same op 102. The Arduino Due core gives
+Pulse Pal 2 no unique serial number, so it sends length 0.
+
+The Python, MATLAB and C++ classes read it when they connect, into `info.serial_number` /
+`info.serialNumber` / `getSerialNumber()`, to record which unit ran an experiment. A port name can
+change when a device is plugged into another USB socket, and a Pulse Pal 3 is listed as a Teensy,
+like a Bpod state machine. So the Python and MATLAB classes also connect by serial number,
+`PulsePalDevice(serial_number="20345420")` / `PulsePalDevice('SerialNumber', '20345420')`: they find
+the port whose USB serial number it is in the operating system's list of ports (pyserial in Python;
+in MATLAB, `pulsepal.portForSerialNumber`, on Windows and Linux).
+
+### Status
+
+Op 101 reports what the device is doing and what has happened to it, so that a script can check,
+e.g. after each trial, that the TTLs it expects arrived and started the trains it expects. The reply
+is 29 bytes:
+
+| Bytes | Value |
+|---|---|
+| 1 | Output channels playing: one bit per channel, bit 0 = channel 1. A channel counts as playing from its start until its train ends, its pulse train delay included |
+| 2-9 | Rising edges on trigger channels 1 and 2 (uint32 each), whatever their trigger mode, param sync included, and whether or not they started a channel |
+| 10-25 | Starts of output channels 1-4 (uint32 each): by a trigger channel, a soft trigger (op 77) or the joystick menu. A trigger that a channel ignores, because it is already playing, is not a start, and a channel started by two triggers in one cycle starts once |
+| 26-29 | Comm failures (uint32): commands that reached the device only in part (see [Timeouts and error handling](#timeouts-and-error-handling)) |
+
+The counters count from the previous op 101, or from startup, and op 101 clears them: each reply
+counts what happened since the one before. An event is counted in one reply or the next, never lost
+or counted twice. The clients' `status()` methods send op 101.
 
 ### Screen saver
 
@@ -224,7 +274,7 @@ record exactly which hardware ran an experiment.
 | 15 | Custom train target | 1 byte | 0 pulses, 1 bursts |
 | 16 | Custom train loop | 1 byte | 0 or 1 |
 | 17 | Resting voltage | uint16 | DAC code |
-| 18 | Continuous loop mode | 1 byte | 0 or 1 |
+| 18 | Continuous loop mode (parametric trains only: see [Custom trains](#custom-trains)) | 1 byte | 0 or 1 |
 | 128 | Trigger mode (trigger channels 1-2) | 1 byte | 0 normal, 1 toggle, 2 pulse gated, 3 param sync (Pulse Pal 3 only) |
 
 The Python and MATLAB classes name these parameters (`phase1_voltage`, `phase1Voltage`, ...), and
@@ -265,9 +315,9 @@ value back as it is (op 93).
 In a burst, a pulse starts only if it ends before the burst does: its phase 1, or for a biphasic
 pulse the whole pulse, so that the end of the burst never cuts off phase 2. Likewise, a biphasic
 pulse starts only if it ends by the end of the pulse train (it may end in the train's last cycle).
-A monophasic pulse still starts, and the end of the train cuts it short. Trains in continuous loop
-mode, and custom trains that do not loop, do not end at the train duration, so this does not apply
-to them.
+A monophasic pulse still starts, and the end of the train cuts it short. Parametric trains in
+continuous loop mode, and custom trains that do not loop, do not end at the train duration, so this
+does not apply to them.
 
 ### Param sync mode (Pulse Pal 3, trigger mode 3)
 
@@ -297,7 +347,8 @@ nothing.
   train memory block, it started with, and takes the new ones in the cycle the train ends. So a train that crosses into the next
   trial keeps one shape throughout, and the next trigger plays a whole train with the new
   parameters.
-- A channel in continuous loop mode has no train end, so it waits until something stops it.
+- A parametric train in continuous loop mode has no end, so its channel waits until something
+  stops it.
   A stored set that switches continuous loop mode off does not stop the channel, unlike op 92
   outside param sync mode: nothing on this path interrupts a train in progress.
 - The set is copied aside at the edge, so a new op 92 can arrive while channels are still
@@ -335,12 +386,23 @@ formats its card, and writes them to `default.pps` at startup: on every output c
 monophasic pulses of 5 V (DAC code 49152) lasting 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for
 a pulse train of 20000 cycles (1 s), with no delay and no bursts, resting at 0 V; for biphasic
 pulses, an inter-phase interval of 2 cycles and a phase 2 of -5 V lasting 2 cycles; no custom
-train, and continuous loop mode off. Every output channel is linked to trigger channel 1 and not
-to trigger channel 2, and both trigger channels are in normal mode. The Python and MATLAB
-classes program the same defaults when they connect (`set_default_params()` /
+train, and continuous loop mode off. No output channel is linked to a trigger channel, so a TTL
+starts nothing until a program links it, and both trigger channels are in normal mode. The Python
+and MATLAB classes program the same defaults when they connect (`set_default_params()` /
 `setDefaultParams()`), so the device plays the same program whichever way it got its defaults.
-The legacy MATLAB functions use the same values; the C++ class and the legacy Python classes keep
-their own (1 ms pulses, 10 ms apart).
+
+**Legacy behavior.** Firmware v21, and v22 builds before October 2026, linked every output channel
+to trigger channel 1 by default, so a TTL on trigger channel 1 after an unplanned power cycle played
+the default pulses on all four outputs, into whatever they were wired to. The legacy interfaces keep
+that default, so that rig code written for them works unchanged:
+
+- The legacy Python class programs its own defaults when it connects (1 ms pulses, 10 ms apart),
+  with every output channel linked to trigger channel 1. So does the C++ class.
+- The legacy MATLAB functions (`/MATLAB/Legacy`) program nothing when they connect, and assume the
+  device holds `DefaultPulsePalParameters`, which links trigger channel 1. On firmware v22 they read
+  the device's parameters (op 93), and if no output channel is linked to either trigger channel,
+  they link every output channel to trigger channel 1 (op 91, parameter 12). A device with some
+  links, e.g. set with its joystick menu, keeps them.
 
 ## Settings file
 
@@ -407,7 +469,7 @@ missed. Pulse Pal 3's card has a bus of its own, and none of this applies to it.
 
 | Firmware | Notes |
 |---|---|
-| v22 | Current. Adds ops 91-100, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
+| v22 | Current. Adds ops 91-102, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
 | v21 | No ops 91-100. Clients program parameters with ops 73 and 74, and custom trains with ops 75 and 76 |
 
 Clients read the firmware version from the handshake (op 72), and the device properties from

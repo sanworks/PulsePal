@@ -21,7 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 // USB communication with the PC (MATLAB, Python and other clients). Op codes are listed in enum OpCode
-// in PulsePal3.ino.
+// in PulsePal.ino.
 //
 // Functions in this file:
 //   paramValueBytes()
@@ -44,6 +44,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   loadWaitingParamSyncChannels()
 //   applyStoredCustomTrains()
 //   sendCurrentParams()
+//   sendStatus()
+//   sendSerialNumber()
 //   loadCustomPulseTrain()
 //
 // Note on reads: every PPUSB read gives up if no byte arrives for 100ms, and sets PPUSB.timedOut(). The rest of the
@@ -55,7 +57,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // read and discarded, so that it is not interpreted as the next command. MATLAB and Python raise an error on 0.
 
 // Returns the number of bytes that follow a parameter code in ops 74 and 91, per channel, or 0 if the code is unknown.
-// Output channel parameters are described by the parameter table in PulsePal3.ino, where the row for a code is at
+// Output channel parameters are described by the parameter table in PulsePal.ino, where the row for a code is at
 // index code - 1, and the type of a row is its size in bytes.
 byte paramValueBytes(byte paramCode) {
   if (paramCode == PARAM_TRIGGER_MODE) {
@@ -177,7 +179,7 @@ void updateParamSyncPending() {
   #endif
 }
 
-// Train t's memory block that is not its current block (see "Custom train memory" in PulsePal3.ino). On Pulse Pal 2,
+// Train t's memory block that is not its current block (see "Custom train memory" in PulsePal.ino). On Pulse Pal 2,
 // which has one block per train, the current block.
 byte otherCustomTrainBlock(byte train) {
   #if (HARDWARE_VERSION > 2)
@@ -306,7 +308,7 @@ void processUSBCommands() {
           }
           if (inByte2 == PARAM_CONTINUOUS_LOOP) {
             if (!ContinuousLoopMode[inByte3] && ContinuousLoopModeOriginal[inByte3]) {
-              killChannel(inByte3);
+              endContinuousLoop(inByte3);
             }
           }
           PPUSB.writeByte(paramValid); // Send confirm byte (0 if the value was out of range)
@@ -399,7 +401,7 @@ void processUSBCommands() {
           inByte2 = inByte2 - 1; // Convert for zero-indexing
           ContinuousLoopMode[inByte2] = inByte3;
           if (!inByte3) {
-            killChannel(inByte2);
+            endContinuousLoop(inByte2);
           }
           PPUSB.writeByte(1);
         } break;
@@ -532,7 +534,7 @@ void processUSBCommands() {
             }
             if (inByte2 == PARAM_CONTINUOUS_LOOP) {
               if (!ContinuousLoopMode[iChan] && ContinuousLoopModeOriginal[iChan]) {
-                killChannel(iChan);
+                endContinuousLoop(iChan);
               }
             }
           }
@@ -625,6 +627,12 @@ void processUSBCommands() {
                                           // (Pulse Pal 3; Pulse Pal 2 sends 0). Used by the MATLAB, Python and C++ classes.
           PPUSB.writeByte(hardwareRevision);
         } break;
+        case OP_SEND_STATUS: { // Op 101. Send the output channels playing, and the counters since startup or the last op 101
+          sendStatus();
+        } break;
+        case OP_SEND_SERIAL_NUMBER: { // Op 102. Send the USB serial number. Used by the MATLAB, Python and C++ classes
+          sendSerialNumber();
+        } break;
      }
     }
   }
@@ -706,7 +714,8 @@ void loadChannelParamsFromBuffer(const uint8_t *buffer, byte channel) {
 }
 
 // Loads a parameter set in op 92's layout and brings the device into line with it: UsesBursts is recomputed, the new
-// resting voltage is sent to the DAC for idle channels, and a channel whose continuous loop mode was switched off stops. The set must
+// resting voltage is sent to the DAC for idle channels, and a channel whose continuous loop mode was switched off stops
+// (see endContinuousLoop()). The set must
 // already have been through validateParamBuffer(). Op 92 calls this from loop() with paramBuffer when no trigger
 // channel is in param sync mode, and RestoreParametersFromSD() with a settings file. A param sync edge takes the other
 // route, through startParamSync().
@@ -719,7 +728,7 @@ void applyParamBuffer(const uint8_t *buffer) {
     updateUsesBursts(x);
     setRestingVoltageIfIdle(x);
     if (!ContinuousLoopMode[x] && ContinuousLoopModeOriginal[x]) {
-      killChannel(x);
+      endContinuousLoop(x);
     }
   }
 }
@@ -742,7 +751,7 @@ void applyParamBuffer(const uint8_t *buffer) {
   // Loads the synced parameter set into every waiting output channel that is not playing a pulse train, and leaves
   // the others waiting. handler() calls this at a param sync edge and on every cycle afterwards while any channel is
   // still waiting, so a channel takes its new parameters in the cycle its pulse train ends, before the next cycle
-  // can trigger it again. A channel in continuous loop mode has no train end, and waits until something stops it.
+  // can trigger it again. A parametric train in continuous loop mode has no end, and waits until something stops it.
   //
   // Everything here is safe inside the timer callback: it neither waits nor touches the screen, the microSD card or
   // the USB port, and setDAC() is called by handler() in any case. A waiting channel is idle, so its resting voltage
@@ -796,10 +805,56 @@ void sendCurrentParams() {
      PPUSB.writeByteArray(TriggerMode, 2);
 }
 
+// Op 101. Sends one bit per output channel playing (bit 0 = channel 1), in its train or its delay, then the counters
+// handler() and loop() keep (see triggerEdgeCount in PulsePal.ino): rising edges on trigger channels 1-2, starts of
+// output channels 1-4 and comm failures, uint32 each. They count from the last op 101, or from startup, and are
+// cleared here. The playing bits and the counters are read, and the counters cleared, with interrupts off, so an event
+// handler() counts is in this reply or the next one, never lost or in both.
+void sendStatus() {
+  byte playing = 0;
+  uint32_t edges[2];
+  uint32_t starts[4];
+  noInterrupts();
+  for (int x = 0; x < 4; x++) {
+    if (StimulusStatus[x] || PreStimulusStatus[x]) {
+      bitSet(playing, x);
+    }
+    starts[x] = channelStartCount[x];
+    channelStartCount[x] = 0;
+  }
+  for (int x = 0; x < 2; x++) {
+    edges[x] = triggerEdgeCount[x];
+    triggerEdgeCount[x] = 0;
+  }
+  interrupts();
+  PPUSB.writeByte(playing);
+  PPUSB.writeUint32Array(edges, 2);
+  PPUSB.writeUint32Array(starts, 4);
+  PPUSB.writeUint32(commFailureCount);
+  commFailureCount = 0;
+}
+
+// Op 102. Sends the USB serial number: its length (byte), then its characters (ASCII). It is the serial number the
+// computer sees in the device's USB descriptor, so a client can find the device's port by it, and record which unit
+// ran an experiment. On Pulse Pal 3 it is the Teensy's, set by the Teensy core from the chip's unique ID: a number of
+// up to 10 digits, the same with every firmware. The Arduino Due core sends no unique serial number, so Pulse Pal 2
+// sends an empty one (length 0).
+void sendSerialNumber() {
+  #if (HARDWARE_VERSION > 2)
+    byte length = (usb_string_serial_number.bLength - 2) / 2; // UTF-16 characters after the descriptor's 2-byte header
+    PPUSB.writeByte(length);
+    for (byte i = 0; i < length; i++) {
+      PPUSB.writeByte((byte)usb_string_serial_number.wString[i]); // Digits: ASCII in UTF-16
+    }
+  #else
+    PPUSB.writeByte(0);
+  #endif
+}
+
 // Loads a custom pulse train from the USB serial port (ops 75, 76 and 95). trainID is zero-indexed.
 // Each pulse has a 4-byte time and a 2-byte voltage, so the data after the pulse count is nPulses*6 bytes.
 //
-// The train is loaded into its other memory block (see "Custom train memory" in PulsePal3.ino), as a Wave Pal waveform is:
+// The train is loaded into its other memory block (see "Custom train memory" in PulsePal.ino), as a Wave Pal waveform is:
 // - Outside param sync mode, the channels playing the train stop first, and the train is left empty while it loads,
 //   so that a trigger meanwhile plays nothing (an empty train ends at once). Once stored, the loaded block is current.
 //   Writing over a train while a channel played it once left the channel "playing" at rest, ignoring triggers.

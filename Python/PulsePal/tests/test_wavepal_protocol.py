@@ -89,7 +89,7 @@ class FakeWavePal:
         assert data[0] == OP_MENU_BYTE, f"command without the framing byte: {list(data)}"
         op = data[1]
         payload = data[2:]
-        expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, 100: 0, ord("N"): 0, ord("S"): 4, ord("R"): 1,
+        expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, 100: 0, 102: 0, ord("N"): 0, ord("S"): 4, ord("R"): 1,
                             ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4, ord("C"): 4,
                             ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
         if op == ord("L"):
@@ -114,6 +114,8 @@ class FakeWavePal:
             return struct.pack("<BBIIIIB", 3, 4, 1000000, 100000, BUFFER_SAMPLES, CLOCK_HZ, N_WAVEFORMS)
         if op == 100:
             return bytes([self.circuit_board_revision])
+        if op == 102:  # The USB serial number: its length, then its characters
+            return bytes([8]) + b"20345420"
         if op in (ord("P"), ord("X"), 81, 89):
             return b""
         if op == ord("G"):
@@ -191,15 +193,18 @@ def command(op, data=b""):
 def test_connection_sequence_programs_the_defaults():
     fake = FakeWavePal()
     original = WavePal.serial.Serial
-    WavePal.serial.Serial = lambda *args, **kwargs: fake
+    opened = []
+    WavePal.serial.Serial = lambda *args, **kwargs: opened.append(kwargs) or fake
     try:
         device = WavePal.WavePalDevice("FAKE")
     finally:
         WavePal.serial.Serial = original
+    assert opened[0].get("exclusive") is True, opened  # Locked for this session on Linux and macOS too
     assert fake.writes == [
         command(72),
         command("N"),
         command(100),  # The circuit board revision
+        command(102),  # The USB serial number
         command(89, b"PYTHON"),  # Shown on the device's screen as "PYTHON Connected"
         command("X", bytes([0x0F])),
         command("T", bytes(2)),  # First: a device left in param sync mode would store what follows
@@ -207,11 +212,12 @@ def test_connection_sequence_programs_the_defaults():
         command("R", bytes([3])),
         command("O", bytes(4)),
         command("D", bytes(16)),
-        command("I", bytes([1, 1, 1, 1, 0, 0, 0, 0])),
+        command("I", bytes([0, 0, 0, 0, 0, 0, 0, 0])),  # No output channel linked to a trigger channel
         command("C", bytes(4)),
     ], fake.ops()
     assert device.info.firmware_version == 1
     assert device.info.hardware_version == 3 and device.info.circuit_board_revision == 5
+    assert device.info.serial_number == "20345420"
     assert device.info.max_samples == 1000000
     assert device.info.buffer_samples == BUFFER_SAMPLES
     assert device.info.n_waveforms == N_WAVEFORMS
@@ -220,7 +226,7 @@ def test_connection_sequence_programs_the_defaults():
     assert device.current_waveform == [None, 0, 0, 0, 0]
     assert device.loop_mode == [None, False, False, False, False]
     assert device.trigger_mode == [None, "Normal", "Normal"]
-    assert device.link_trigger_channel1 == [None, True, True, True, True]
+    assert device.link_trigger_channel1 == [None, False, False, False, False]
     assert device.link_trigger_channel2 == [None, False, False, False, False]
     assert device.waveforms == [None] * 5
 
@@ -617,7 +623,7 @@ def test_trigger_modes_belong_to_the_trigger_channels():
     device.link_trigger_channel2[3] = True    # Both trigger channels travel together
     device.link_trigger_channel1 = [True, False, False, True]
     assert fake.writes == [
-        command("I", bytes([1, 1, 1, 1, 0, 0, 1, 0])),
+        command("I", bytes([0, 0, 0, 0, 0, 0, 1, 0])),  # Trigger channel 1 links nothing by default
         command("I", bytes([1, 0, 0, 1, 0, 0, 1, 0])),
     ]
 

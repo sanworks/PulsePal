@@ -160,6 +160,15 @@ class DeviceInfo:
     `circuit_board_revision` to your data.
     """
 
+    serial_number: str = None
+    """USB serial number of the device, e.g. `"20345420"`: the Teensy's,
+    unique to each Pulse Pal 3, and the same whichever firmware it runs.
+
+    Connect by it, wherever the device is plugged in, with
+    `WavePalDevice(serial_number="20345420")`. To record exactly which unit ran an
+    experiment, copy it to your data.
+    """
+
     n_channels: int = None
     """Number of output channels."""
 
@@ -311,12 +320,15 @@ class WavePalDevice:
     _UINT32_MAX = 2**32 - 1
     _ALL_CHANNELS = 0x0F
 
-    def __init__(self, port_name, *, timeout=10):
+    def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Wave Pal.
 
         Args:
             port_name: USB serial port of the device, such as `COM3` on
                 Windows or `/dev/ttyACM0` on Linux.
+            serial_number: Instead of `port_name`, the device's USB serial
+                number (`DeviceInfo.serial_number`), which finds its port
+                wherever it is plugged in.
             timeout: Serial read timeout, in seconds. Loading a long
                 waveform onto a slow microSD card can take a few seconds.
 
@@ -326,7 +338,9 @@ class WavePalDevice:
         Raises:
             PulsePalError: If the device does not reply to the handshake, or
                 runs other firmware.
-            serial.SerialException: If the serial port cannot be opened.
+            serial.SerialException: If the serial port cannot be opened,
+                e.g. because another program has it open (on Linux and
+                macOS, another session of these classes, which lock it).
         """
         self._closed = True
         self.info = DeviceInfo()
@@ -342,17 +356,22 @@ class WavePalDevice:
         self._trigger_mode = ChannelSettings(
             "trigger_mode", ["Normal"] * 2, self, "_apply_trigger_mode")
         self._link_trigger_channel1 = ChannelSettings(
-            "link_trigger_channel1", [True] * 4, self,
+            "link_trigger_channel1", [False] * 4, self,
             "_apply_trigger_channel1_links")
         self._link_trigger_channel2 = ChannelSettings(
             "link_trigger_channel2", [False] * 4, self,
             "_apply_trigger_channel2_links")
 
+        port_name = _common.port_name_from(port_name, serial_number, "WavePalDevice")
         self.port = serial.Serial(
             port_name,
             self._BAUD_RATE,
             timeout=timeout,
             rtscts=True,
+            # Windows opens a port for one program only. Linux and macOS let a second program open it too, and two
+            # sessions' bytes would then interleave; exclusive locks it (flock), so a second session that also locks
+            # it, such as another of these classes, gets an error instead
+            exclusive=True,
         )
         self._closed = False
         try:
@@ -400,9 +419,9 @@ class WavePalDevice:
 
         The defaults are both trigger channels in normal mode, a 10 kHz
         sampling rate, the -10 V to 10 V output range, loop mode off with
-        loop durations of 0, all output channels linked to trigger channel
-        1 and not to trigger channel 2, and no current waveform on any
-        channel. They match the settings the device starts with. The
+        loop durations of 0, no output channel linked to a trigger channel
+        (so a TTL starts nothing until a script links it), and no current
+        waveform on any channel. They match the settings the device starts with. The
         trigger modes are sent first: a trigger channel leaving param sync
         mode makes what was stored for its next edge current, and the
         settings after it then apply at once.
@@ -419,7 +438,7 @@ class WavePalDevice:
         self.output_range = "-10V:10V"
         self.loop_mode = [False] * 4
         self.loop_duration = [0] * 4
-        self._set_trigger_links([True] * 4, [False] * 4)
+        self._set_trigger_links([False] * 4, [False] * 4)
         self.current_waveform = [0] * 4
 
     @property
@@ -619,7 +638,9 @@ class WavePalDevice:
     def link_trigger_channel1(self):
         """Whether each output channel is triggered by trigger channel 1.
 
-        Indexed by channel number (see "Channel settings" above).
+        Indexed by channel number (see "Channel settings" above). By
+        default no output channel is linked to either trigger channel, so
+        a TTL starts nothing until a script links it.
         """
         return self._link_trigger_channel1
 
@@ -1084,6 +1105,8 @@ class WavePalDevice:
         )
         self._write_command(self._OP_HARDWARE_REVISION)
         self.info.circuit_board_revision = self._read_raw(1)[0]
+        self._write_command(_common.OP_SERIAL_NUMBER)
+        self.info.serial_number = _common.read_serial_number(self._read_raw)
 
     def _apply_current_waveform(self, values):
         waveform_numbers = self._normalize_current_waveform(values)

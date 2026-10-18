@@ -47,7 +47,7 @@ The Python and MATLAB classes connect in this order:
    op 72, then read its reply until the device has been quiet for 50 ms and take the last 5
    bytes, which skips a reply to a command an earlier session left queued on the device.
 2. Op 78 ('N'): hardware properties.
-3. Op 100: the circuit board revision.
+3. Op 100: the circuit board revision. Then op 102: the USB serial number.
 4. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
 5. Op 88 ('X') with all four channel bits, then the default settings: ops 84, 83, 82, 79, 68,
    73 and 67. Op 84 comes first: a device left in [param sync mode](#param-sync-trigger-mode-3)
@@ -88,6 +88,7 @@ left then).
 | 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
 | 99 | `c` | Set the screen saver | State (uint8: 0 off, 1 on), timeout in seconds (uint16, 1-65535) | 1 / 0 |
 | 100 | `d` | Send the circuit board revision | none | Revision (uint8, 0-31), read at startup |
+| 102 | `f` | Send the USB serial number | none | Length (uint8), then that many ASCII characters. As Pulse Pal firmware's op 102 (see its [USB serial number](../PROTOCOL.md#usb-serial-number) notes) |
 | 90 | `Z` | Playback checksums (testing) | none | For channels 1-4: samples played since the channel last started (4 uint32), then the sum of their DAC codes, modulo 2^32 (4 uint32) |
 
 Ops 72, 81, 89, 99 and 100 are Pulse Pal's ops of the same numbers, so that a client shows its
@@ -270,8 +271,9 @@ command finishes.
 
 At startup and after a comm failure: both trigger channels in normal mode (so anything stored for
 a param sync edge becomes current first), 10 kHz sampling rate, -10 V to 10 V range, loop mode
-off, loop durations 0, output channels 1-4 linked to trigger channel 1 and not to trigger channel
-2, and no current waveform on any channel. The Python and MATLAB classes program the same
+off, loop durations 0, no output channel linked to a trigger channel (so a TTL starts nothing
+until a client links one; until October 2026, output channels 1-4 were linked to trigger channel
+1), and no current waveform on any channel. The Python and MATLAB classes program the same
 defaults when they connect.
 
 ## Differences from WavePlayer

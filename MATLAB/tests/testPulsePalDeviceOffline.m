@@ -29,12 +29,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 function testPulsePalDeviceOffline()
 tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testALateReplyIsSkipped, ...
     @testOtherFirmwareVersionsWarn, ...
-    @testDefaultParametersMessage, @testSingleValuesAreRefused, ...
+    @testDefaultParametersMessage, @testSingleValuesAreRefused, @testAssignmentsSendTheChannelsTheyChange, ...
     @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testCustomPulseTimesAreMultiplesOf100us, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
     @testCustomBurstsNeedABurstDuration, @testAnEmptyCustomTrainIsRefused, @testANoReplyMentionsACommFailure, ...
     @testExportAndImportParams, @testProgramFiles, @testSyncFromDeviceStoresWhatTheDeviceHolds, ...
-    @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testPulsePal2AndFirmwareV21};
+    @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testStatus, @testPulsePal2AndFirmwareV21};
 nFailed = 0;
 for i = 1:numel(tests)
     try
@@ -53,20 +53,22 @@ end
 end
 
 function testConnectionProgramsTheDefaults()
-% Connecting reads the hardware info (op 94) and the circuit board revision (op 100), takes both trigger channels out
-% of param sync mode (Pulse Pal 3), then sends the defaults in one op 92
+% Connecting reads the hardware info (op 94), the circuit board revision (op 100) and the USB serial number (op 102),
+% takes both trigger channels out of param sync mode (Pulse Pal 3), then sends the defaults in one op 92
 port = SimulatedPulsePalPort();
 P = PulsePalDevice(port);
 w = port.writes;
-assert(isequal(w(1:5), {uint8([213 72]), uint8([213 94]), uint8([213 100]), uint8([213 89 double('MATLAB')]), ...
-                        uint8([213 91 128 0 0])}), 'connection commands');
-assert(numel(w) == 6 && w{6}(2) == 92, 'the defaults are not one op 92');
+assert(isequal(w(1:6), {uint8([213 72]), uint8([213 94]), uint8([213 100]), uint8([213 102]), ...
+                        uint8([213 89 double('MATLAB')]), uint8([213 91 128 0 0])}), 'connection commands');
+assert(numel(w) == 7 && w{7}(2) == 92, 'the defaults are not one op 92');
 assert(port.NumBytesAvailable == 0, 'a reply was left unread');
 % The fields of the Python class's DeviceInfo, in the same order
 assert(isequal(fieldnames(P.info)', {'outputParameterNames', 'triggerModes', ...
-    'customTrainTargets', 'firmwareVersion', 'hardwareVersion', 'circuitBoardRevision', 'maxCustomPulses', ...
-    'nCustomPulseTrains', 'cycleFrequency', 'cyclePeriod_us', 'minPulseWidth_us', 'maxTime'}), 'info fields');
+    'customTrainTargets', 'firmwareVersion', 'hardwareVersion', 'circuitBoardRevision', 'serialNumber', ...
+    'maxCustomPulses', 'nCustomPulseTrains', 'cycleFrequency', 'cyclePeriod_us', 'minPulseWidth_us', 'maxTime'}), ...
+    'info fields');
 assert(P.info.hardwareVersion == 3 && P.info.circuitBoardRevision == 5, 'hardware revision');
+assert(isequal(P.info.serialNumber, '20345420'), 'USB serial number');
 assert(P.info.maxTime == 9999.9999 && P.info.minPulseWidth_us == 100, 'info limits');
 assert(isequal(P.phase1Voltage, [5 5 5 5]) && isequal(P.triggerMode, {'Normal', 'Normal'}), 'default values');
 delete(P);
@@ -114,7 +116,7 @@ function testDefaultParametersMessage()
 P.syncToDevice();
 times = kron([2 2 2 20 0 0 20000 0], ones(1,4)); % Timer cycles of 50 us: the firmware's defaults
 voltages = kron([49151 16384 32768], ones(1,4)); % DAC codes of 5 V, -5 V and 0 V, halves to the even code
-singleBytes = [zeros(1,20) ones(1,4) zeros(1,4) 0 0]; % ... continuous loop, links to trigger 1 and 2, trigger modes
+singleBytes = zeros(1,30); % ... continuous loop, links to trigger 1 and 2 (none by default), trigger modes
 expected = uint8([213 92 typecast(uint32(times), 'uint8') typecast(uint16(voltages), 'uint8') singleBytes]);
 assert(isequal(port.writes{1}, expected), 'op 92 message');
 end
@@ -138,20 +140,40 @@ assert(isequal(port.writes, {uint8([213 91 2 typecast(uint16([40959 40959 40959 
                              uint8([213 91 128 1 1])}), 'P.name(:) = value');
 end
 
+function testAssignmentsSendTheChannelsTheyChange()
+% An assignment sends the channels whose value it changes: op 74 for each, or op 91 when all of them change. The other
+% channels keep what the device holds, e.g. values set with the joystick, which sending all four would undo.
+[P, port] = connect();
+P.phase1Voltage(2) = 7;
+P.phase1Voltage = [6 7 5.00001 4]; % Channels 1 and 4: 5.00001 V is 5 V's DAC code
+P.triggerMode{2} = 'Toggle';
+P.isBiphasic(3) = true;
+assert(isequal(port.writes, {uint8([213 74 2 2 typecast(uint16(55705), 'uint8')]), ...
+                             uint8([213 74 2 1 typecast(uint16(52428), 'uint8')]), ...
+                             uint8([213 74 2 4 typecast(uint16(45874), 'uint8')]), ...
+                             uint8([213 74 128 2 1]), uint8([213 74 1 3 1])}), 'changed channels only');
+assert(isequal(P.phase1Voltage, [6 7 5.00001 4]), 'the property does not hold the values assigned');
+port.clearWrites();
+P.phase1Voltage(2) = 7; % Values the channels already hold send nothing
+P.triggerMode{2} = 'toggle';
+P.isBiphasic = [false false true false];
+assert(isempty(port.writes), 'an unchanged value was sent');
+end
+
 function testTimesHoldTheValueTheDevicePlays()
 [P, port] = connect();
 P.phase1Duration(1) = 0.00012; % 2.4 cycles: plays 100 us
 P.pulseTrainDelay(2) = 0.000175; % 3.5 cycles: plays 200 us (halfway, to the even cycle)
 assert(P.phase1Duration(1) == 0.0001 && P.pulseTrainDelay(2) == 0.0002, 'the property does not hold the time played');
-assert(isequal(port.writes{1}, uint8([213 91 4 typecast(uint32([2 2 2 2]), 'uint8')])), 'op 91 message');
+% 0.00012 s plays as the default 0.0001 s, so it sends nothing
+assert(isequal(port.writes{1}, uint8([213 74 11 2 typecast(uint32(4), 'uint8')])), 'op 74 message');
 end
 
 function testTimesAreAtMost9999s()
 % The longest time the joystick menu shows: 199999998 cycles of 50 us, as in the Python and C++ classes
 [P, port] = connect();
 P.pulseTrainDuration(1) = 9999.9999;
-assert(isequal(port.writes{1}, uint8([213 91 10 typecast(uint32([199999998 20000 20000 20000]), 'uint8')])), ...
-    'op 91 message');
+assert(isequal(port.writes{1}, uint8([213 74 10 1 typecast(uint32(199999998), 'uint8')])), 'op 74 message');
 expectError(@() setProperty(P, 'pulseTrainDuration', [10000 1 1 1]));
 expectError(@() setProperty(P, 'pulseTrainDelay', [9999.99995 0 0 0])); % 199999999 cycles
 assert(isscalar(port.writes), 'a refused time was sent');
@@ -387,12 +409,23 @@ for name = {'syncToDevice', 'syncFromDevice', 'saveProgramToMicroSD', 'loadProgr
 end
 end
 
+function testStatus()
+% status() sends op 101 and reads its 29 bytes: the channels playing, then the counters since the last op 101 (rising
+% edges per trigger channel, starts per output channel, comm failures)
+[P, port] = connect();
+s = P.status();
+assert(isequal(port.writes, {uint8([213 101])}) && port.NumBytesAvailable == 0, 'op 101');
+assert(isequal(s, struct('playing', [1 3], 'triggerEdges', [3 0], 'channelStarts', [2 0 1 0], 'commFailures', 1)), ...
+    'status fields');
+end
+
 function testPulsePal2AndFirmwareV21()
 port = SimulatedPulsePalPort(2, 22);
 P = PulsePalDevice(port);
-assert(numel(port.writes) == 5 && port.writes{5}(2) == 92, 'Pulse Pal 2 has no param sync mode to leave');
+assert(numel(port.writes) == 6 && port.writes{6}(2) == 92, 'Pulse Pal 2 has no param sync mode to leave');
 assert(isequal(P.info.triggerModes, {'Normal', 'Toggle', 'Gated'}), 'Pulse Pal 2 trigger modes');
 assert(P.info.circuitBoardRevision == 0, 'Pulse Pal 2 hardware revision');
+assert(isequal(P.info.serialNumber, ''), 'Pulse Pal 2 has no USB serial number');
 port = SimulatedPulsePalPort(2, 21);
 P = []; % Assigned in evalc, which hides the warning that v22 is available
 evalc('P = PulsePalDevice(port);');
@@ -402,7 +435,9 @@ assert(P.info.circuitBoardRevision == 0 && ~any(cellfun(@(w) isequal(w, uint8([2
     'firmware v21 has no op 100');
 port.clearWrites();
 P.restingVoltage(1) = 1;
-assert(numel(port.writes) == 4 && all(cellfun(@(w) isequal(w(1:3), uint8([213 74 17])), port.writes)), ...
+P.phase1Voltage(:) = 1;
+assert(numel(port.writes) == 5 && isequal(port.writes{1}(1:4), uint8([213 74 17 1])) && ...
+    all(cellfun(@(w) isequal(w(1:3), uint8([213 74 2])), port.writes(2:5))), ...
     'firmware v21 takes op 74 per channel');
 assert(port.NumBytesAvailable == 0, 'a confirm byte was left unread');
 end

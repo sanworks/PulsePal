@@ -56,7 +56,9 @@ P.phase2_voltage[2] = -5
 P.trigger_mode[1] = "Gated"   # Trigger channel 1: trains play while its TTL is high
 P.trigger_mode[2] = "Normal"  # Trigger channel 2: a TTL starts the linked trains
 
-# Each output channel is linked to trigger channel 1, 2, both or neither
+# Each output channel is linked to trigger channel 1, 2, both or neither. By
+# default it is linked to neither, so a TTL starts nothing until it is linked
+P.link_trigger_channel1[1] = True
 P.link_trigger_channel2[3] = True
 
 # Several parameters at once, sent in one command when the block ends

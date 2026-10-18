@@ -82,6 +82,7 @@ def test_connection(W):
     assert W.info.firmware_version == 1
     assert W.info.hardware_version == 3
     assert 0 <= W.info.circuit_board_revision <= 31
+    assert W.info.serial_number.isdigit(), W.info.serial_number  # The Teensy's USB serial number
     assert W.info.max_samples == 1000000
     assert W.info.n_waveforms == 4
     status = W.status()

@@ -81,6 +81,7 @@ function testConnectionAndDefaults(W)
 assert(W.info.firmwareVersion == 1, 'firmware version');
 assert(W.info.hardwareVersion == 3, 'hardware version');
 assert(W.info.circuitBoardRevision >= 0 && W.info.circuitBoardRevision <= 31, 'hardware revision');
+assert(~isempty(W.info.serialNumber) && all(isstrprop(W.info.serialNumber, 'digit')), 'USB serial number');
 assert(W.info.maxSamples == 1000000, 'maximum samples');
 assert(W.info.nWaveforms == 4 && isequal(W.waveforms, cell(1,4)), 'number of waveforms');
 assert(W.samplingRate == 10000 && strcmp(W.outputRange, '-10V:10V'), 'default sampling rate or range');
@@ -88,7 +89,7 @@ assert(isequal(W.currentWaveform, zeros(1,4)), 'default current waveforms');
 assert(isequal(W.status().currentWaveform, zeros(1,4)), 'the device has current waveforms after connecting');
 assert(isequal(W.loopMode, false(1,4)) && isequal(W.loopDuration, zeros(1,4)), 'default loop settings');
 assert(isequal(W.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
-assert(isequal(W.linkTriggerChannel1, true(1,4)) && isequal(W.linkTriggerChannel2, false(1,4)), 'default links');
+assert(isequal(W.linkTriggerChannel1, false(1,4)) && isequal(W.linkTriggerChannel2, false(1,4)), 'default links');
 assert(isempty(W.status().playing), 'a channel is playing after connecting');
 end
 

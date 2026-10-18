@@ -101,7 +101,9 @@ classdef WavePalDevice < handle
                                   % part way through the waveform if need be. 0 loops until the channel is stopped.
         triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated',
                                            % 'Param Sync' or 'Master'. See "Triggers" above. Not case sensitive.
-        linkTriggerChannel1 = true(1,4) % 1x4. true if a rising edge on trigger channel 1 triggers the output channel
+        linkTriggerChannel1 = false(1,4) % 1x4. true if a rising edge on trigger channel 1 triggers the output channel.
+                                         % By default no output channel is linked: a TTL starts nothing until a script
+                                         % links it
         linkTriggerChannel2 = false(1,4) % 1x4. true if a rising edge on trigger channel 2 triggers the output channel
     end
 
@@ -132,6 +134,7 @@ classdef WavePalDevice < handle
         OpSetClientName = 89 % Followed by 6 characters, shown as "NAME Connected"
         OpSetScreenSaver = 99
         OpHardwareRevision = 100 % The circuit board revision, as Pulse Pal firmware's op 100
+        OpSerialNumber = 102 % The USB serial number, as Pulse Pal firmware's op 102
         OpHardwareInfo = 'N'
         OpSetSamplingRate = 'S'
         OpSetOutputRange = 'R'
@@ -163,10 +166,12 @@ classdef WavePalDevice < handle
     end
 
     methods
-        function obj = WavePalDevice(portString)
+        function obj = WavePalDevice(portString, serialNumber)
             % W = WavePalDevice(portName) opens the serial port, checks that the device runs Wave Pal firmware, reads
             % its properties into info, shows "MATLAB Connected" on the device's screen, stops any playback and
             % programs the default settings (see setDefaultParams).
+            % W = WavePalDevice('SerialNumber', serialNumber) connects to the device with that USB serial number
+            % (info.serialNumber), wherever it is plugged in: see pulsepal.portForSerialNumber.
 
             % Check for minimum MATLAB version. verLessThan works in releases older than the minimum, where
             % isMATLABReleaseOlderThan (introduced in R2020b) does not exist.
@@ -176,6 +181,13 @@ classdef WavePalDevice < handle
                 error(['WavePalDevice requires MATLAB ' MinVerName ' or newer.'])
             end
 
+            if nargin == 2
+                if ~((ischar(portString) || isstring(portString)) && strcmpi(portString, 'SerialNumber'))
+                    error(['WavePalDevice takes a port name, e.g. WavePalDevice(''COM3''), or a serial number, e.g. '...
+                           'WavePalDevice(''SerialNumber'', ''20345420'').'])
+                end
+                portString = pulsepal.portForSerialNumber(serialNumber);
+            end
             if nargin < 1
                 portList = serialportlist('available');
                 if ~isempty(portList)
@@ -225,8 +237,8 @@ classdef WavePalDevice < handle
 
         function setDefaultParams(obj)
             % Programs the default settings on the device: both trigger channels in 'Normal' mode, a 10 kHz sampling
-            % rate, the -10 V to 10 V output range, loop mode off with loop durations of 0, all output channels linked
-            % to trigger channel 1 and not to trigger channel 2, and no currentWaveform on any channel. They match the
+            % rate, the -10 V to 10 V output range, loop mode off with loop durations of 0, no output channel linked to
+            % a trigger channel (a TTL starts nothing until a script links it), and no currentWaveform on any channel. They match the
             % settings the device starts with. The trigger modes are sent first: a trigger channel leaving param sync
             % mode makes what was stored for its next edge current, and the settings after it then apply at once.
             % Loaded waveforms are kept, and loaded again if the output range changes. Raises an error if a loaded
@@ -236,7 +248,7 @@ classdef WavePalDevice < handle
             obj.outputRange = '-10V:10V';
             obj.loopMode = false(1,4);
             obj.loopDuration = zeros(1,4);
-            obj.linkTriggerChannel1 = true(1,4);
+            obj.linkTriggerChannel1 = false(1,4);
             obj.linkTriggerChannel2 = false(1,4);
             obj.currentWaveform = zeros(1,4);
         end
@@ -665,11 +677,20 @@ classdef WavePalDevice < handle
             reply = obj.readBytes(19, 'reading the hardware info');
             obj.writeCommand(obj.OpHardwareRevision, []);
             circuitBoardRevision = obj.readBytes(1, 'reading the circuit board revision');
+            obj.writeCommand(obj.OpSerialNumber, []);
+            serialNumberLength = obj.readBytes(1, 'reading the USB serial number'); % Then that many characters
+            serialNumber = '';
+            if serialNumberLength > 0
+                serialNumber = char(obj.readBytes(serialNumberLength, 'reading the USB serial number'));
+            end
             values = double(typecast(uint8(reply(3:18)), 'uint32'));
             obj.info.hardwareVersion = reply(1);
             % 0-31: the board encodes its revision on five pins, which the firmware reads at startup. 0 if it encodes
             % none. Copy it to your data, with hardwareVersion, to record exactly which hardware ran an experiment.
             obj.info.circuitBoardRevision = circuitBoardRevision;
+            % The USB serial number, e.g. '20345420': the Teensy's, unique to each device. Copy it to your data too. The
+            % constructor takes it in place of a port name: see pulsepal.portForSerialNumber
+            obj.info.serialNumber = serialNumber;
             obj.info.nChannels = reply(2);
             obj.info.nWaveforms = reply(19); % Waveforms the device stores, numbered from 1
             obj.waveforms = cell(1, obj.info.nWaveforms);

@@ -72,11 +72,12 @@ W.trigger(1)
 time.sleep(1)
 W.stop(1)                    # The output returns to 0 V
 
-# TTL triggers. By default, a rising edge on trigger channel 1 plays all four
-# channels (those with a waveform). Here output channel 2 is moved to trigger
-# channel 2, which is put in gated mode: a TTL plays it for as long as the TTL
-# is high. As in Pulse Pal, trigger modes belong to the trigger channels.
-W.link_trigger_channel1[2] = False
+# TTL triggers. By default, no output channel is linked to a trigger channel, so
+# a TTL starts nothing. Here a rising edge on trigger channel 1 plays channels
+# 1, 3 and 4 (those with a waveform), and channel 2 is linked to trigger channel
+# 2, which is put in gated mode: a TTL plays it for as long as the TTL is high.
+# As in Pulse Pal, trigger modes belong to the trigger channels.
+W.link_trigger_channel1 = [True, False, True, True]
 W.link_trigger_channel2[2] = True
 W.trigger_mode[2] = "Gated"
 W.loop_mode[2] = True        # With a loop duration of 0: plays while the TTL is high

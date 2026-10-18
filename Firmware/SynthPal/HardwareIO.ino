@@ -112,7 +112,7 @@ static_assert(DAC_LATCH_US * MAX_SAMPLING_RATE < 1000000, "The DAC update must c
 
 // The sample clock's DAC update, in two steps: dacLoadTimed() writes, then dacLatchTimed() updates the outputs, and
 // handler() fetches the next samples in between. dacWriteTimed() does both.
-// As Pulse Pal firmware's dacWriteTimed() (see rule 1 in /Firmware/PulsePal3/AGENTS.md), the channels whose code changes
+// As Pulse Pal firmware's dacWriteTimed() (see rule 1 in /Firmware/PulsePal/AGENTS.md), the channels whose code changes
 // are written, and all outputs are updated together at DAC_LATCH_US after the tick, however many channels were written.
 // The DAC updates every output when LDAC falls after the last write, so writing and latching at once would make the
 // update time depend on how many channels changed (1.2us per channel): a square wave's edges would move as other

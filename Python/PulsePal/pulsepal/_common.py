@@ -18,6 +18,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import contextlib
 import numbers
+import re
 import struct
 import time
 import weakref
@@ -28,6 +29,7 @@ import serial.tools.list_ports
 
 OP_MENU_BYTE = 213  # The first byte of every command, for all three firmwares
 OP_HANDSHAKE = 72
+OP_SERIAL_NUMBER = 102  # The USB serial number, on all three firmwares
 
 # The firmwares that run on Pulse Pal hardware, by their reply to the handshake
 # (op 72): (name, client class). Each client names the firmware it finds when
@@ -103,12 +105,56 @@ def other_firmware_error(handshake_reply, version, port_name, expected):
     if handshake_reply not in FIRMWARE_BY_HANDSHAKE_REPLY:
         return None
     name, client = FIRMWARE_BY_HANDSHAKE_REPLY[handshake_reply]
-    expected_name = {"Pulse Pal": "PulsePal3", "Wave Pal": "WavePal",
+    expected_name = {"Pulse Pal": "PulsePal", "Wave Pal": "WavePal",
                      "Synth Pal": "SynthPal"}[expected]
     return PulsePalError(
         f"The device on {port_name} runs {name} firmware (v{version}), not "
         f"{expected} firmware. Load {expected} firmware onto it "
         f"(/Firmware/{expected_name}), or connect with {client}."
+    )
+
+
+def read_serial_number(read_raw):
+    """Read the reply to op 102 once it has been written: the device's USB serial number, as a str, or `""` for a
+    device that has none (Pulse Pal 2). `read_raw(n)` reads n bytes, or raises."""
+    length = read_raw(1)[0]
+    return read_raw(length).decode("ascii", errors="replace") if length else ""
+
+
+def port_name_from(port_name, serial_number, class_name):
+    """The port a class opens, from its `port_name` and `serial_number` arguments, exactly one of which is given."""
+    if (port_name is None) == (serial_number is None):
+        raise PulsePalError(
+            f"Give the device's port name, e.g. {class_name}('COM3'), or its USB serial number, e.g. "
+            f"{class_name}(serial_number='20345420'), but not both."
+        )
+    if port_name is not None:
+        return port_name
+    return port_for_serial_number(serial_number)
+
+
+def port_for_serial_number(serial_number):
+    """Return the name of the USB serial port whose device has this USB serial number (a str or an int).
+
+    A Pulse Pal 3's serial number is its `info.serial_number`, which every class reads when it connects. The port
+    name can change when the device is plugged into another USB socket; the serial number does not.
+    """
+    wanted = str(serial_number).strip()
+    ports = sorted(serial.tools.list_ports.comports(),  # In natural order: COM9 before COM12
+                   key=lambda port_info: [int(part) if part.isdigit() else part
+                                          for part in re.split(r"(\d+)", port_info.device)])
+    matches = [port_info.device for port_info in ports if (port_info.serial_number or "").strip() == wanted]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise PulsePalError(
+            f"Several USB serial ports have serial number {wanted!r}: {', '.join(matches)}. Connect by port name."
+        )
+    listed = ", ".join(f"{port_info.device} ({port_info.serial_number})" for port_info in ports
+                       if port_info.serial_number)
+    raise PulsePalError(
+        f"No USB serial port has serial number {wanted!r}. Is the device plugged in, and not open in another "
+        f"program? Ports with a serial number: {listed or 'none'}."
     )
 
 
@@ -144,6 +190,9 @@ def _port_is_free(port_name):
     # while the port is probed.
     port.dtr = False
     port.rts = False
+    # On Linux and macOS, a port locked by another program, such as a session of one of the classes (which open
+    # their ports with exclusive=True), refuses an exclusive open. Windows refuses any second open.
+    port.exclusive = True
     try:
         port.open()
     except (serial.SerialException, OSError):
