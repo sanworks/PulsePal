@@ -827,9 +827,13 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
      LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
      ChoiceMade = 0;
     // Read digits from User Value. Digits[0-7] hold a time in 100us steps, so a time above MAX_TIME_CYCLES (one sent
-    // over USB) keeps only its last 8 digits.
+    // over USB) keeps only its last 8 digits. On Pulse Pal 3, Digits[8] is the 5th decimal, 0.00005s steps: 0 or 5,
+    // one timer cycle or none (see the joystick moves below). Pulse Pal 2 shows that digit, but does not edit it.
     int x = 0;
     if (Units == UNITS_TIME) {
+      #if (HARDWARE_VERSION > 2)
+        Digits[8] = (UVTemp % 2) ? 5 : 0;
+      #endif
       UVTemp = UVTemp / 2;
       while ((UVTemp > 0) && (x < 8)) {
         Digits[7-x] = (UVTemp % 10);
@@ -873,7 +877,14 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
      // Initialize cursor starting positions and limits by unit type
      switch (Units) {
        case UNITS_INDEX: {CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;} break; // Format for Index
-       case UNITS_TIME: {CursorPos = 3; CursorPosLeftLimit = 0; CursorPosRightLimit = 7;} break; // Format for seconds
+       case UNITS_TIME: { // Format for seconds
+         CursorPos = 3; CursorPosLeftLimit = 0;
+         #if (HARDWARE_VERSION < 3)
+           CursorPosRightLimit = 7; // The 4th decimal: 100us steps (MIN_PULSE_CYCLES)
+         #else
+           CursorPosRightLimit = 8; // The 5th decimal: 50us steps
+         #endif
+       } break;
        case UNITS_VOLTS: {
         if (abs(Digits[0]) == 10) {
           CursorPos = 0; CursorPosLeftLimit = 0; CursorPosRightLimit = 0;
@@ -923,6 +934,15 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
               }
             } break;
             case UNITS_TIME: {
+                #if (HARDWARE_VERSION > 2)
+                  if (CursorPos == 8) { // The 5th decimal goes from 0 to 5 only: one timer cycle
+                    if ((Digits[8] == 0) && ((UserValue+1) <= UpperLimit)) {
+                      UserValue = UserValue + 1;
+                      Digits[8] = 5;
+                    }
+                    break;
+                  }
+                #endif
                 ValueToAdd = 2*(pow(10, ((5-CursorPos)+2)));
                 if ((Digits[CursorPos] < 9) && ((UserValue+ValueToAdd) <= UpperLimit)) {
                  UserValue = UserValue + ValueToAdd;
@@ -971,6 +991,15 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
               }
             } break;
             case UNITS_TIME: {
+                #if (HARDWARE_VERSION > 2)
+                  if (CursorPos == 8) { // The 5th decimal goes from 5 to 0 only
+                    if (Digits[8] == 5) { // May go below LowerLimit while editing (see the check after the loop)
+                      UserValue = UserValue - 1;
+                      Digits[8] = 0;
+                    }
+                    break;
+                  }
+                #endif
                 if (Digits[CursorPos] > 0)  { // May go below LowerLimit while editing (see the check after the loop)
                  UserValue = UserValue - 2*(pow(10, ((5-CursorPos)+2)));
                   Digits[CursorPos] = Digits[CursorPos] - 1;

@@ -77,7 +77,7 @@ def make_device(firmware_version=22, hardware_version=3, n_trains=4, max_pulses=
     device.info.hardware_version = hardware_version
     device.info.cycle_frequency = 20000
     device.info.cycle_period_us = 50
-    device.info.min_pulse_width_us = 100
+    device.info.min_pulse_width_us = PulsePalDevice._MIN_PULSE_CYCLES[hardware_version] * 50
     device.info.n_custom_pulse_trains = n_trains
     device.info.max_custom_pulses = max_pulses
     if not device._has_param_sync():
@@ -140,7 +140,7 @@ def test_connection_programs_the_defaults():
     ], port.writes
     assert port.writes[6][:2] == bytes([OP_MENU_BYTE, 92]) and len(port.writes) == 7
     assert port.resets == [0], "unread input was not discarded before the handshake"
-    assert device.info.hardware_version == 3 and device.info.min_pulse_width_us == 100
+    assert device.info.hardware_version == 3 and device.info.min_pulse_width_us == 50
     assert device.info.circuit_board_revision == 5 and not port.response, "a reply was left unread"
     assert device.info.serial_number == "20345420"
     assert device.info.trigger_modes == ("Normal", "Toggle", "Gated", "Param Sync")
@@ -521,13 +521,14 @@ def test_custom_train_rejects_times_that_do_not_increase():
 
     device = make_device()
     error = expect_error(device.send_custom_waveform, 1, 0, [1, 2, 3])
-    assert "positive multiple of 100 us" in str(error), error
+    assert "positive multiple of 50 us" in str(error), error
     assert device.port.writes == []
 
 
-def test_custom_pulse_times_are_multiples_of_100_us():
-    """As in the MATLAB class: a custom pulse time or sampling period between two 100 us steps is
-    refused, not rounded."""
+def test_custom_pulse_times_are_multiples_of_the_minimum_pulse():
+    """As in the MATLAB class: a custom pulse time or sampling period between two steps of
+    DeviceInfo.min_pulse_width_us (100 us on Pulse Pal 2, 50 us on Pulse Pal 3) is refused, not
+    rounded."""
     for call in (
         lambda d: d.send_custom_pulse_train(1, [0, 0.00001], [1, 2]),
         lambda d: d.send_custom_pulse_train(1, [0, 0.00005, 0.0001], [1, 2, 3]),   # One 50 us cycle
@@ -536,16 +537,33 @@ def test_custom_pulse_times_are_multiples_of_100_us():
         lambda d: d.send_custom_waveform(1, 0.00005, [1, 2, 3]),
         lambda d: d.send_custom_waveform(1, 0.00015, [1, 2, 3]),
     ):
-        device = make_device()
+        device = make_device(hardware_version=2, n_trains=2, max_pulses=5000)
         error = expect_error(call, device)
         assert "multiples of 100 us" in str(error), error
         assert device.port.writes == []
 
-    device = make_device()
+    device = make_device(hardware_version=2, n_trains=2, max_pulses=5000)
     device.send_custom_pulse_train(1, np.arange(5) * 0.0001 + 0.0003, [1, 2, 3, 4, 5])  # Float error is fine
     device.send_custom_waveform(custom_train_id=2, sampling_period=0.0002, voltages=[1, 2, 3])
     assert device.port.writes[0][7:27] == struct.pack("<5I", 6, 8, 10, 12, 14)
     assert device.port.writes[1][7:19] == struct.pack("<3I", 0, 4, 8)
+
+    for call in (
+        lambda d: d.send_custom_pulse_train(1, [0, 0.00001], [1, 2]),
+        lambda d: d.send_custom_pulse_train(1, [0, 0.0001, 0.00012], [1, 2, 3]),
+        lambda d: d.send_custom_pulse_train(1, [0.000075], [1]),
+        lambda d: d.send_custom_waveform(1, 0.000025, [1, 2, 3]),
+    ):
+        device = make_device()
+        error = expect_error(call, device)
+        assert "multiples of 50 us" in str(error), error
+        assert device.port.writes == []
+
+    device = make_device()
+    device.send_custom_pulse_train(1, np.arange(5) * 0.00005 + 0.00015, [1, 2, 3, 4, 5])  # Float error is fine
+    device.send_custom_waveform(custom_train_id=2, sampling_period=0.00005, voltages=[1, 2, 3])
+    assert device.port.writes[0][7:27] == struct.pack("<5I", 3, 4, 5, 6, 7)
+    assert device.port.writes[1][7:19] == struct.pack("<3I", 0, 1, 2)
 
 
 def test_waveform_matches_an_equivalent_pulse_train():
@@ -628,9 +646,8 @@ def test_values_the_device_cannot_play_raise_before_sending():
         lambda d: setattr(d, "resting_voltage", [0, 0, -10.5, 0]),
         lambda d: d.phase1_duration.__setitem__(1, 0),
         lambda d: d.phase1_duration.__setitem__(1, 0.00002),   # Rounds to 0 cycles
-        lambda d: d.phase1_duration.__setitem__(1, 0.00005),   # One cycle
         lambda d: d.phase2_duration.__setitem__(1, 0),
-        lambda d: d.pulse_train_duration.__setitem__(1, 0.00005),
+        lambda d: d.pulse_train_duration.__setitem__(1, 0.00002),
         lambda d: d.pulse_train_delay.__setitem__(1, -0.001),
         lambda d: d.pulse_train_duration.__setitem__(1, float("nan")),
         lambda d: d.inter_pulse_interval.__setitem__(1, 0),
@@ -643,7 +660,7 @@ def test_values_the_device_cannot_play_raise_before_sending():
         lambda d: d.send_custom_waveform(1, 0.001, [0, float("nan")]),
         lambda d: d.phase1_voltage.__setitem__(3, 15),
         lambda d: d.phase1_voltage.__setitem__(3, "5"),
-        lambda d: d.inter_pulse_interval.__setitem__(1, 0.00005),
+        lambda d: d.inter_pulse_interval.__setitem__(1, 0.00002),
     ]
     for call in calls:
         device = make_device()
@@ -651,15 +668,20 @@ def test_values_the_device_cannot_play_raise_before_sending():
         assert device.port.writes == []
 
 
-def test_pulses_and_intervals_last_at_least_two_cycles():
-    """Two cycles is the shortest pulse a trigger channel detects reliably, as in the MATLAB
-    class and the joystick menu: 100 us on a 50 us timer, 50 us on a 25 us timer. Times of 0
+def test_pulses_and_intervals_last_at_least_the_minimum_pulse():
+    """The shortest pulse, as in the MATLAB class and the joystick menu: on Pulse Pal 3 one timer
+    cycle (50 us), since its trigger channels latch every edge; on Pulse Pal 2 two (100 us), the
+    shortest pulse its trigger channels, which read their inputs once per cycle, detect reliably.
+    The limit is in cycles of the device's timer: one 25 us cycle on a 25 us timer. Times of 0
     still mean "off" where they did."""
-    device = make_device()
+    device = make_device(hardware_version=2, n_trains=2, max_pulses=5000)
+    assert device.info.min_pulse_width_us == 100
     for name in ("phase1_duration", "phase2_duration", "inter_pulse_interval", "pulse_train_duration"):
         getattr(device, name)[1] = 0.0001
         getattr(device, name)[2] = 100 * 1e-6  # Just under 0.0001, but 2 cycles
         assert getattr(device, name)[1:3] == [0.0001, 0.0001], name
+        error = expect_error(getattr(device, name).__setitem__, 3, 0.00005)
+        assert "at least 0.0001 s (2 cycles of the device's 50 us timer)" in str(error), error
     for name in ("inter_phase_interval", "burst_duration", "inter_burst_interval", "pulse_train_delay"):
         getattr(device, name)[1] = 0
         getattr(device, name)[2] = 0.00005
@@ -668,15 +690,29 @@ def test_pulses_and_intervals_last_at_least_two_cycles():
     assert "at least 0.0001 s (2 cycles" in str(error), error
 
     device = make_device()
+    assert device.info.min_pulse_width_us == 50
+    for name in ("phase1_duration", "phase2_duration", "inter_pulse_interval", "pulse_train_duration"):
+        getattr(device, name)[1] = 0.00005
+        getattr(device, name)[2] = 50 * 1e-6
+        assert getattr(device, name)[1:3] == [0.00005, 0.00005], name
+    for name in ("inter_phase_interval", "burst_duration", "inter_burst_interval", "pulse_train_delay"):
+        getattr(device, name)[1] = 0
+        assert getattr(device, name)[1] == 0, name
+    error = expect_error(device.inter_pulse_interval.__setitem__, 1, 0)
+    assert "at least 5e-05 s (1 cycle of the device's 50 us timer)" in str(error), error
+    device.port.writes.clear()
+    device.phase1_duration[3] = 0.00005
+    assert device.port.writes == [bytes([OP_MENU_BYTE, 74, 4, 3]) + struct.pack("<I", 1)]
+
+    device = make_device()
     device.info.cycle_period_us = 25
     device.info.cycle_frequency = 40000
-    device.info.min_pulse_width_us = 50
-    device.phase1_duration[1] = 0.00005  # 2 cycles of 25 us
-    device.send_custom_waveform(1, 0.00005, [1, 2, 3])
-    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 2)
-    error = expect_error(device.phase1_duration.__setitem__, 1, 0.000025)
-    assert "at least 5e-05 s (2 cycles of the device's 25 us timer)" in str(error), error
-
+    device.info.min_pulse_width_us = 25
+    device.phase1_duration[1] = 0.000025  # 1 cycle of 25 us
+    device.send_custom_waveform(1, 0.000025, [1, 2, 3])
+    assert device.port.writes[0] == bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 1)
+    error = expect_error(device.phase1_duration.__setitem__, 1, 0.00001)
+    assert "at least 2.5e-05 s (1 cycle of the device's 25 us timer)" in str(error), error
 
 def test_halfway_values_round_to_even_like_the_matlab_and_cpp_classes():
     """All three classes round a value exactly halfway to the even one, so a script gives the
@@ -938,7 +974,7 @@ def test_custom_trains_convert_as_each_value_alone_would():
                                        ([0, -0.1], [1, 1], "Received -0.1"),
                                        ([0, float("inf")], [1, 1], "Received inf"),
                                        ([0, 10000], [1, 1], "at most 9999.9999 s"),
-                                       ([0, 0.00015], [1, 1], "Received 0.00015"),
+                                       ([0, 0.00012], [1, 1], "Received 0.00012"),
                                        ([0, 0.1], [1, np.bool_(True)], "Received np.True_"),
                                        ([0, 0.1], [1, -10.5], "Received -10.5"),
                                        (np.array([0, 0.1]), np.array([1, np.nan]), "Received nan"),

@@ -721,6 +721,40 @@ static void test_custom_trains_reject_bad_ids_sizes_and_times()
     CHECK(port.writes.empty());
 }
 
+static void test_pulse_pal_3_plays_one_cycle_pulses()
+{
+    // Pulse Pal 3's trigger channels latch every edge, so its shortest phase, inter-pulse interval and train duration
+    // are one timer cycle (50 us), and custom pulse times are multiples of it, as in the MATLAB and Python classes.
+    // Pulse Pal 2's are two cycles (see test_out_of_range_arguments_send_nothing())
+    FakeSerialPort port;
+    PulsePal pulsePal(&port);
+    connect(pulsePal, port, 22, 3);
+    CHECK(pulsePal.setPhase1Duration(1, 0.00005f));
+    CHECK(pulsePal.setPhase2Duration(2, 0.00005f));
+    CHECK(pulsePal.setInterPulseInterval(3, 0.00005f));
+    CHECK(pulsePal.setPulseTrainDuration(4, 0.00005f));
+    CHECK(port.writes.size() == 4);
+    if (port.writes.size() == 4) {
+        CHECK_BYTES(port.writes[0], bytes({213, 74, 4, 1, 1, 0, 0, 0}));
+        CHECK_BYTES(port.writes[3], bytes({213, 74, 10, 4, 1, 0, 0, 0}));
+    }
+    const float times[3] = {0, 0.00005f, 0.00015f};
+    const float voltages[3] = {1, 2, 3};
+    CHECK(pulsePal.sendCustomPulseTrain(1, 3, times, voltages));
+    CHECK_BYTES(Bytes(port.writes.back().begin() + 3, port.writes.back().begin() + 19),
+                bytes({3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0})); // 3 pulses, at 0, 1 and 3 cycles
+    port.writes.clear();
+
+    CaptureErrors errors;
+    CHECK(!pulsePal.setPhase1Duration(1, 0));
+    CHECK(contains(errors.text(), "It must be 5e-05 to 9999.9999 s"));
+    CHECK(!pulsePal.setInterPulseInterval(1, 0.00002f)); // 0 cycles
+    const float betweenSteps[2] = {0, 0.00012f};
+    CHECK(!pulsePal.sendCustomPulseTrain(1, 2, betweenSteps, voltages));
+    CHECK(contains(errors.text(), "Custom pulse times must be multiples of 50 us"));
+    CHECK(port.writes.empty());
+}
+
 static void test_end_disconnects_and_closes_the_port()
 {
     FakeSerialPort port;
@@ -775,6 +809,7 @@ int main()
         {"custom trains use op 95 with a zero-based index", test_custom_trains_use_op_95_with_a_zero_based_index},
         {"custom trains use ops 75 and 76 on firmware v21", test_custom_trains_use_ops_75_and_76_on_firmware_v21},
         {"custom trains reject bad IDs, sizes and times", test_custom_trains_reject_bad_ids_sizes_and_times},
+        {"Pulse Pal 3 plays one cycle pulses", test_pulse_pal_3_plays_one_cycle_pulses},
         {"end() disconnects and closes the port", test_end_disconnects_and_closes_the_port},
         {"commands before initialize() send nothing", test_commands_before_initialize_send_nothing},
     };

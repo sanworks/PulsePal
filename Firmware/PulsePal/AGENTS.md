@@ -126,12 +126,16 @@ the `--show` output before concluding that a function really changed.
    `TIMER_PERIOD` (50 µs). Settings files store cycles, and legacy code and installed clients
    assume 50 µs, so a faster cycle (e.g. 25 µs on Pulse Pal 3) would have to be optional, with
    50 µs the default. The joystick time editor in `Menu.ino` also assumes 50 µs (2 cycles per
-   0.0001 s digit step) where it reads the digits and where it adds and subtracts a step.
+   0.0001 s digit step) where it reads the digits and where it adds and subtracts a step. On
+   Pulse Pal 3 it also edits the 5th decimal, which is only ever 0 or 5: 1 cycle or none.
    Phases, the inter-pulse interval and the train duration have a minimum of
-   `MIN_PULSE_CYCLES` (2) in the menu and the clients: a trigger channel reads its input once
-   per cycle, so it can miss a 1 cycle pulse from another Pulse Pal. Times have a maximum of
-   `MAX_TIME_CYCLES` (9999.9999 s) in the menu and the clients: the most the editor's 8 digits
-   hold. See "Value limits" in `/Firmware/PROTOCOL.md`.
+   `MIN_PULSE_CYCLES` in the menu and the clients: 2 cycles (100 µs) on Pulse Pal 2, whose
+   trigger channels read their inputs once per cycle and can miss a 1 cycle pulse from another
+   Pulse Pal, and 1 cycle (50 µs) on Pulse Pal 3. Pulse Pal 3 also latches each trigger line's
+   edges in its GPIO port (`setupTriggerEdgeLatches()`), and so detects any pulse longer than
+   0.5 µs; Pulse Pal 2, and Pulse Pal 3 firmware from before October 2026, do not. Times have a
+   maximum of `MAX_TIME_CYCLES` (9999.9999 s) in the menu and the clients: the most Pulse Pal
+   2's editor (8 digits) holds. See "Value limits" in `/Firmware/PROTOCOL.md`.
 9. **Keep the existing names.** The lead developer navigates this code from memory during
    support calls. Renaming variables or reformatting whole files costs more than it saves.
 10. **EEPROM writes stop all interrupts** (Pulse Pal 3). The Teensy 4.1 emulates its EEPROM in
@@ -183,7 +187,8 @@ one at a time, and at equal priority it made the timer lose cycles. ArCOM now re
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
 `dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`),
 `startBurst()` and `startCustomBurstPass()`. On
-Pulse Pal 3 it also calls `startParamSync()` and `applyStoredCustomTrains()` when a trigger
+Pulse Pal 3 it also calls `triggerEdgeLatched()` after reading each trigger line and
+`clearTriggerEdgeLatches()` `TRIGGER_CHATTER_NS` (0.5 µs) later, `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
 

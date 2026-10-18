@@ -71,10 +71,10 @@ A value the device cannot play raises `pulsepal.PulsePalError` before
 anything is sent: a voltage outside [-10, 10], a time that is negative,
 longer than `MAX_TIME` or not a number, or an unknown name. So does a
 pulse phase, inter-pulse interval or pulse train duration shorter than
-`DeviceInfo.min_pulse_width_us` (100 us), so that a Pulse Pal's trigger
-channels can detect the shortest pulse its output channels play. Custom
-pulse times are not rounded: each must be a multiple of
-`DeviceInfo.min_pulse_width_us`.
+`DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3, 100 us on Pulse
+Pal 2), so that a Pulse Pal's trigger channels can detect the shortest
+pulse its output channels play. Custom pulse times are not rounded: each
+must be a multiple of `DeviceInfo.min_pulse_width_us`.
 
 ## Saving parameters
 
@@ -144,7 +144,7 @@ See `PulsePalDevice.custom_train_target`."""
 
 # Output parameters by parameter code (see "Parameter codes" in /Firmware/PROTOCOL.md), with
 # the kind of value each takes. The codes are fixed: installed clients and the firmware use them.
-# "pulse_time" is a time of at least _MIN_PULSE_CYCLES.
+# "pulse_time" is a time of at least DeviceInfo.min_pulse_width_us.
 _OUTPUT_PARAMETERS = {
     1: ("is_biphasic", "bool"),
     2: ("phase1_voltage", "volts"),
@@ -281,9 +281,12 @@ class DeviceInfo:
     """Shortest pulse phase, inter-pulse interval and pulse train duration,
     and shortest time between custom pulses, in microseconds.
 
-    Two timer cycles: a trigger channel reads its input once per cycle, so
-    a pulse must last two cycles to be detected reliably. Custom pulse
-    times are multiples of it.
+    One timer cycle (50 us) on Pulse Pal 3, whose trigger channels latch
+    every edge on their inputs. Two cycles (100 us) on Pulse Pal 2, whose
+    trigger channels read their inputs once per cycle, so that a one cycle
+    pulse could fall between two reads. A Pulse Pal 2, or a Pulse Pal 3
+    with firmware from before October 2026, can miss a 50 us pulse from a
+    Pulse Pal 3. Custom pulse times are multiples of it.
     """
 
     max_time: float = MAX_TIME
@@ -579,10 +582,10 @@ class PulsePalDevice:
     _PARAM_MESSAGE_BYTES = 178  # Length of the parameter set sent by op 93
     _STATUS_MESSAGE_BYTES = 29  # Length of the reply to op 101: playing channels, then 7 uint32 counters
     # Phase 1 and 2 durations, inter-pulse interval and train duration last at least this many
-    # timer cycles, as in the MATLAB and C++ classes and the joystick menu. A trigger channel reads
-    # its input once per cycle, so a one cycle pulse from another Pulse Pal could fall between two
-    # reads.
-    _MIN_PULSE_CYCLES = 2
+    # timer cycles, by hardware version, as in the MATLAB and C++ classes and the joystick menu.
+    # Pulse Pal 2's trigger channels read their inputs once per cycle, so a one cycle pulse from
+    # another Pulse Pal could fall between two reads. Pulse Pal 3's also latch every edge.
+    _MIN_PULSE_CYCLES = {2: 2, 3: 1}
 
     _ENDIANNESS = "<"
     _STRUCT_FORMATS = {
@@ -742,7 +745,7 @@ class PulsePalDevice:
             self.info.n_custom_pulse_trains = 2
             self.info.max_custom_pulses = 5000
         self.info.min_pulse_width_us = (
-            self._MIN_PULSE_CYCLES * self.info.cycle_period_us
+            self._MIN_PULSE_CYCLES[self.info.hardware_version] * self.info.cycle_period_us
         )
         if not self._has_param_sync():
             self.info.trigger_modes = TRIGGER_MODES[:3]
@@ -1133,7 +1136,8 @@ class PulsePalDevice:
                 4 on Pulse Pal 3).
             pulse_times: Pulse onset times, in seconds, relative to the
                 start of the train, increasing. Each is a multiple of
-                `DeviceInfo.min_pulse_width_us` (100 us), from 0 to
+                `DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3,
+                100 us on Pulse Pal 2), from 0 to
                 `MAX_TIME`. Accepts a list, tuple or NumPy array.
             voltages: Voltage of each pulse, in volts [-10, 10]. Must be
                 the same length as `pulse_times`.
@@ -1193,7 +1197,8 @@ class PulsePalDevice:
                 `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
                 4 on Pulse Pal 3).
             sampling_period: In seconds: a multiple of
-                `DeviceInfo.min_pulse_width_us` (100 us). Each voltage is
+                `DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3,
+                100 us on Pulse Pal 2). Each voltage is
                 held for this long.
             voltages: Waveform samples, in volts [-10, 10].
                 Accepts a list, tuple or NumPy array.
@@ -1641,10 +1646,10 @@ class PulsePalDevice:
             cycles = self._seconds_to_cycles(value, label)
             # Checked in whole cycles, as the device receives it: 100 * 1e-6 is just under 0.0001,
             # but is exactly 2 cycles of 50 us
-            if kind == "pulse_time" and cycles < self._MIN_PULSE_CYCLES:
+            if kind == "pulse_time" and cycles < self._min_pulse_cycles():
                 raise PulsePalError(
                     f"{label} must be at least {self._min_pulse_seconds()} s "
-                    f"({self._MIN_PULSE_CYCLES} cycles of the device's {self.info.cycle_period_us} us "
+                    f"({self._min_pulse_cycles_text()} of the device's {self.info.cycle_period_us} us "
                     f"timer), so that trigger channels can detect the pulses. Received {value!r}."
                 )
             return self._cycles_to_seconds(cycles)  # The time the device plays
@@ -1930,9 +1935,19 @@ class PulsePalDevice:
                 f"{name} must be a whole number from {low} to {high}. Received {value!r}."
             )
 
+    def _min_pulse_cycles(self):
+        """The shortest pulse phase, interval or train, in timer cycles: DeviceInfo.min_pulse_width_us. See
+        _MIN_PULSE_CYCLES."""
+        return int(round(self.info.min_pulse_width_us / self.info.cycle_period_us))
+
+    def _min_pulse_cycles_text(self):
+        """_min_pulse_cycles() for messages: "1 cycle", "2 cycles"."""
+        cycles = self._min_pulse_cycles()
+        return f"{cycles} cycle" if cycles == 1 else f"{cycles} cycles"
+
     def _min_pulse_seconds(self):
-        """The shortest pulse phase, interval or train, in seconds. See _MIN_PULSE_CYCLES."""
-        return self._cycles_to_seconds(self._MIN_PULSE_CYCLES)
+        """The shortest pulse phase, interval or train, in seconds: DeviceInfo.min_pulse_width_us."""
+        return self._cycles_to_seconds(self._min_pulse_cycles())
 
     def _require_firmware(self, minimum_version, context):
         """Raise unless the device firmware is new enough for an op."""
@@ -1981,15 +1996,15 @@ class PulsePalDevice:
                 f"store up to {self.info.max_custom_pulses} pulses per "
                 "custom train."
             )
-        # Times are multiples of _MIN_PULSE_CYCLES (see _custom_times_to_cycles()), so increasing times are far
+        # Times are multiples of _min_pulse_cycles() (see _custom_times_to_cycles()), so increasing times are far
         # enough apart for a trigger channel to detect each pulse.
-        too_close = np.flatnonzero(np.diff(pulse_times_cycles) < self._MIN_PULSE_CYCLES)
+        too_close = np.flatnonzero(np.diff(pulse_times_cycles) < self._min_pulse_cycles())
         if too_close.size:
             i = int(too_close[0]) + 1
             raise PulsePalError(
                 f"{context}: pulse times must increase, by at least "
-                f"{self._min_pulse_seconds()} s ({self._MIN_PULSE_CYCLES} "
-                f"cycles of the device's {self.info.cycle_period_us} us "
+                f"{self._min_pulse_seconds()} s ({self._min_pulse_cycles_text()} "
+                f"of the device's {self.info.cycle_period_us} us "
                 f"timer). Pulse {i + 1} is at "
                 f"{self._cycles_to_seconds(pulse_times_cycles[i])} s, "
                 f"and pulse {i} is at "
@@ -2043,8 +2058,8 @@ class PulsePalDevice:
     def _custom_times_to_cycles(self, values, name):
         """Convert custom pulse times to timer cycles, all at once: _custom_time_cycles() for each of them.
 
-        Each must be a time the device can play, and a whole number of DeviceInfo.min_pulse_width_us (100 us) to
-        the nearest microsecond, as in the MATLAB class. Returns an int64 array.
+        Each must be a time the device can play, and a whole number of DeviceInfo.min_pulse_width_us to the nearest
+        microsecond, as in the MATLAB class. Returns an int64 array.
         """
         seconds = self._number_array(values, name, "a time of 0 s or more")
         refused = ~(np.isfinite(seconds) & (seconds >= 0))
@@ -2242,8 +2257,8 @@ class PulsePalDevice:
     def _custom_time_cycles(self, value, name):
         """Convert a custom pulse time or sampling period to timer cycles.
 
-        It must be a whole number of DeviceInfo.min_pulse_width_us (100 us), to the nearest
-        microsecond, as in the MATLAB class. A time between two steps is refused, not rounded
+        It must be a whole number of DeviceInfo.min_pulse_width_us, to the nearest microsecond,
+        as in the MATLAB class. A time between two steps is refused, not rounded
         as the time parameters are, so that a train plays as it was written.
         """
         self._seconds_to_cycles(value, name)  # Checks that it is a time the device can play

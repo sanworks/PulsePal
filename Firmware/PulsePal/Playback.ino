@@ -270,7 +270,8 @@ static inline void startBurst(byte channel, byte block) {
 //     joystick button is pressed. The final DAC update after playback ends is written on the next idle cycle. The
 //     outputs change DAC_LATCH_US after the timer tick, however many channels changed (see dacWriteTimed()).
 //  2. Soft triggers scheduled from loop() (op 77 or joystick menu) become active.
-//  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent). On Pulse Pal 3, a rising
+//  3. Read the trigger lines, update their LEDs and detect transitions (LineTriggerEvent). Pulse Pal 3 also detects a
+//     pulse that came and went since the last cycle's read (see setupTriggerEdgeLatches()). On Pulse Pal 3, a rising
 //     edge on a trigger channel in param sync mode takes the parameter set op 92 left in paramBuffer, and makes the
 //     custom trains op 95 loaded since the last edge current. Output channels that are idle take the parameters at
 //     the edge; channels playing a pulse train finish that train on the parameters, and the custom train memory
@@ -343,6 +344,14 @@ void handler(void) {
     LineTriggerEvent[0] = TRIGGER_EVENT_NONE; LineTriggerEvent[1] = TRIGGER_EVENT_NONE;
     for (int x = 0; x < 2; x++) {
          InputValues[x] = digitalReadDirect(TriggerLines[x]);
+         #if (HARDWARE_VERSION > 2)
+           // The line changed since the last read, and is back at the level read then: a pulse, or a gap between
+           // pulses, shorter than a cycle came and went between the reads (see setupTriggerEdgeLatches()). Take it as
+           // read during the pulse, so that it makes the transitions of a longer one: into it now, out of it next cycle.
+           if (triggerEdgeLatched(x) && (InputValues[x] == InputValuesLastCycle[x])) {
+             InputValues[x] = !InputValues[x];
+           }
+         #endif
          if (InputValues[x] == TriggerLevel) {
            digitalWriteDirect(InputLEDLines[x], HIGH);
          } else {
@@ -358,8 +367,15 @@ void handler(void) {
          }
          InputValuesLastCycle[x] = InputValues[x];
     }
-
     #if (HARDWARE_VERSION > 2)
+      // The trigger inputs' opto-isolator can switch more than once as its input crosses the threshold: measured after
+      // about 1% of edges from 3.3 and 4V TTLs, for up to 0.09us. A read during that chatter takes one level, but the
+      // switches after it stay latched, and next cycle, with the line still at the level read, they would look like a
+      // pulse that came and went. So edges latched this soon after the reads are dropped. A pulse shorter than
+      // TRIGGER_CHATTER_NS that starts just after a read is missed.
+      delayNanoseconds(TRIGGER_CHATTER_NS);
+      clearTriggerEdgeLatches();
+
       // Take the parameter set that op 92 left waiting, and the custom trains op 95 loaded, if a trigger channel in param
       // sync mode just went high
       if (paramSyncPending || customTrainLoadsStored) {

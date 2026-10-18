@@ -41,8 +41,10 @@ what is new.
 3. **Check what the outputs drive.** The outputs swing from -10 V to +10 V. Keep every voltage
    within what the connected equipment accepts: a laser or LED driver that takes 0-5 V can be
    damaged by a voltage the Pulse Pal plays without complaint.
-4. **Trigger inputs take TTL:** 0 V low, 3 to 5 V high. A trigger channel reads its input once
-   every 50 µs, so a trigger pulse must last at least 100 µs to be seen reliably.
+4. **Trigger inputs take TTL:** 0 V low, 3 to 5 V high. A Pulse Pal 3 with firmware from October 2026
+   on sees a trigger pulse of any length above 0.5 µs. A Pulse Pal 2, or a Pulse Pal 3 with earlier
+   firmware, reads its trigger inputs once every 50 µs, so a trigger pulse must last at least 100 µs for it
+   to be seen reliably.
 5. **Connecting programs the defaults.** Whatever the device held (a program set with its
    joystick, or by an earlier script) is replaced. To keep a program, save it to the device's
    microSD card and load it after connecting (see "Run without a computer" below). On
@@ -115,8 +117,8 @@ P.trigger([1 2]);
 | Voltage steps | 0.305 mV on Pulse Pal 3 (16-bit DAC); 4.88 mV on Pulse Pal 2 (12-bit DAC, which plays the step at or below the voltage) |
 | Time steps | 50 µs: every time is rounded to the nearest 50 µs, and the property then holds the rounded time (0.00012 reads back as 0.0001) |
 | Longest time | 9999.9999 s, for every time setting and custom pulse time |
-| Shortest pulse | 100 µs, for the phase durations, the inter-pulse interval and the pulse train duration: the shortest pulse another Pulse Pal's trigger input detects reliably |
-| Custom trains | Pulse Pal 3: 4 trains of up to 10000 pulses. Pulse Pal 2: 2 trains of up to 5000. Pulse times are multiples of 100 µs |
+| Shortest pulse | 50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 (`info.min_pulse_width_us`), for the phase durations, the inter-pulse interval and the pulse train duration: the shortest pulse each one's trigger inputs detect reliably. A Pulse Pal 2, or a Pulse Pal 3 with firmware from before October 2026, can miss a 50 µs pulse |
+| Custom trains | Pulse Pal 3: 4 trains of up to 10000 pulses. Pulse Pal 2: 2 trains of up to 5000. Pulse times are multiples of the shortest pulse: 50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 |
 | Trigger channels | 2, TTL. Measured on a Pulse Pal 3, an output starts 58 to 108 µs after a trigger's rising edge, depending on where the edge falls in the device's 50 µs cycle |
 | Soft triggers | `trigger()` reaches the device over USB, which adds a variable delay. The channels it names start together, in the same 50 µs cycle |
 
@@ -300,7 +302,7 @@ its pulse width is the channel's `phase1_duration`. A custom waveform is a custo
 adjoining pulses, one per sample:
 
 ```python
-P.send_custom_pulse_train(1, [0, 0.1, 0.15, 0.5], [5, 5, 2.5, 5])  # times in multiples of 100 us
+P.send_custom_pulse_train(1, [0, 0.1, 0.15, 0.5], [5, 5, 2.5, 5])  # times in multiples of info.min_pulse_width_us
 P.custom_train_id[2] = 1
 P.phase1_duration[2] = 0.002
 
@@ -379,7 +381,8 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
   ends, whatever the train duration; one that loops stops at the train duration, and continuous
   loop mode does not change either. Each pass of a looping train starts as the last pulse of the
   pass before ends: the first pulse's time is not repeated as a gap. Custom pulse times must be
-  multiples of 100 µs: a time in between raises an error rather than being rounded. A train
+  multiples of the shortest pulse (50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2): a time in between
+  raises an error rather than being rounded. A train
   needs at least one pulse. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
   burst duration above 0: set `burst_duration` first, or both in a `batch()` block.
 - **Loading a custom train stops the channels playing it** (outside param sync mode), and their

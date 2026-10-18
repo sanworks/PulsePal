@@ -625,7 +625,7 @@ field = obj.ui.(['EditField_' ParamName]);
 paramName = [lower(ParamName(1)) ParamName(2:end)]; % 'Phase1Voltage' is held in params.phase1Voltage
 [low, high, label] = fieldRange(obj, ParamName);
 if ~(field.Value >= low && field.Value <= high)
-    errordlg([label ' must be in range ' num2str(low, 10) ' to ' num2str(high, 10) '.'])
+    errordlg([label ' must be in range ' formatNumber(low) ' to ' formatNumber(high) '.'])
     field.Value = obj.ui.params.(paramName)(chan);
     return
 end
@@ -987,6 +987,12 @@ labels = struct('RestingVoltage', 'Resting (V)', 'Phase1Voltage', 'Phase1 (V)', 
                 'InterPulseInterval', 'Pulse Interval', 'BurstDuration', 'Burst (s)', ...
                 'InterBurstInterval', 'Burst Interval', 'PulseTrainDuration', 'Train (s)', 'PulseTrainDelay', 'Train Delay');
 label = labels.(paramName);
+end
+
+function text = formatNumber(value)
+% A limit for a message, as the Python GUI shows it (_format_number()): no exponent, so Pulse Pal 3's 50 us minimum
+% reads 0.00005, not 5e-05
+text = regexprep(sprintf('%.6f', value), '\.?0+$', '');
 end
 
 function text = textAreaText(textArea)

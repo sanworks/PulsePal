@@ -40,6 +40,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   resumeTimerAfterSD()
 //   digitalWriteDirect()
 //   digitalReadDirect()
+//   setupTriggerEdgeLatches() (HW3 only)
+//   clearTriggerEdgeLatches() (HW3 only)
+//   triggerEdgeLatched() (HW3 only)
 //   readHardwareRevision()
 //   Software_Reset()
 
@@ -224,6 +227,7 @@ void startHardwareTimer() {
     NVIC_EnableIRQ(TC3_IRQn);
     TC_Start(TC1, 0);
   #else
+    clearTriggerEdgeLatches();
     hardwareTimer.begin(handler, TIMER_PERIOD);
     // dacWriteTimed() reads the timer's counter. IntervalTimer does not say which PIT channel it took, so find the
     // running channel loaded with this period.
@@ -296,6 +300,45 @@ byte digitalReadDirect(int pin){
 }
 
 #if (HARDWARE_VERSION > 2)
+  // handler() reads each trigger line once per cycle, and a pulse shorter than a cycle can come and go between two
+  // reads. A 1 cycle (50us) pulse from another Pulse Pal is one: it reached the trigger pin about 0.4us short of a cycle,
+  // so at some phases of the two devices' timers every pulse fell between reads, and a cycle that writes the DAC reads
+  // the lines DAC_LATCH_US late, so reads can be 57.5us apart. Measured on a Pulse Pal 3: 0.6% of 50us pulses missed
+  // with no channel playing, 9% with channels playing.
+  // So each trigger line's GPIO port also latches every edge on it, rising or falling, in its interrupt status register
+  // (ISR). The register latches whether or not the edge's interrupt is enabled, and here it is not: no interrupt runs.
+  // handler() reads and clears the latch each cycle (triggerEdgeLatched()), and sees any pulse longer than
+  // TRIGGER_CHATTER_NS, wherever it falls in the cycle. Call once from setup(), after pinMode().
+  FLASHMEM void setupTriggerEdgeLatches() {
+    for (int x = 0; x < 2; x++) {
+      triggerGPIO[x] = (IMXRT_GPIO_t *)portOutputRegister(TriggerLines[x]); // DR, the port's first register
+      triggerPinMask[x] = digitalPinToBitMask(TriggerLines[x]);
+      triggerGPIO[x]->IMR &= ~triggerPinMask[x]; // No interrupt
+      triggerGPIO[x]->EDGE_SEL |= triggerPinMask[x]; // Latch both edges. Without it, ICR's default latches while the line is low
+    }
+  }
+
+  // Forgets the edges latched so far. Called by handler() TRIGGER_CHATTER_NS after it reads the trigger lines (see
+  // there), and by startHardwareTimer(): edges that arrived while the timer was stopped (a comm failure's message) would
+  // otherwise reach handler() as a pulse in its first cycle.
+  static inline void clearTriggerEdgeLatches() {
+    for (int x = 0; x < 2; x++) {
+      triggerGPIO[x]->ISR = triggerPinMask[x]; // Write 1 to clear
+    }
+  }
+
+  // True if trigger line 0 or 1 changed since its latch was last cleared, and clears it. Call it after reading the
+  // line's level. The latch holds an edge a few ns before the level shows it (measured: never later), so an edge
+  // between the two reads is in this latch, or in neither read. Read before the level, the latch could miss an edge
+  // the level showed, and hold it at the next cycle: a pulse that had come and gone, to handler().
+  static inline bool triggerEdgeLatched(byte line) {
+    if (triggerGPIO[line]->ISR & triggerPinMask[line]) {
+      triggerGPIO[line]->ISR = triggerPinMask[line]; // Write 1 to clear
+      return true;
+    }
+    return false;
+  }
+
   // Reads the circuit board revision into hardwareRevision (op 100). The board encodes it in binary by grounding some
   // of the pins in pcbVersionMap: a grounded pin is a 1 bit, pcbVersionMap[0] the lowest, so a board that grounds none
   // reads 0. The Bpod state machine reads its board revision the same way. The pull-ups are on only for the read: the

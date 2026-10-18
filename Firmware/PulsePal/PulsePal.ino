@@ -107,12 +107,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = μs
                         // Limited by ~15μs analog read speed for joystick x/y and precision of the joystick UI (0.0000).
                         // On HW3 this may be reduced in the future with the ADC library for fast analog reads + UI mods
-#define MIN_PULSE_CYCLES 2 // Shortest phase, inter-pulse interval and train duration the joystick menu sets, in timer cycles
-                           // (100us). A trigger channel reads its input once per cycle, so a pulse from another Pulse Pal
-                           // must last 2 cycles to be detected reliably. The MATLAB, Python and C++ classes use the same limit.
+// Shortest phase, inter-pulse interval and train duration the joystick menu sets, in timer cycles. The MATLAB, Python and
+// C++ classes use the same limit, by hardware version. On Pulse Pal 2, 2 cycles (100us): its trigger channels read their
+// inputs once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads. Pulse Pal 3's trigger
+// channels also latch every edge (see setupTriggerEdgeLatches()), and detect 1 cycle (50us) pulses, so it plays them.
+#if (HARDWARE_VERSION == 2)
+  #define MIN_PULSE_CYCLES 2
+#else
+  #define MIN_PULSE_CYCLES 1
+#endif
 #define MAX_TIME_CYCLES 199999998 // Longest time the joystick menu sets, in timer cycles: 9999.9999s, the most its time editor
-                                  // holds (8 digits in 100us steps, 4 before the point). The MATLAB, Python and C++ classes
-                                  // use the same limit. Times sent over USB are not checked against it.
+                                  // holds on Pulse Pal 2 (8 digits in 100us steps, 4 before the point). The MATLAB, Python
+                                  // and C++ classes use the same limit. Times sent over USB are not checked against it.
 
 
 #define TriggerLevel 0  // Trigger line level configuration. This defines the logic level when the trigger is activated.
@@ -324,6 +330,8 @@ enum TriggerEventValue {
   LiquidCrystal_U8G2 lcd(u8g2);
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
   IMXRT_PIT_CHANNEL_t *hardwareTimerChannel = nullptr; // The PIT channel hardwareTimer uses, found by startHardwareTimer()
+  IMXRT_GPIO_t *triggerGPIO[2] = {nullptr, nullptr}; // The GPIO ports of the trigger lines, and their bits, for the
+  uint32_t triggerPinMask[2] = {0, 0};               // edge latches handler() reads (see setupTriggerEdgeLatches())
   #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
   #define CURSOR_BLINK_CYCLES 10000 // Joystick menu loop iterations between cursor blinks while editing a value
@@ -332,6 +340,7 @@ enum TriggerEventValue {
   #define DAC_CHANNEL_WRITE_US 1.3 // Longest SPI write of one DAC channel (1.13us measured)
   #define DAC_LATCH_GAP_US 1.5 // Time from the last write to the latch. The DAC updates at once only some time after a write
   #define DAC_LATCH_US 7.5 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap
+  #define TRIGGER_CHATTER_NS 500 // Edges latched this soon after handler() reads the trigger lines are dropped (see handler())
   #define SCREEN_BRIGHTNESS 128 // Brightness of the oLED display (u8g2 contrast, 0-255). Use 128 max because:
                                 // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
   #define SCREEN_SAVER_DIM_BRIGHTNESS 8 // Brightness while the screen saver dims the screen
@@ -776,6 +785,9 @@ void setup() {
 
   write2Screen(CommanderString," Click for menu");
   DefaultInputLevel = 1 - TriggerLevel;
+  #if (HARDWARE_VERSION > 2)
+    setupTriggerEdgeLatches(); // startHardwareTimer() clears them, after this pre-read, as handler() does after its read
+  #endif
   InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); // Pre-read trigger channels
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;

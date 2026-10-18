@@ -90,13 +90,15 @@ public:
     bool setPhase1Voltage(uint8_t channel, float voltage);
     bool setPhase2Voltage(uint8_t channel, float voltage);
     bool setRestingVoltage(uint8_t channel, float voltage);
-    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 9999.9999
+    // Phase durations, the inter-pulse interval and the train duration are at least 0.00005 s (one timer cycle) on
+    // Pulse Pal 3, and 0.0001 s on Pulse Pal 2, whose trigger channels read their inputs once per cycle
+    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
     bool setInterPhaseInterval(uint8_t channel, float timeInSeconds);  // 0 to 9999.9999
-    bool setPhase2Duration(uint8_t channel, float timeInSeconds);      // 0.0001 to 9999.9999
-    bool setInterPulseInterval(uint8_t channel, float timeInSeconds);  // 0.0001 to 9999.9999
+    bool setPhase2Duration(uint8_t channel, float timeInSeconds);      // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
+    bool setInterPulseInterval(uint8_t channel, float timeInSeconds);  // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
     bool setBurstDuration(uint8_t channel, float timeInSeconds);       // 0 to 9999.9999. 0 = no bursts
     bool setBurstInterval(uint8_t channel, float timeInSeconds);       // 0 to 9999.9999
-    bool setPulseTrainDuration(uint8_t channel, float timeInSeconds);  // 0.0001 to 9999.9999
+    bool setPulseTrainDuration(uint8_t channel, float timeInSeconds);  // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
     bool setPulseTrainDelay(uint8_t channel, float timeInSeconds);     // 0 to 9999.9999
     bool setTrigger1Link(uint8_t channel, uint8_t link_state); // 1: trigger channel 1 starts this output channel
     bool setTrigger2Link(uint8_t channel, uint8_t link_state);
@@ -117,8 +119,8 @@ public:
     bool syncAllParams();
 
     // Upload a custom pulse train. ID is 1-2 on Pulse Pal 2, or 1-4 on Pulse Pal 3. customPulseTimes are pulse onset
-    // times in seconds from the start of the train: increasing, each a multiple of 100 us (two timer cycles, the
-    // shortest pulse a trigger channel detects reliably), up to 9999.9999 s. customVoltages are in volts, -10 to 10.
+    // times in seconds from the start of the train: increasing, each a multiple of the shortest phase (50 us on Pulse
+    // Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s. customVoltages are in volts, -10 to 10.
     // nPulses is 1 to 5000 on Pulse Pal 2, or 1 to 10000 on Pulse Pal 3. Set an output channel's custom train ID to play
     // the train there. A biphasic pulse always plays whole, and a pulse whose time comes while it plays is dropped, so
     // that every pulse played is on time.
@@ -215,6 +217,7 @@ private:
     bool checkParam(uint8_t paramCode, float value, int channel, const char* context);
     bool checkCustomBursts(int channel, int customTrainTarget, float burstDuration, const char* context);
     uint32_t encodeParam(uint8_t paramCode, float value);
+    double minPulseTime();
     uint32_t timeToCycles(float timeInSeconds);
     uint16_t voltageToInt16(float voltage);
     bool checkConnected(const char* context);

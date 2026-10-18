@@ -54,8 +54,6 @@ static const std::chrono::milliseconds HandshakeMaxTime(1000);
 
 // Parameter ranges, as in the MATLAB and Python classes
 static const double MaxVoltage = 10;         // Volts. Voltages are -MaxVoltage to +MaxVoltage
-static const double MinPulseTime = 0.0001;   // Seconds. For phase durations, inter-pulse interval and train duration,
-                                             // and the step of custom pulse times
 static const double MaxTime = 9999.9999;     // Seconds: the longest time the joystick menu shows and edits
 static const uint16_t DACMax = 65535;        // DAC code for +10V. 0 is -10V
 static const uint8_t TriggerModeParamSync = 3; // Pulse Pal 3 only
@@ -737,7 +735,8 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
 
     // Check and convert every pulse before sending anything
     std::vector<uint32_t> pulseCycles(nPulses);
-    uint32_t minSpacing = (uint32_t)roundHalfEven(MinPulseTime * cycleFrequency); // 2 cycles
+    double minTime = minPulseTime();
+    uint32_t minSpacing = (uint32_t)roundHalfEven(minTime * cycleFrequency); // 1 cycle on Pulse Pal 3, 2 on Pulse Pal 2
     for (int i = 0; i < nPulses; i++) {
         float pulseTime = customPulseTimes[i];
         if (!((pulseTime >= 0) && (pulseTime <= MaxTime))) { // Written this way to also reject NaN
@@ -745,16 +744,16 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
             reportError(error.str());
             return false;
         }
-        // Each time is a multiple of MinPulseTime (100 us), as in the MATLAB and Python classes: a time between two
+        // Each time is a multiple of minPulseTime(), as in the MATLAB and Python classes: a time between two
         // steps is refused, not rounded. A float holds a time only to within half its last bit (30 us at 1000 s), so
         // a time that near a step counts as that step.
-        double steps = (double)pulseTime / MinPulseTime;
+        double steps = (double)pulseTime / minTime;
         double nearestStep = roundHalfEven(steps);
         double halfBit = ((double)std::nextafter(pulseTime, 2 * pulseTime + 1) - pulseTime) / 2;
         double tolerance = (halfBit > 0.5e-6) ? halfBit : 0.5e-6; // And at least half a microsecond, as in MATLAB and Python
-        if (std::fabs(steps - nearestStep) * MinPulseTime > tolerance) {
+        if (std::fabs(steps - nearestStep) * minTime > tolerance) {
             error << "pulse " << (i + 1) << " is at " << pulseTime << " s. Custom pulse times must be multiples of "
-                  << (MinPulseTime * 1000000.0) << " us.";
+                  << (minTime * 1000000.0) << " us.";
             reportError(error.str());
             return false;
         }
@@ -762,8 +761,8 @@ bool PulsePal::sendCustomPulseTrain(uint8_t ID, uint16_t nPulses, const float cu
         // The device plays each pulse until the next one's time, so a time that is not later than the one before it
         // would freeze the output for the rest of the train
         if ((i > 0) && (pulseCycles[i] < pulseCycles[i - 1] + minSpacing)) {
-            error << "pulse times must increase, by at least " << (MinPulseTime * 1000000.0) << " us ("
-                  << minSpacing << " timer cycles). "
+            error << "pulse times must increase, by at least " << (minTime * 1000000.0) << " us ("
+                  << minSpacing << ((minSpacing == 1) ? " timer cycle). " : " timer cycles). ")
                   << "Pulse " << (i + 1) << " is at " << pulseTime << " s, and pulse " << i << " is at "
                   << customPulseTimes[i - 1] << " s.";
             reportError(error.str());
@@ -942,7 +941,7 @@ bool PulsePal::checkParam(uint8_t paramCode, float value, int channel, const cha
     } else if (isTimeParam(paramCode)) {
         bool isMinPulseTime = (paramCode == PARAM_PHASE1_DURATION) || (paramCode == PARAM_PHASE2_DURATION)
                               || (paramCode == PARAM_INTER_PULSE_INTERVAL) || (paramCode == PARAM_PULSE_TRAIN_DURATION);
-        double minTime = isMinPulseTime ? MinPulseTime : 0;
+        double minTime = isMinPulseTime ? minPulseTime() : 0;
         if (std::isfinite(value)) {
             // Compared in timer cycles, as the device will receive it, so that float rounding cannot reject 0.0001
             double cycles = roundHalfEven((double)value * cycleFrequency);
@@ -980,6 +979,15 @@ uint32_t PulsePal::encodeParam(uint8_t paramCode, float value)
 }
 
 // Seconds to hardware timer cycles, rounded to the nearest cycle. The value must already be checked.
+// The shortest phase duration, inter-pulse interval and train duration, in seconds, and the step of custom pulse times,
+// as in the MATLAB and Python classes (info.minPulseWidth_us, min_pulse_width_us) and the joystick menu. One timer
+// cycle (50 us) on Pulse Pal 3, whose trigger channels latch every edge, and two (100 us) on Pulse Pal 2, whose trigger
+// channels read their inputs once per cycle, so that a one cycle pulse could fall between two reads.
+double PulsePal::minPulseTime()
+{
+    return ((hardwareVersion > 2) ? 1 : 2) / cycleFrequency;
+}
+
 uint32_t PulsePal::timeToCycles(float timeInSeconds)
 {
     return (uint32_t)roundHalfEven((double)timeInSeconds * cycleFrequency);

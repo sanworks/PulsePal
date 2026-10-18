@@ -29,8 +29,9 @@
 % Units and values. Voltages are in volts, -10 to 10. Times are in seconds, from 0 to 9999.9999 (info.maxTime, the
 % longest time the device's screen shows), rounded to the nearest cycle of the device's timer (50 us); the property
 % then holds the time the device plays, so 0.00012 reads back as 0.0001. Phase durations, the inter-pulse interval and
-% the pulse train duration are at least 100 us (info.minPulseWidth_us): the shortest pulse that another Pulse Pal's
-% trigger channel detects reliably. Custom pulse times are not rounded: each must be a multiple of 100 us. On/off
+% the pulse train duration are at least info.minPulseWidth_us: 50 us on Pulse Pal 3 and 100 us on Pulse Pal 2, the
+% shortest pulse that each one's trigger channels detect reliably. Custom pulse times are not rounded: each must be a
+% multiple of info.minPulseWidth_us. On/off
 % parameters are logical (true or false; 1 and 0 work too), and modes are names, such as 'Gated' (not case sensitive;
 % the numbers older Pulse Pal software used work too). A value out of range raises an error, and nothing is sent.
 %
@@ -353,7 +354,15 @@ classdef PulsePalDevice < handle
                 obj.info.nCustomPulseTrains = obj.nCustomPulseTrains;
                 obj.info.cycleFrequency = obj.cycleFrequency;
                 obj.info.cyclePeriod_us = obj.cyclePeriod;
-                obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
+                % Shortest phase, inter-pulse interval and train duration, and the step of custom pulse times, as in
+                % the Python and C++ classes and the joystick menu: 1 timer cycle on Pulse Pal 3, whose trigger
+                % channels latch every edge, and 2 on Pulse Pal 2, whose trigger channels read their inputs once per
+                % cycle, so that a 1 cycle pulse could fall between two reads
+                if obj.hardwareVersion > 2
+                    obj.info.minPulseWidth_us = obj.cyclePeriod;
+                else
+                    obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
+                end
                 obj.info.maxTime = obj.MaxTime;
             elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
                 wavePalVersion = replyVersion;
@@ -534,8 +543,8 @@ classdef PulsePalDevice < handle
         function sendCustomPulseTrain(obj, customTrainID, pulseTimes, voltages)
             % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
             % customTrainID: the train's number, 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
-            % pulseTimes: in seconds from the start of the train, increasing, in multiples of 100 us
-            %             (info.minPulseWidth_us), up to 9999.9999 s (info.maxTime).
+            % pulseTimes: in seconds from the start of the train, increasing, in multiples of info.minPulseWidth_us
+            %             (50 us on Pulse Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s (info.maxTime).
             % voltages: one per pulse, in volts, -10 to 10.
             % An output channel plays the train when its customTrainID property is set to the train's number. Each
             % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
@@ -554,7 +563,8 @@ classdef PulsePalDevice < handle
 
         function sendCustomWaveform(obj, customTrainID, samplingPeriod, voltages)
             % Loads a sampled waveform onto the device, as a custom pulse train of adjoining pulses: one per sample,
-            % samplingPeriod seconds apart (a multiple of 100 us). Set phase1Duration to samplingPeriod on the output
+            % samplingPeriod seconds apart (a multiple of info.minPulseWidth_us: 50 us on Pulse Pal 3, 100 us on Pulse
+            % Pal 2). Set phase1Duration to samplingPeriod on the output
             % channel that plays it, so that each sample lasts until the next. customTrainID: the train's number, 1-4
             % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10. It is loaded as a custom train is:
             % see sendCustomPulseTrain() for what happens to channels playing it, and in param sync mode.
@@ -562,8 +572,8 @@ classdef PulsePalDevice < handle
             if ~isnumeric(samplingPeriod) || ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
             end
-            if rem(obj.roundHalfEven(double(samplingPeriod)*1000000), obj.cyclePeriod*2) > 0
-                error(['Error: sampling period must be a multiple of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
+            if rem(obj.roundHalfEven(double(samplingPeriod)*1000000), obj.info.minPulseWidth_us) > 0
+                error(['Error: sampling period must be a multiple of ' num2str(obj.info.minPulseWidth_us) ' microseconds.']);
             end
             pulseTimes = (0:nVoltages-1)*double(samplingPeriod); % One per sample
             sendCustomTrain(obj, customTrainID, pulseTimes, voltages);
@@ -988,11 +998,11 @@ classdef PulsePalDevice < handle
                     deviceValues = value;
                 otherwise % 'Time' and 'PulseTime'
                     % Checked in whole timer cycles, as the device receives it: [100 100 100 100]*1e-6 is
-                    % 9.999999999999999e-05 in floating point, under the 0.0001 minimum, but is exactly 2 cycles.
+                    % 9.999999999999999e-05 in floating point, under Pulse Pal 2's 0.0001 s minimum, but is exactly 2 cycles.
                     deviceValues = obj.roundHalfEven(value*obj.cycleFrequency);
                     lowestCycles = 0;
                     if strcmp(obj.ParamKinds{paramCode}, 'PulseTime')
-                        lowestCycles = 2;
+                        lowestCycles = obj.info.minPulseWidth_us/obj.cyclePeriod;
                     end
                     if any(deviceValues < lowestCycles) || any(deviceValues > obj.maxTimeCycles())
                         error([name ' was out of range: ' num2str(lowestCycles/obj.cycleFrequency) ' to '...
@@ -1256,11 +1266,12 @@ classdef PulsePalDevice < handle
                     num2str(obj.info.hardwareVersion) ' can only store '...
                     num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
-            % Times are refused, not rounded, between two steps of info.minPulseWidth_us (100 us), as in the Python
-            % class, so that a train plays as written. Checked to the nearest microsecond.
+            % Times are refused, not rounded, between two steps of info.minPulseWidth_us (50 us on Pulse Pal 3, 100 us
+            % on Pulse Pal 2), as in the Python class, so that a train plays as written. Checked to the nearest
+            % microsecond.
             microseconds = obj.roundHalfEven(double(pulseTimes(:)')*1000000);
-            if any(rem(microseconds, obj.cyclePeriod*2) ~= 0)
-                error(['Custom pulse times must be multiples of ' num2str(obj.cyclePeriod*2) ' microseconds.']);
+            if any(rem(microseconds, obj.info.minPulseWidth_us) ~= 0)
+                error(['Custom pulse times must be multiples of ' num2str(obj.info.minPulseWidth_us) ' microseconds.']);
             end
             if any(microseconds < 0)
                 error('Error: Custom pulse times must be positive');

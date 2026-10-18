@@ -30,7 +30,7 @@ function testPulsePalDeviceOffline()
 tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testALateReplyIsSkipped, ...
     @testOtherFirmwareVersionsWarn, ...
     @testDefaultParametersMessage, @testSingleValuesAreRefused, @testAssignmentsSendTheChannelsTheyChange, ...
-    @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testCustomPulseTimesAreMultiplesOf100us, ...
+    @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testMinimumPulseByHardwareVersion, @testCustomPulseTimesAreMultiplesOfTheMinimumPulse, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
     @testCustomBurstsNeedABurstDuration, @testAnEmptyCustomTrainIsRefused, @testANoReplyMentionsACommFailure, ...
     @testExportAndImportParams, @testProgramFiles, @testSyncFromDeviceStoresWhatTheDeviceHolds, ...
@@ -69,7 +69,7 @@ assert(isequal(fieldnames(P.info)', {'outputParameterNames', 'triggerModes', ...
     'info fields');
 assert(P.info.hardwareVersion == 3 && P.info.circuitBoardRevision == 5, 'hardware revision');
 assert(isequal(P.info.serialNumber, '20345420'), 'USB serial number');
-assert(P.info.maxTime == 9999.9999 && P.info.minPulseWidth_us == 100, 'info limits');
+assert(P.info.maxTime == 9999.9999 && P.info.minPulseWidth_us == 50, 'info limits');
 assert(isequal(P.phase1Voltage, [5 5 5 5]) && isequal(P.triggerMode, {'Normal', 'Normal'}), 'default values');
 delete(P);
 assert(isequal(port.writes{end}, uint8([213 81])), 'disconnecting did not send op 81');
@@ -179,22 +179,63 @@ expectError(@() setProperty(P, 'pulseTrainDelay', [9999.99995 0 0 0])); % 199999
 assert(isscalar(port.writes), 'a refused time was sent');
 end
 
-function testCustomPulseTimesAreMultiplesOf100us()
-% As in the Python class: a custom pulse time between two 100 us steps is refused, not rounded
+function testMinimumPulseByHardwareVersion()
+% As in the Python class and the joystick menu: phases, the inter-pulse interval and the train duration last at least
+% 1 timer cycle (50 us) on Pulse Pal 3, whose trigger channels latch every edge, and 2 (100 us) on Pulse Pal 2, whose
+% trigger channels read their inputs once per cycle. Times of 0 still mean "off" where they did.
+names = {'phase1Duration', 'phase2Duration', 'interPulseInterval', 'pulseTrainDuration'};
+[P, port] = connect(2, 22);
+assert(P.info.minPulseWidth_us == 100, 'Pulse Pal 2 minimum');
+for i = 1:numel(names)
+    expectError(@() setProperty(P, names{i}, [0.00005 0.001 0.001 0.001]));
+end
+assert(isempty(port.writes), 'a refused time was sent');
+P.burstDuration(1) = 0.00005; % Times that may be 0 are not limited
+assert(isequal(port.writes{1}, uint8([213 74 8 1 typecast(uint32(1), 'uint8')])), 'Pulse Pal 2 burst duration');
 [P, port] = connect();
+for i = 1:numel(names)
+    values = P.(names{i});
+    values(3) = 0.00005;
+    P.(names{i}) = values;
+    assert(P.(names{i})(3) == 0.00005, '%s holds 50 us', names{i});
+    expectError(@() setProperty(P, names{i}, [0 0.001 0.001 0.001]));
+end
+assert(isequal(port.writes{1}, uint8([213 74 4 3 typecast(uint32(1), 'uint8')])), 'Pulse Pal 3 phase 1 of 1 cycle');
+assert(numel(port.writes) == numel(names), 'a refused time was sent');
+end
+
+function testCustomPulseTimesAreMultiplesOfTheMinimumPulse()
+% As in the Python class: a custom pulse time between two steps of info.minPulseWidth_us (100 us on Pulse Pal 2, 50 us
+% on Pulse Pal 3) is refused, not rounded
+[P, port] = connect(2, 22);
 expectError(@() P.sendCustomPulseTrain(1, [0 0.00012], [1 2]));
 expectError(@() P.sendCustomPulseTrain(1, [0 0.00005], [1 2])); % One 50 us cycle
 expectError(@() P.sendCustomPulseTrain(1, [0 0.2 0.2], [1 2 3])); % Times must increase
 expectError(@() P.sendCustomPulseTrain(1, [0 10000], [1 2]));
 expectError(@() P.sendCustomWaveform(1, 0.00015, [1 2 3]));
-expectError(@() P.sendCustomWaveform(1, 1, ones(1,10001))); % The last sample would start at 10000 s
+expectError(@() P.sendCustomWaveform(1, 1, ones(1,5001))); % More samples than Pulse Pal 2 holds
 assert(isempty(port.writes), 'a refused train was sent');
 P.sendCustomPulseTrain(1, (0:4)*0.0001 + 0.0003, 1:5); % Floating point error in the times is fine
 P.sendCustomPulseTrain(2, [0 9999.9999], [1 2]);
-P.sendCustomWaveform(3, 0.0002, [1 2 3]);
+P.sendCustomWaveform(1, 0.0002, [1 2 3]);
 assert(isequal(port.writes{1}(1:27), uint8([213 95 0 typecast(uint32([5 6 8 10 12 14]), 'uint8')])), 'train 1');
 assert(isequal(port.writes{2}(1:15), uint8([213 95 1 typecast(uint32([2 0 199999998]), 'uint8')])), 'train 2');
-assert(isequal(port.writes{3}(1:19), uint8([213 95 2 typecast(uint32([3 0 4 8]), 'uint8')])), 'train 3');
+assert(isequal(port.writes{3}(1:19), uint8([213 95 0 typecast(uint32([3 0 4 8]), 'uint8')])), 'waveform');
+
+[P, port] = connect();
+expectError(@() P.sendCustomPulseTrain(1, [0 0.00012], [1 2]));
+expectError(@() P.sendCustomPulseTrain(1, [0 0.000075], [1 2]));
+expectError(@() P.sendCustomPulseTrain(1, [0 0.2 0.2], [1 2 3])); % Times must increase
+expectError(@() P.sendCustomPulseTrain(1, [0 10000], [1 2]));
+expectError(@() P.sendCustomWaveform(1, 0.000025, [1 2 3]));
+expectError(@() P.sendCustomWaveform(1, 1, ones(1,10001))); % The last sample would start at 10000 s
+assert(isempty(port.writes), 'a refused train was sent');
+P.sendCustomPulseTrain(1, (0:4)*0.00005 + 0.00015, 1:5); % Floating point error in the times is fine
+P.sendCustomPulseTrain(2, [0 9999.99985], [1 2]);
+P.sendCustomWaveform(3, 0.00005, [1 2 3]);
+assert(isequal(port.writes{1}(1:27), uint8([213 95 0 typecast(uint32([5 3 4 5 6 7]), 'uint8')])), 'train 1');
+assert(isequal(port.writes{2}(1:15), uint8([213 95 1 typecast(uint32([2 0 199999997]), 'uint8')])), 'train 2');
+assert(isequal(port.writes{3}(1:19), uint8([213 95 2 typecast(uint32([3 0 1 2]), 'uint8')])), 'train 3');
 end
 
 function testSettingsFiles()
@@ -375,8 +416,9 @@ expectError(@() P.saveProgramToFile('Program.mat'));
 end
 
 function testSyncFromDeviceStoresWhatTheDeviceHolds()
-% The device can hold values an assignment would refuse, set by an older client. They are read back as they are.
-[P, port] = connect();
+% The device can hold values an assignment would refuse, set by an older client. They are read back as they are. On
+% Pulse Pal 2, whose shortest phase an assignment sets is 2 cycles.
+[P, port] = connect(2, 22);
 params = port.lastParams;
 params(1:4) = typecast(uint32(1), 'uint8'); % phase1Duration on channel 1: one cycle
 params(65:68) = typecast(uint32(300000000), 'uint8'); % burstDuration on channel 1: 15000 s
