@@ -62,12 +62,15 @@ def main():
             P._read_raw(10)
         report("op 94 hardware info (round trip)", timed(hardware_info, arguments.repeats))
 
-        # One parameter on one channel (op 74, which the class uses on firmware v21 only), and on all
-        # four, as an assignment sends it (op 91)
+        # One parameter on one channel (op 74), and on all four, as an assignment that changes all four
+        # sends it (op 91). An assignment that changes nothing sends nothing, so the voltage alternates.
         report("one parameter, 1 channel (op 74)",
                timed(lambda: P._send_output_param_to_channel(2, 1, 5.0, "op 74"), arguments.repeats))
-        report("assignment, 4 channels (op 91)",
-               timed(lambda: P.phase1_voltage.__setitem__(1, 5), arguments.repeats))
+
+        def assign_four_channels():
+            P.phase1_voltage[1:5] = [9 - P.phase1_voltage[1]] * 4  # 5 V, 4 V, 5 V, ...
+        report("assignment, 4 channels (op 91)", timed(assign_four_channels, arguments.repeats))
+        P.phase1_voltage[1:5] = [5] * 4
 
         # Whole parameter set in each direction
         report("sync_to_device (op 92)", timed(P.sync_to_device, arguments.repeats), payload_bytes=178)
