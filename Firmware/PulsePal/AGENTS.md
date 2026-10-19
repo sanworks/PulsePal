@@ -182,7 +182,12 @@ the `--show` output before concluding that a function really changed.
 Pal 3, `IntervalTimer` calls it directly. On Pulse Pal 2 the timer interrupt has a higher
 priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copied received bytes
 one at a time, and at equal priority it made the timer lose cycles. ArCOM now receives them in
-`loop()` instead (rule 7). It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
+`loop()` instead (rule 7). On Pulse Pal 3 the timer interrupt's priority (64) is above the USB
+interrupt's (128, the Teensy core's default): at equal priority a USB interrupt running at a timer
+tick delayed `handler()` by up to 5.5 µs, and outputs changed up to 2 µs late while the PC opened
+the port or used the microSD card. USB loses nothing by waiting (DMA transfers, and the controller
+holds off the PC until a buffer is queued); `handler()` ran for 9.9 µs at most, with all four
+outputs changing every cycle and param sync edges arriving. It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
 `dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`),

@@ -544,6 +544,12 @@ void handleTriggerLine(byte triggerChannel, boolean isActive) {
   if (isActive == triggerLineActive[triggerChannel]) {
     // The level is the same as after the last edge, so it changed twice before this interrupt ran: a pulse (or a gap)
     // shorter than the interrupt latency. Handle the edge that was missed first.
+    // Chatter from the trigger opto-isolator does not come here: it can switch more than once within 0.07us of an edge
+    // (measured after 0.3% of rising TTL edges), and the switches stay latched until attachInterrupt()'s handler
+    // (irq_gpio6789() in the Teensy core) clears the latch, about 0.15us after the edge, since it checks GPIO6-8 before
+    // the trigger pins' GPIO9. So they raise one interrupt. Measured on a Pulse Pal 3: no spurious edge in 6 million,
+    // idle and playing. A faster path to this function, such as an interrupt vector of its own, would need to drop the
+    // edges latched soon after its read, as Pulse Pal firmware's handler() does (TRIGGER_CHATTER_NS).
     triggerLineActive[triggerChannel] = !isActive;
     processTriggerEdge(triggerChannel, !isActive);
   }

@@ -228,6 +228,15 @@ void startHardwareTimer() {
     TC_Start(TC1, 0);
   #else
     clearTriggerEdgeLatches();
+    // The timer interrupt must be able to preempt the USB interrupt (lower numbers are higher priorities). The Teensy
+    // core starts every interrupt at priority 128, the timer's and USB's included, so a USB interrupt running at a
+    // timer tick held handler() back until it returned: up to 5.5us while the PC opened the port, and dacWriteTimed()
+    // then finished its writes, and the outputs changed, up to 2us late. USB loses nothing by waiting: its transfers
+    // are DMA, and the controller holds off the PC until the interrupt has queued the next buffer. A USB interrupt
+    // already waited for handler() whenever the tick came first: 9.9us at most, measured with all four outputs
+    // changing every cycle and param sync edges arriving. 64 is also above SdFat's microSD interrupt (96), which
+    // FIFO_SDIO uses only in sd.begin(). The core's SysTick (32) stays above it.
+    hardwareTimer.priority(64);
     hardwareTimer.begin(handler, TIMER_PERIOD);
     // dacWriteTimed() reads the timer's counter. IntervalTimer does not say which PIT channel it took, so find the
     // running channel loaded with this period.
