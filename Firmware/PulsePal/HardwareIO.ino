@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   dacLoad()
 //   dacLatch()
 //   dacWrite()
+//   advanceTickCycles() (HW3 only)
 //   timerCountsSinceTick()
 //   waitForTimerCount()
 //   dacWriteTimed()
@@ -97,34 +98,59 @@ void dacWrite() {
   dacLatch();
 }
 
-#if (HARDWARE_VERSION > 2)
+#if (HARDWARE_VERSION == 2)
+  #define DAC_TIMING_COUNTS_PER_US TIMER_COUNTS_PER_US // dacWriteTimed() reads the timer's own counter
+#else
   static const uint32_t HARDWARE_TIMER_LOAD = (TIMER_PERIOD * TIMER_COUNTS_PER_US) - 1; // IntervalTimer's PIT load value
+  static const uint32_t CPU_CYCLES_PER_TIMER_PERIOD = TIMER_PERIOD * CPU_CYCLES_PER_US; // 30000 at 600MHz
+  static_assert(F_CPU % 1000000 == 0, "A timer cycle must be a whole number of CPU cycles");
+  #define DAC_TIMING_COUNTS_PER_US CPU_CYCLES_PER_US // dacWriteTimed() counts CPU cycles (see timerCountsSinceTick())
+
+  // Called by handler() as it starts: moves tickCycles on to the tick that began this cycle. The CPU's clock and the
+  // PIT's come from the same crystal, and a timer cycle is exactly CPU_CYCLES_PER_TIMER_PERIOD CPU cycles, so each tick
+  // comes that many cycles after the one before, and this needs no read of the timer. A tick that comes while
+  // interrupts are off for longer than a cycle (an EEPROM write, rule 10 in AGENTS.md) does not run handler() again,
+  // so handler() then finds more than a cycle passed since tickCycles, and moves on to the last tick.
+  static inline void advanceTickCycles() {
+    tickCycles += CPU_CYCLES_PER_TIMER_PERIOD;
+    int32_t cyclesSinceTick = (int32_t)(ARM_DWT_CYCCNT - tickCycles);
+    if (cyclesSinceTick >= (int32_t)CPU_CYCLES_PER_TIMER_PERIOD) { // Ticks were missed
+      tickCycles += (cyclesSinceTick / CPU_CYCLES_PER_TIMER_PERIOD) * CPU_CYCLES_PER_TIMER_PERIOD;
+    }
+  }
 #endif
 
-// Timer counts (TIMER_COUNTS_PER_US per microsecond) since the current cycle's timer tick
+// Counts since the current cycle's timer tick, of the clock dacWriteTimed() is timed with (DAC_TIMING_COUNTS_PER_US per
+// microsecond). Pulse Pal 2 reads the timer's own counter. Pulse Pal 3 reads the CPU's cycle counter, from tickCycles,
+// its count at the tick (see advanceTickCycles()): its PIT counts at 24MHz (41.7ns per count), and each read of the PIT
+// takes about 0.1us, longer while USB transfers use the bus. Waits that polled the PIT ended up to a read after their
+// count, so an edge moved by about 40ns when other channels changed in the same cycle (their writes moved the reads),
+// and by up to 80ns while the PC sent commands. The cycle counter counts at 600MHz and takes about one cycle to read.
 static inline uint32_t timerCountsSinceTick() {
   #if (HARDWARE_VERSION == 2)
     return TC1->TC_CHANNEL[0].TC_CV; // Counts up from 0 at each tick (see startHardwareTimer())
   #else
-    // The PIT counts down from its load value, and ticks at 0. One register read: each takes about 0.1us, and reading
-    // LDVAL too made the waits end up to 0.2us after their count.
-    return HARDWARE_TIMER_LOAD - hardwareTimerChannel->CVAL;
+    return ARM_DWT_CYCCNT - tickCycles;
   #endif
 }
 
-// Waits until the timer has counted to count since the tick. Stops waiting if the next cycle starts first.
+// Waits until count since the tick
 static inline void waitForTimerCount(uint32_t count) {
-  uint32_t last = timerCountsSinceTick();
-  while (last < count) {
-    uint32_t now = timerCountsSinceTick();
-    if (now < last) {break;} // The next tick came: the counter restarted
-    last = now;
-  }
+  #if (HARDWARE_VERSION == 2)
+    uint32_t last = timerCountsSinceTick();
+    while (last < count) {
+      uint32_t now = timerCountsSinceTick();
+      if (now < last) {break;} // The next tick came: the counter restarted. Stop waiting
+      last = now;
+    }
+  #else
+    while (timerCountsSinceTick() < count) {} // Only handler() moves tickCycles on, so the count never restarts here
+  #endif
 }
 
-static const uint32_t DAC_LATCH_COUNT = DAC_LATCH_US * TIMER_COUNTS_PER_US;
-static const uint32_t DAC_CHANNEL_WRITE_COUNT = DAC_CHANNEL_WRITE_US * TIMER_COUNTS_PER_US;
-static const uint32_t DAC_LATCH_GAP_COUNT = DAC_LATCH_GAP_US * TIMER_COUNTS_PER_US;
+static const uint32_t DAC_LATCH_COUNT = DAC_LATCH_US * DAC_TIMING_COUNTS_PER_US;
+static const uint32_t DAC_CHANNEL_WRITE_COUNT = DAC_CHANNEL_WRITE_US * DAC_TIMING_COUNTS_PER_US;
+static const uint32_t DAC_LATCH_GAP_COUNT = DAC_LATCH_GAP_US * DAC_TIMING_COUNTS_PER_US;
 static_assert(DAC_LATCH_US >= (4 * DAC_CHANNEL_WRITE_US) + DAC_LATCH_GAP_US, "DAC_LATCH_US must allow 4 channel writes and the gap");
 
 // handler()'s DAC write. The outputs change DAC_LATCH_US after the timer tick, however many channels changed.
@@ -238,14 +264,25 @@ void startHardwareTimer() {
     // FIFO_SDIO uses only in sd.begin(). The core's SysTick (32) stays above it.
     hardwareTimer.priority(64);
     hardwareTimer.begin(handler, TIMER_PERIOD);
-    // dacWriteTimed() reads the timer's counter. IntervalTimer does not say which PIT channel it took, so find the
-    // running channel loaded with this period.
+    // dacWriteTimed() needs the timer's counter, to find when it ticked (below). IntervalTimer does not say which PIT
+    // channel it took, so find the running channel loaded with this period.
     hardwareTimerChannel = nullptr;
     for (int i = 0; i < 4; i++) {
       if ((IMXRT_PIT_CHANNELS[i].TCTRL & PIT_TCTRL_TEN) && (IMXRT_PIT_CHANNELS[i].LDVAL == HARDWARE_TIMER_LOAD)) {
         hardwareTimerChannel = &IMXRT_PIT_CHANNELS[i];
         break;
       }
+    }
+    // tickCycles starts at the last tick the counter passed (its start, or a tick since), as the time of one register
+    // read places it, and advanceTickCycles() moves it on by whole cycles: so the outputs change at a constant time after
+    // the tick until the timer is started again. Interrupts are off so that handler() cannot run between the reads and
+    // the write.
+    if (hardwareTimerChannel != nullptr) {
+      noInterrupts();
+      uint32_t cycles = ARM_DWT_CYCCNT;
+      uint32_t countsSinceTick = HARDWARE_TIMER_LOAD - hardwareTimerChannel->CVAL; // The PIT counts down, and ticks at 0
+      tickCycles = cycles - ((countsSinceTick * CPU_CYCLES_PER_US) / TIMER_COUNTS_PER_US);
+      interrupts();
     }
   #endif
 }

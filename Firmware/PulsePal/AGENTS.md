@@ -73,7 +73,10 @@ the `--show` output before concluding that a function really changed.
 
    Outputs change `DAC_LATCH_US` after the timer tick (7.5 µs on Pulse Pal 3, 21 µs on Pulse
    Pal 2). `dacWriteTimed()` waits, writes the changed channels, and latches them together at
-   that time, reading the timer's own counter. Writing and latching straight away delayed each
+   that time. Pulse Pal 2 times it with the timer's own counter. Pulse Pal 3 counts CPU cycles
+   from the tick (`advanceTickCycles()`): polling its timer's counter, each read about 0.1 µs,
+   moved edges by 40 ns when other channels changed and up to 80 ns under USB traffic.
+   Writing and latching straight away delayed each
    update by 1.13 µs (Pulse Pal 3) or 3.7 µs (Pulse Pal 2) per channel written in that cycle.
    The wait comes before the writes so that their digital feedthrough (a few mV on every
    output) stays next to the edge. The writes end at least `DAC_LATCH_GAP_US` before the
@@ -192,7 +195,7 @@ outputs changing every cycle and param sync edges arriving. It calls `killChanne
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
 `dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`),
 `startBurst()` and `startCustomBurstPass()`. On
-Pulse Pal 3 it also calls `triggerEdgeLatched()` after reading each trigger line and
+Pulse Pal 3 it also calls `advanceTickCycles()` as it starts, `triggerEdgeLatched()` after reading each trigger line and
 `clearTriggerEdgeLatches()` `TRIGGER_CHATTER_NS` (0.5 µs) later, `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.

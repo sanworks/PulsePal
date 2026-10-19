@@ -330,13 +330,15 @@ enum TriggerEventValue {
   LiquidCrystal_U8G2 lcd(u8g2);
   IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
   IMXRT_PIT_CHANNEL_t *hardwareTimerChannel = nullptr; // The PIT channel hardwareTimer uses, found by startHardwareTimer()
+  uint32_t tickCycles = 0; // ARM_DWT_CYCCNT at the timer tick that began the current cycle, for dacWriteTimed(). See advanceTickCycles()
   IMXRT_GPIO_t *triggerGPIO[2] = {nullptr, nullptr}; // The GPIO ports of the trigger lines, and their bits, for the
   uint32_t triggerPinMask[2] = {0, 0};               // edge latches handler() reads (see setupTriggerEdgeLatches())
   #define N_CUSTOM_PULSE_TRAINS 4
   #define MAX_CUSTOM_PULSES 10000
   #define CURSOR_BLINK_CYCLES 10000 // Joystick menu loop iterations between cursor blinks while editing a value
-  // Timed DAC updates, see dacWriteTimed(). IntervalTimer's PIT counts at 24MHz.
+  // Timed DAC updates, see dacWriteTimed(). IntervalTimer's PIT counts at 24MHz, and dacWriteTimed() counts CPU cycles
   #define TIMER_COUNTS_PER_US 24
+  #define CPU_CYCLES_PER_US (F_CPU / 1000000)
   #define DAC_CHANNEL_WRITE_US 1.3 // Longest SPI write of one DAC channel (1.13us measured)
   #define DAC_LATCH_GAP_US 1.5 // Time from the last write to the latch. The DAC updates at once only some time after a write
   #define DAC_LATCH_US 7.5 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap

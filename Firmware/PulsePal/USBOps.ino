@@ -328,7 +328,7 @@ void processUSBCommands() {
           inByte2 = PPUSB.readByte();
           // All the channels are scheduled with interrupts off: when handler() ran between two of them, one op 77
           // started its channels 50us apart. A timer tick in that time is handled as soon as interrupts() is called,
-          // a few instructions late, and no output edge moves: dacWriteTimed() times the DAC from the timer's counter.
+          // a few instructions late, and no output edge moves: dacWriteTimed() times the DAC from the timer's tick.
           noInterrupts();
           for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle

@@ -311,6 +311,9 @@ static inline void startBurst(byte channel, byte block) {
 // loop() only runs the joystick menu while StimulatingState is 0.
 // ---------------------------------------------------------------------------------------------------------------
 void handler(void) {
+  #if (HARDWARE_VERSION > 2)
+    advanceTickCycles(); // First: dacWriteTimed() times the outputs' change from this cycle's tick
+  #endif
   if (StimulatingState == 0) {
       if ((LastStimulatingState == 1) || (DACFlag == 1)) { // The cycle on which all pulse trains have finished, or a DAC update was requested from loop()
         dacWriteTimed(); // Update DAC to final voltages (should be resting voltage), or to values set with setDAC()
