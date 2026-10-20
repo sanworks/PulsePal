@@ -34,7 +34,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   pulsePal.end();
 //
 // Units: voltages are in volts, -10 to +10. Times are in seconds, and are rounded to the nearest cycle of the
-// device's hardware timer (50us). Output channels are numbered 1-4 and trigger channels 1-2.
+// device's hardware timer: 10us on Pulse Pal 3, and 50us on Pulse Pal 2 and on Pulse Pal 3 with firmware from before
+// October 2026. Output channels are numbered 1-4 and trigger channels 1-2.
 //
 // Errors: methods that send a command return true if it was sent and, for commands that the device confirms, the
 // device confirmed it. They return false, and print the reason to std::cerr, if the device is not connected, an
@@ -90,9 +91,9 @@ public:
     bool setPhase1Voltage(uint8_t channel, float voltage);
     bool setPhase2Voltage(uint8_t channel, float voltage);
     bool setRestingVoltage(uint8_t channel, float voltage);
-    // Phase durations, the inter-pulse interval and the train duration are at least 0.00005 s (one timer cycle) on
+    // Phase durations, the inter-pulse interval and the train duration are at least 0.00001 s (one timer cycle) on
     // Pulse Pal 3, and 0.0001 s on Pulse Pal 2, whose trigger channels read their inputs once per cycle
-    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
+    bool setPhase1Duration(uint8_t channel, float timeInSeconds);      // 0.00001 (Pulse Pal 2: 0.0001) to 9999.9999
     bool setInterPhaseInterval(uint8_t channel, float timeInSeconds);  // 0 to 9999.9999
     bool setPhase2Duration(uint8_t channel, float timeInSeconds);      // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
     bool setInterPulseInterval(uint8_t channel, float timeInSeconds);  // 0.00005 (Pulse Pal 2: 0.0001) to 9999.9999
@@ -119,7 +120,7 @@ public:
     bool syncAllParams();
 
     // Upload a custom pulse train. ID is 1-2 on Pulse Pal 2, or 1-4 on Pulse Pal 3. customPulseTimes are pulse onset
-    // times in seconds from the start of the train: increasing, each a multiple of the shortest phase (50 us on Pulse
+    // times in seconds from the start of the train: increasing, each a multiple of the shortest phase (10 us on Pulse
     // Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s. customVoltages are in volts, -10 to 10.
     // nPulses is 1 to 5000 on Pulse Pal 2, or 1 to 10000 on Pulse Pal 3. Set an output channel's custom train ID to play
     // the train there. A biphasic pulse always plays whole, and a pulse whose time comes while it plays is dropped, so
@@ -188,7 +189,8 @@ private:
         OP_SEND_HARDWARE_INFO = 94,         // Firmware v22
         OP_LOAD_CUSTOM_TRAIN = 95,          // Firmware v22
         OP_SEND_HARDWARE_REVISION = 100,    // Firmware v22
-        OP_SEND_SERIAL_NUMBER = 102         // Firmware v22
+        OP_SEND_SERIAL_NUMBER = 102,        // Firmware v22
+        OP_HANDSHAKE_DEVICE_CYCLES = 103    // Firmware v22 from October 2026: as op 72, and times in the device's own cycles
     };
     enum ParamCode {
         PARAM_IS_BIPHASIC = 1,

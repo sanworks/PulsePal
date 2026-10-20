@@ -59,9 +59,11 @@ how the next trial's parameters wait for a TTL in param sync mode (see
 
 Voltages are in volts in the range [-10, 10]. Times are in seconds, from
 0 to `MAX_TIME` (9999.9999 s), and are rounded to the nearest cycle of
-the device's hardware timer, 50 us (see `DeviceInfo.cycle_period_us`);
-the parameter then holds the time the device plays, so 0.00012 reads
-back as 0.0001. A time exactly halfway between two cycles rounds to the
+the device's hardware timer (`DeviceInfo.cycle_period_us`): 10 us on
+Pulse Pal 3, and 50 us on Pulse Pal 2 and on Pulse Pal 3 with firmware
+from before October 2026. The parameter then holds the time the device
+plays, so 0.000123 reads back as 0.00012 (0.0001 on a 50 us timer). A
+time exactly halfway between two cycles rounds to the
 even one, as in the MATLAB and C++ classes, and voltages round to the
 nearest DAC code the same way. On/off parameters are `True` or `False`,
 and modes are names, such as `"Gated"`; names are not case sensitive,
@@ -71,7 +73,7 @@ A value the device cannot play raises `pulsepal.PulsePalError` before
 anything is sent: a voltage outside [-10, 10], a time that is negative,
 longer than `MAX_TIME` or not a number, or an unknown name. So does a
 pulse phase, inter-pulse interval or pulse train duration shorter than
-`DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3, 100 us on Pulse
+`DeviceInfo.min_pulse_width_us` (10 us on Pulse Pal 3, 100 us on Pulse
 Pal 2), so that a Pulse Pal's trigger channels can detect the shortest
 pulse its output channels play. Custom pulse times are not rounded: each
 must be a multiple of `DeviceInfo.min_pulse_width_us`.
@@ -281,12 +283,12 @@ class DeviceInfo:
     """Shortest pulse phase, inter-pulse interval and pulse train duration,
     and shortest time between custom pulses, in microseconds.
 
-    One timer cycle (50 us) on Pulse Pal 3, whose trigger channels latch
+    One timer cycle (10 us) on Pulse Pal 3, whose trigger channels latch
     every edge on their inputs. Two cycles (100 us) on Pulse Pal 2, whose
     trigger channels read their inputs once per cycle, so that a one cycle
     pulse could fall between two reads. A Pulse Pal 2, or a Pulse Pal 3
-    with firmware from before October 2026, can miss a 50 us pulse from a
-    Pulse Pal 3. Custom pulse times are multiples of it.
+    with firmware from before October 2026, can miss a pulse shorter than
+    100 us from a Pulse Pal 3. Custom pulse times are multiples of it.
     """
 
     max_time: float = MAX_TIME
@@ -530,7 +532,7 @@ class PulsePalDevice:
     The integer codes 0-3 are accepted too.
 
     An output channel that is idle at a param sync edge takes its new
-    parameters in the 50 us timer cycle the edge is detected. One that is
+    parameters in the timer cycle the edge is detected. One that is
     playing a pulse train finishes that train on the parameters it
     started with, and takes the new ones the moment it ends, so a train
     that runs past the end of a trial keeps one shape throughout and the
@@ -577,6 +579,8 @@ class PulsePalDevice:
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _HANDSHAKE_OPCODE = _common.OP_HANDSHAKE
+    _HANDSHAKE_DEVICE_CYCLES_OPCODE = _common.OP_HANDSHAKE_DEVICE_CYCLES
+    _HANDSHAKE_DEVICE_CYCLES_TIMEOUT = 0.3  # Seconds to wait for a reply to op 103 before trying op 72
     _HANDSHAKE_RESPONSE = 75  # 'K'
     _DAC_BITMAX = 65535
     _PARAM_MESSAGE_BYTES = 178  # Length of the parameter set sent by op 93
@@ -681,11 +685,15 @@ class PulsePalDevice:
         # it would be read as the handshake's reply. A reply the device sends after this, to a
         # command it had not reached yet, is skipped by read_handshake_reply().
         self.port.reset_input_buffer()
-        self._write_serial(
-            (self._OP_MENU_BYTE, self._HANDSHAKE_OPCODE),
-            "uint8",
-        )
-        reply = _common.read_handshake_reply(self.port)
+        # Op 103: the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). Firmware from before
+        # October 2026, Wave Pal and Synth Pal ignore it, and answer op 72, whose times are in 50 us cycles. A device that
+        # answers op 103 too late counts the session's times in 50 us cycles too, after the op 72 that follows; either
+        # way op 94 reports the session's unit, which the class then uses.
+        self._write_serial((self._OP_MENU_BYTE, self._HANDSHAKE_DEVICE_CYCLES_OPCODE), "uint8")
+        reply = _common.read_handshake_reply(self.port, timeout=self._HANDSHAKE_DEVICE_CYCLES_TIMEOUT)
+        if reply is None:
+            self._write_serial((self._OP_MENU_BYTE, self._HANDSHAKE_OPCODE), "uint8")
+            reply = _common.read_handshake_reply(self.port)
         if reply is None:
             raise PulsePalError(
                 f"No reply to the handshake from the device on {port_name}. Is it a Pulse Pal? "
@@ -721,10 +729,10 @@ class PulsePalDevice:
         if self.info.firmware_version > 21:
             self._write_serial((self._OP_MENU_BYTE, 94), "uint8")
             self.info.hardware_version = self._read_serial(1, "uint8")
-            self.info.cycle_period_us = self._read_serial(1, "uint32")
-            self.info.cycle_frequency = 1 / (
-                self.info.cycle_period_us / 1000000
-            )
+            self.info.cycle_period_us = self._read_serial(1, "uint32")  # The session's time unit (see op 103 above)
+            # Not 1 / (period / 1e6): at 10 us that is 99999.99999999999, and times read back from the device would
+            # convert to 0.00010000000000000002 s instead of 0.0001 s
+            self.info.cycle_frequency = 1000000 / self.info.cycle_period_us
             self.info.n_custom_pulse_trains = self._read_serial(1, "uint8")
             self.info.max_custom_pulses = self._read_serial(1, "uint32")
             self._write_serial((self._OP_MENU_BYTE, 100), "uint8")  # Circuit board revision
@@ -1136,7 +1144,7 @@ class PulsePalDevice:
                 4 on Pulse Pal 3).
             pulse_times: Pulse onset times, in seconds, relative to the
                 start of the train, increasing. Each is a multiple of
-                `DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3,
+                `DeviceInfo.min_pulse_width_us` (10 us on Pulse Pal 3,
                 100 us on Pulse Pal 2), from 0 to
                 `MAX_TIME`. Accepts a list, tuple or NumPy array.
             voltages: Voltage of each pulse, in volts [-10, 10]. Must be
@@ -1197,7 +1205,7 @@ class PulsePalDevice:
                 `DeviceInfo.n_custom_pulse_trains` (2 on Pulse Pal 2,
                 4 on Pulse Pal 3).
             sampling_period: In seconds: a multiple of
-                `DeviceInfo.min_pulse_width_us` (50 us on Pulse Pal 3,
+                `DeviceInfo.min_pulse_width_us` (10 us on Pulse Pal 3,
                 100 us on Pulse Pal 2). Each voltage is
                 held for this long.
             voltages: Waveform samples, in volts [-10, 10].
@@ -1645,7 +1653,7 @@ class PulsePalDevice:
         if kind in ("time", "pulse_time"):
             cycles = self._seconds_to_cycles(value, label)
             # Checked in whole cycles, as the device receives it: 100 * 1e-6 is just under 0.0001,
-            # but is exactly 2 cycles of 50 us
+            # but is exactly 10 cycles of 10 us
             if kind == "pulse_time" and cycles < self._min_pulse_cycles():
                 raise PulsePalError(
                     f"{label} must be at least {self._min_pulse_seconds()} s "
@@ -1771,7 +1779,7 @@ class PulsePalDevice:
     def _check_custom_bursts(targets, burst_durations):
         """Refuse a custom train targeting bursts on a channel with no burst duration.
 
-        Its times are burst onsets, and a burst of no duration plays one 50 us cycle of a pulse at each: a
+        Its times are burst onsets, and a burst of no duration plays one timer cycle of a pulse at each: a
         program that cannot be what was meant. (The device once played one pulse and then left the channel
         "playing", ignoring triggers until it was stopped.)
         """
@@ -2251,7 +2259,7 @@ class PulsePalDevice:
         return cycles
 
     def _max_time_cycles(self):
-        """DeviceInfo.max_time in timer cycles: 199999998 on a 50 us timer."""
+        """DeviceInfo.max_time in timer cycles: 999999990 on a 10 us timer, 199999998 on a 50 us timer."""
         return int(round(self.info.max_time * float(self.info.cycle_frequency)))
 
     def _custom_time_cycles(self, value, name):

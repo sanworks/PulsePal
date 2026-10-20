@@ -990,8 +990,8 @@ label = labels.(paramName);
 end
 
 function text = formatNumber(value)
-% A limit for a message, as the Python GUI shows it (_format_number()): no exponent, so Pulse Pal 3's 50 us minimum
-% reads 0.00005, not 5e-05
+% A limit for a message, as the Python GUI shows it (_format_number()): no exponent, so Pulse Pal 3's 10 us minimum
+% reads 0.00001, not 1e-05
 text = regexprep(sprintf('%.6f', value), '\.?0+$', '');
 end
 

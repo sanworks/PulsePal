@@ -30,6 +30,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   validateOutputParams()
 //   validateParamBuffer()
 //   requireNonZeroCycles()
+//   multiplyTime()
+//   multiplyTimeBytes()
+//   usbTimeToCycles()
+//   cyclesToUSBTime()
+//   takeUint32(), takeUint16()
+//   storeUSBTimes()
+//   writeUSBTimes()
 //   paramSyncEnabled()
 //   updateParamSyncPending()
 //   otherCustomTrainBlock()
@@ -50,6 +57,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 // Note on reads: every PPUSB read gives up if no byte arrives for 100ms, and sets PPUSB.timedOut(). The rest of the
 // command then reads as zeros, and loop() shows a comm failure message and loads the default parameters. See ArCOM.h.
+// The ops that program parameters (73, 74, 91 and 92) read their whole message first, and change nothing if it was cut
+// short: read value by value into the parameters, the missing bytes set resting voltages of 0 (-10V), which loop()'s
+// comm failure handling then put on every output until the joystick was clicked.
 // Replies are buffered, and sent by the PPUSB.flush() call in loop().
 //
 // Note on confirm bytes: ops that reply send 1 if the command was executed, or 0 if it was rejected. A command is
@@ -153,6 +163,71 @@ byte requireNonZeroCycles(uint8_t *timeArray, int channel) {
   return 1;
 }
 
+// Times over USB count usbTimeFactor device cycles each (see usbTimeFactor in PulsePal.ino): 50us cycles in a session
+// that connected with op 72, as every client before October 2026 sends them, or the device's own after op 103. Times
+// are converted as they arrive, so the device holds only its own cycles, and converted back as they are sent (op 93).
+// On a 10us device, a 50us cycle is exactly 5 cycles, so an older client's times play as they did on a 50us device.
+// Times are also converted from settings files that count 50us cycles (see RestoreParametersFromSD()).
+// A time too long for 32 bits plays as the longest, UINT32_MAX cycles (11.9 hours at 10us).
+uint32_t multiplyTime(uint32_t time, byte factor) {
+  uint64_t cycles = (uint64_t)time * factor;
+  return (cycles > UINT32_MAX) ? UINT32_MAX : (uint32_t)cycles;
+}
+
+// multiplyTime() on nTimes consecutive uint32 times in a byte buffer (paramBuffer, or a settings file's set), in place
+void multiplyTimeBytes(uint8_t *bytes, int nTimes, byte factor) {
+  for (int i = 0; i < nTimes; i++) {
+    uint32_t time;
+    memcpy(&time, bytes + i * sizeof(time), sizeof(time));
+    time = multiplyTime(time, factor);
+    memcpy(bytes + i * sizeof(time), &time, sizeof(time));
+  }
+}
+
+uint32_t usbTimeToCycles(uint32_t time) {
+  return multiplyTime(time, usbTimeFactor);
+}
+
+// A time in the session's unit, rounded to the nearest. Only an op 72 session on a 10us device sees any rounding, of a
+// time off the 50us grid: set with the joystick, by a settings file or by a client that connected with op 103.
+// LEGACY_TIME_FACTOR is odd, so no time is halfway between two units.
+uint32_t cyclesToUSBTime(uint32_t cycles) {
+  return (uint32_t)(((uint64_t)cycles + (usbTimeFactor / 2)) / usbTimeFactor);
+}
+
+// Values from a message read whole with PPUSB.readBlock() (ops 73, 74, 91): each returns the value at *next, and moves
+// *next past it. Little-endian, as the wire format and both boards are (see ArCOM.h).
+uint32_t takeUint32(const uint8_t **next) {
+  uint32_t value;
+  memcpy(&value, *next, sizeof(value));
+  *next += sizeof(value);
+  return value;
+}
+
+uint16_t takeUint16(const uint8_t **next) {
+  uint16_t value;
+  memcpy(&value, *next, sizeof(value));
+  *next += sizeof(value);
+  return value;
+}
+
+// Stores a time for each output channel (op 91), from a message read whole, in one of their time arrays. Each is
+// converted before it is stored, so that handler() never plays a time in the session's unit.
+void storeUSBTimes(uint32_t *times, const uint8_t *values) {
+  for (int i = 0; i < 4; i++) {
+    times[i] = usbTimeToCycles(takeUint32(&values));
+  }
+}
+
+// Sends a time array of the output channels (op 93), in the session's unit
+void writeUSBTimes(const uint32_t *times) {
+  uint32_t sent[4];
+  for (int i = 0; i < 4; i++) {
+    sent[i] = cyclesToUSBTime(times[i]);
+  }
+  PPUSB.writeUint32Array(sent, 4);
+}
+
 #if (HARDWARE_VERSION > 2)
   // True if a trigger channel is in param sync mode, in which case op 92 holds its parameter set in paramBuffer
   // until a rising edge on that channel loads it.
@@ -219,40 +294,49 @@ void processUSBCommands() {
       screenSaverActivity = true; // loop() wakes the screen once the command is done and its reply sent
       CommandByte = PPUSB.readByte(); // Read the command byte (an op code for the operation to execute)
       switch (CommandByte) {
-        case OP_HANDSHAKE: { // Op 72. Handshake
+        case OP_HANDSHAKE: // Op 72. Handshake. The session's times are in 50us cycles, as every client before October 2026 sends them
+        case OP_HANDSHAKE_DEVICE_CYCLES: { // Op 103. Handshake of the current MATLAB, Python and C++ classes: times in the device's own cycles (op 94)
+          // Older firmware, Wave Pal and Synth Pal ignore op 103, and a client that has no reply falls back to op 72
+          usbTimeFactor = (CommandByte == OP_HANDSHAKE_DEVICE_CYCLES) ? 1 : LEGACY_TIME_FACTOR;
           PPUSB.writeByte(75); // Send 'K' (as in ok)
           PPUSB.writeUint32(FIRMWARE_VERSION); // Send the firmware version as a 4 byte unsigned integer
           inMenu = MENU_TOP;
         } break;
         case OP_PROGRAM_ALL_PARAMS_LEGACY: { // Op 73. Program the module - legacy method for backwards compatability. See op 92 for the more efficient method used by the current Python and MATLAB classes
+          uint8_t message[OP73_N_BYTES];
+          if (!PPUSB.readBlock(message, sizeof(message))) { // Cut short: nothing is changed (see the note on reads above)
+            PPUSB.writeByte(0);
+            break;
+          }
+          const uint8_t *next = message;
           for (int x = 0; x < 4; x++) { // Read timing parameters (4 byte integers)
-            Phase1Duration[x] = PPUSB.readUint32();
-            InterPhaseInterval[x] = PPUSB.readUint32();
-            Phase2Duration[x] = PPUSB.readUint32();
-            InterPulseInterval[x] = PPUSB.readUint32();
-            BurstDuration[x] = PPUSB.readUint32();
-            BurstInterval[x] = PPUSB.readUint32();
-            PulseTrainDuration[x] = PPUSB.readUint32();
-            PulseTrainDelay[x] = PPUSB.readUint32();
+            Phase1Duration[x] = usbTimeToCycles(takeUint32(&next));
+            InterPhaseInterval[x] = usbTimeToCycles(takeUint32(&next));
+            Phase2Duration[x] = usbTimeToCycles(takeUint32(&next));
+            InterPulseInterval[x] = usbTimeToCycles(takeUint32(&next));
+            BurstDuration[x] = usbTimeToCycles(takeUint32(&next));
+            BurstInterval[x] = usbTimeToCycles(takeUint32(&next));
+            PulseTrainDuration[x] = usbTimeToCycles(takeUint32(&next));
+            PulseTrainDelay[x] = usbTimeToCycles(takeUint32(&next));
           }
           for (int x = 0; x < 4; x++) { // Read voltage parameters (2 byte integers)
-            Phase1Voltage[x] = PPUSB.readUint16();
-            Phase2Voltage[x] = PPUSB.readUint16();
-            RestingVoltage[x] = PPUSB.readUint16();
+            Phase1Voltage[x] = takeUint16(&next);
+            Phase2Voltage[x] = takeUint16(&next);
+            RestingVoltage[x] = takeUint16(&next);
           }
           for (int x = 0; x < 4; x++) { // Read single byte parameters
-            IsBiphasic[x] = PPUSB.readByte();
-            CustomTrainID[x] = PPUSB.readByte();
-            CustomTrainTarget[x] = PPUSB.readByte();
-            CustomTrainLoop[x] = PPUSB.readByte();
+            IsBiphasic[x] = *next++;
+            CustomTrainID[x] = *next++;
+            CustomTrainTarget[x] = *next++;
+            CustomTrainLoop[x] = *next++;
           }
          for (int x = 0; x < 2; x++) { // Read 8 bytes that link trigger channels to specific output channels
            for (int y = 0; y < 4; y++) {
-             TriggerAddress[x][y] = PPUSB.readByte();
+             TriggerAddress[x][y] = *next++;
            }
          }
-         TriggerMode[0] = PPUSB.readByte(); // Read bytes that set interpretation of trigger channel voltage
-         TriggerMode[1] = PPUSB.readByte();
+         TriggerMode[0] = *next++; // Read bytes that set interpretation of trigger channel voltage
+         TriggerMode[1] = *next++;
          byte paramsValid = validateOutputParams();
          updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
          for (int x = 0; x < 4; x++) {
@@ -277,28 +361,34 @@ void processUSBCommands() {
             PPUSB.writeByte(0);
             break;
           }
+          uint8_t value[4];
+          if (!PPUSB.readBlock(value, nValueBytes)) { // Cut short: nothing is changed (see the note on reads above)
+            PPUSB.writeByte(0);
+            break;
+          }
+          const uint8_t *next = value;
           inByte3 = inByte3 - 1; // Convert channel for zero-indexing
           ContinuousLoopModeOriginal[inByte3] = ContinuousLoopMode[inByte3];
           switch (inByte2) { 
-             case PARAM_IS_BIPHASIC: {IsBiphasic[inByte3] = PPUSB.readByte();} break;
-             case PARAM_PHASE1_VOLTAGE: {Phase1Voltage[inByte3] = PPUSB.readUint16();} break;
-             case PARAM_PHASE2_VOLTAGE: {Phase2Voltage[inByte3] = PPUSB.readUint16();} break;
-             case PARAM_PHASE1_DURATION: {Phase1Duration[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_INTER_PHASE_INTERVAL: {InterPhaseInterval[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_PHASE2_DURATION: {Phase2Duration[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_INTER_PULSE_INTERVAL: {InterPulseInterval[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_BURST_DURATION: {BurstDuration[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_BURST_INTERVAL: {BurstInterval[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_PULSE_TRAIN_DURATION: {PulseTrainDuration[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_PULSE_TRAIN_DELAY: {PulseTrainDelay[inByte3] = PPUSB.readUint32();} break;
-             case PARAM_LINK_TRIGGER1: {inByte4 = PPUSB.readByte(); TriggerAddress[0][inByte3] = inByte4;} break;
-             case PARAM_LINK_TRIGGER2: {inByte4 = PPUSB.readByte(); TriggerAddress[1][inByte3] = inByte4;} break;
-             case PARAM_CUSTOM_TRAIN_ID: {CustomTrainID[inByte3] = PPUSB.readByte();} break;
-             case PARAM_CUSTOM_TRAIN_TARGET: {CustomTrainTarget[inByte3] = PPUSB.readByte();} break;
-             case PARAM_CUSTOM_TRAIN_LOOP: {CustomTrainLoop[inByte3] = PPUSB.readByte();} break;
-             case PARAM_RESTING_VOLTAGE: {RestingVoltage[inByte3] = PPUSB.readUint16();} break;
-             case PARAM_CONTINUOUS_LOOP: {ContinuousLoopMode[inByte3] = PPUSB.readByte();} break;
-             case PARAM_TRIGGER_MODE: {TriggerMode[inByte3] = PPUSB.readByte();} break;
+             case PARAM_IS_BIPHASIC: {IsBiphasic[inByte3] = *next;} break;
+             case PARAM_PHASE1_VOLTAGE: {Phase1Voltage[inByte3] = takeUint16(&next);} break;
+             case PARAM_PHASE2_VOLTAGE: {Phase2Voltage[inByte3] = takeUint16(&next);} break;
+             case PARAM_PHASE1_DURATION: {Phase1Duration[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_INTER_PHASE_INTERVAL: {InterPhaseInterval[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_PHASE2_DURATION: {Phase2Duration[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_INTER_PULSE_INTERVAL: {InterPulseInterval[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_BURST_DURATION: {BurstDuration[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_BURST_INTERVAL: {BurstInterval[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_PULSE_TRAIN_DURATION: {PulseTrainDuration[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_PULSE_TRAIN_DELAY: {PulseTrainDelay[inByte3] = usbTimeToCycles(takeUint32(&next));} break;
+             case PARAM_LINK_TRIGGER1: {TriggerAddress[0][inByte3] = *next;} break;
+             case PARAM_LINK_TRIGGER2: {TriggerAddress[1][inByte3] = *next;} break;
+             case PARAM_CUSTOM_TRAIN_ID: {CustomTrainID[inByte3] = *next;} break;
+             case PARAM_CUSTOM_TRAIN_TARGET: {CustomTrainTarget[inByte3] = *next;} break;
+             case PARAM_CUSTOM_TRAIN_LOOP: {CustomTrainLoop[inByte3] = *next;} break;
+             case PARAM_RESTING_VOLTAGE: {RestingVoltage[inByte3] = takeUint16(&next);} break;
+             case PARAM_CONTINUOUS_LOOP: {ContinuousLoopMode[inByte3] = *next;} break;
+             case PARAM_TRIGGER_MODE: {TriggerMode[inByte3] = *next;} break;
           }
           byte paramValid = validateOutputParams();
           updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
@@ -327,12 +417,12 @@ void processUSBCommands() {
         case OP_SOFT_TRIGGER: { // Op 77. Soft-trigger specific output channels. Which channels are indicated as bits of a single byte read.
           inByte2 = PPUSB.readByte();
           // All the channels are scheduled with interrupts off: when handler() ran between two of them, one op 77
-          // started its channels 50us apart. A timer tick in that time is handled as soon as interrupts() is called,
+          // started its channels a cycle apart. A timer tick in that time is handled as soon as interrupts() is called,
           // a few instructions late, and no output edge moves: dacWriteTimed() times the DAC from the timer's tick.
           noInterrupts();
           for (int i = 0; i < 4; i++) {
             // Serial reading takes up too much time so the channel trigger logic is scheduled for the next cycle
-            // (albeit at the expense of ~50us latency). Channels are only ever added: two op 77s read before that cycle
+            // (albeit at the expense of a cycle's latency). Channels are only ever added: two op 77s read before that cycle
             // (e.g. in one USB packet) must trigger both sets of channels, not just the second.
             if (bitRead(inByte2, i)) {
               SoftTriggerScheduled[i] = 1;
@@ -383,6 +473,7 @@ void processUSBCommands() {
        } break;
        case OP_DISCONNECT: { // Op 81. Disconnect from PC app
           inMenu = MENU_TOP;
+          usbTimeFactor = LEGACY_TIME_FACTOR; // Until the next client's handshake, as at startup
           for (int i = 0; i < 4; i++) {
             killChannel(i);
           }
@@ -406,11 +497,21 @@ void processUSBCommands() {
           PPUSB.writeByte(1);
         } break;
       case OP_SEND_SETTINGS_FILE: { // Op 85. Return the currently loaded parameter file from the microSD card
+          // The file's times are sent in the session's unit, as op 93 sends them: its end marker says what they count
+          uint8_t fileBytes[SETTINGS_FILE_N_PARAM_BYTES + 1] = {0};
           settingsFile.rewind();
-          for (int i = 0; i < SETTINGS_FILE_N_PARAM_BYTES; i++) {
-            settingsFile.read(buf, sizeof(buf));
-            PPUSB.writeByte(buf[0]);
+          settingsFile.read(fileBytes, sizeof(fileBytes));
+          byte fileTimeFactor = settingsFileTimeFactor(fileBytes[SETTINGS_FILE_N_PARAM_BYTES]);
+          for (int chan = 0; (chan < 4) && (fileTimeFactor > 0); chan++) {
+            for (int i = 0; i < 8; i++) {
+              uint8_t *timeBytes = fileBytes + (chan * SETTINGS_FILE_CHANNEL_N_BYTES) + (i * sizeof(uint32_t));
+              uint32_t time;
+              memcpy(&time, timeBytes, sizeof(time));
+              time = cyclesToUSBTime(multiplyTime(time, fileTimeFactor));
+              memcpy(timeBytes, &time, sizeof(time));
+            }
           }
+          PPUSB.writeByteArray(fileBytes, SETTINGS_FILE_N_PARAM_BYTES);
         } break;
         
         case OP_DEBUG_WRITE_PIN: { // Op 86. Override Arduino IO Lines (for development and debugging only - may disrupt normal function)
@@ -498,32 +599,32 @@ void processUSBCommands() {
             PPUSB.writeByte(0);
             break;
           }
+          uint8_t values[4 * 4]; // One value per output channel (per trigger channel for code 128), of up to 4 bytes
+          byte nValues = (inByte2 == PARAM_TRIGGER_MODE) ? 2 : 4;
+          if (!PPUSB.readBlock(values, nValues * paramValueBytes(inByte2))) { // Cut short: nothing is changed (see the note on reads above)
+            PPUSB.writeByte(0);
+            break;
+          }
           switch (inByte2) {
-             case PARAM_IS_BIPHASIC: {PPUSB.readByteArray(IsBiphasic, 4);} break;
-             case PARAM_PHASE1_VOLTAGE: {PPUSB.readUint16Array(Phase1Voltage, 4);} break;
-             case PARAM_PHASE2_VOLTAGE: {PPUSB.readUint16Array(Phase2Voltage, 4);} break;
-             case PARAM_PHASE1_DURATION: {PPUSB.readUint32Array(Phase1Duration,4);} break;
-             case PARAM_INTER_PHASE_INTERVAL: {PPUSB.readUint32Array(InterPhaseInterval,4);} break;
-             case PARAM_PHASE2_DURATION: {PPUSB.readUint32Array(Phase2Duration, 4);} break;
-             case PARAM_INTER_PULSE_INTERVAL: {PPUSB.readUint32Array(InterPulseInterval, 4);} break;
-             case PARAM_BURST_DURATION: {PPUSB.readUint32Array(BurstDuration, 4);} break;
-             case PARAM_BURST_INTERVAL: {PPUSB.readUint32Array(BurstInterval, 4);} break;
-             case PARAM_PULSE_TRAIN_DURATION: {PPUSB.readUint32Array(PulseTrainDuration, 4);} break;
-             case PARAM_PULSE_TRAIN_DELAY: {PPUSB.readUint32Array(PulseTrainDelay, 4);} break;
-             case PARAM_LINK_TRIGGER1: {inByte3 = PPUSB.readByte(); TriggerAddress[0][0] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][1] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][2] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[0][3] = inByte3;} break;
-             case PARAM_LINK_TRIGGER2: {inByte3 = PPUSB.readByte(); TriggerAddress[1][0] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][1] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][2] = inByte3;
-                       inByte3 = PPUSB.readByte(); TriggerAddress[1][3] = inByte3;} break;
-             case PARAM_CUSTOM_TRAIN_ID: {PPUSB.readByteArray(CustomTrainID, 4);} break;
-             case PARAM_CUSTOM_TRAIN_TARGET: {PPUSB.readByteArray(CustomTrainTarget, 4);} break;
-             case PARAM_CUSTOM_TRAIN_LOOP: {PPUSB.readByteArray(CustomTrainLoop, 4);} break;
-             case PARAM_RESTING_VOLTAGE: {PPUSB.readUint16Array(RestingVoltage, 4);} break;
-             case PARAM_CONTINUOUS_LOOP: {PPUSB.readByteArray(ContinuousLoopMode, 4);} break;
-             case PARAM_TRIGGER_MODE: {PPUSB.readByteArray(TriggerMode, 2);} break;
+             case PARAM_IS_BIPHASIC: {memcpy(IsBiphasic, values, 4);} break;
+             case PARAM_PHASE1_VOLTAGE: {memcpy(Phase1Voltage, values, 4 * 2);} break;
+             case PARAM_PHASE2_VOLTAGE: {memcpy(Phase2Voltage, values, 4 * 2);} break;
+             case PARAM_PHASE1_DURATION: {storeUSBTimes(Phase1Duration, values);} break;
+             case PARAM_INTER_PHASE_INTERVAL: {storeUSBTimes(InterPhaseInterval, values);} break;
+             case PARAM_PHASE2_DURATION: {storeUSBTimes(Phase2Duration, values);} break;
+             case PARAM_INTER_PULSE_INTERVAL: {storeUSBTimes(InterPulseInterval, values);} break;
+             case PARAM_BURST_DURATION: {storeUSBTimes(BurstDuration, values);} break;
+             case PARAM_BURST_INTERVAL: {storeUSBTimes(BurstInterval, values);} break;
+             case PARAM_PULSE_TRAIN_DURATION: {storeUSBTimes(PulseTrainDuration, values);} break;
+             case PARAM_PULSE_TRAIN_DELAY: {storeUSBTimes(PulseTrainDelay, values);} break;
+             case PARAM_LINK_TRIGGER1: {memcpy(TriggerAddress[0], values, 4);} break;
+             case PARAM_LINK_TRIGGER2: {memcpy(TriggerAddress[1], values, 4);} break;
+             case PARAM_CUSTOM_TRAIN_ID: {memcpy(CustomTrainID, values, 4);} break;
+             case PARAM_CUSTOM_TRAIN_TARGET: {memcpy(CustomTrainTarget, values, 4);} break;
+             case PARAM_CUSTOM_TRAIN_LOOP: {memcpy(CustomTrainLoop, values, 4);} break;
+             case PARAM_RESTING_VOLTAGE: {memcpy(RestingVoltage, values, 4 * 2);} break;
+             case PARAM_CONTINUOUS_LOOP: {memcpy(ContinuousLoopMode, values, 4);} break;
+             case PARAM_TRIGGER_MODE: {memcpy(TriggerMode, values, 2);} break;
           }
           byte paramsValid = validateOutputParams();
           updateParamSyncPending(); // This op may have taken a trigger channel out of param sync mode
@@ -545,14 +646,18 @@ void processUSBCommands() {
           #if (HARDWARE_VERSION > 2)
             paramSyncPending = false; // A set buffered earlier and never loaded is replaced by this one
           #endif
-          PPUSB.readBlock(paramBuffer, PARAM_BUFFER_N_BYTES); // The whole parameter set arrives as one block
+          // The whole parameter set arrives as one block. One cut short changes nothing (see the note on reads above). A
+          // set stored for param sync mode is lost with it: paramBuffer holds part of this one.
+          if (!PPUSB.readBlock(paramBuffer, PARAM_BUFFER_N_BYTES)) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          multiplyTimeBytes(paramBuffer, 8 * 4, usbTimeFactor); // Its 8 time arrays come first, in the session's unit
           byte allParamsValid = validateParamBuffer(paramBuffer); // Checked here, because a set loaded by handler() cannot be reported on
           bool waitForSyncEdge = false;
           #if (HARDWARE_VERSION > 2)
             waitForSyncEdge = paramSyncEnabled(); // A trigger channel is in param sync mode: hold the set for its next rising edge
-            // Set after the read, so that handler() never loads a partly written buffer. A set whose read timed out is
-            // mostly zeros; it is not held, and loop() loads the default parameters.
-            paramSyncPending = waitForSyncEdge && !PPUSB.timedOut();
+            paramSyncPending = waitForSyncEdge; // Set after the read, so that handler() never loads a partly written buffer
           #endif
           if (!waitForSyncEdge) {
             applyParamBuffer(paramBuffer); // No channel is waiting for a TTL, so program the device now
@@ -564,7 +669,7 @@ void processUSBCommands() {
         } break;
         case OP_SEND_HARDWARE_INFO: { // Op 94. Send hardware info
           PPUSB.writeByte(HARDWARE_VERSION);
-          PPUSB.writeUint32(TIMER_PERIOD);
+          PPUSB.writeUint32(TIMER_PERIOD * usbTimeFactor); // The session's time unit in us: 50 after op 72
           PPUSB.writeByte(N_CUSTOM_PULSE_TRAINS);
           PPUSB.writeUint32(MAX_CUSTOM_PULSES);
         } break;
@@ -782,14 +887,14 @@ void applyParamBuffer(const uint8_t *buffer) {
 #endif
 
 void sendCurrentParams() {
-    PPUSB.writeUint32Array(Phase1Duration, 4);
-    PPUSB.writeUint32Array(InterPhaseInterval, 4);
-    PPUSB.writeUint32Array(Phase2Duration, 4);
-    PPUSB.writeUint32Array(InterPulseInterval, 4);
-    PPUSB.writeUint32Array(BurstDuration, 4);
-    PPUSB.writeUint32Array(BurstInterval, 4);
-    PPUSB.writeUint32Array(PulseTrainDuration, 4);
-    PPUSB.writeUint32Array(PulseTrainDelay, 4);
+    writeUSBTimes(Phase1Duration);
+    writeUSBTimes(InterPhaseInterval);
+    writeUSBTimes(Phase2Duration);
+    writeUSBTimes(InterPulseInterval);
+    writeUSBTimes(BurstDuration);
+    writeUSBTimes(BurstInterval);
+    writeUSBTimes(PulseTrainDuration);
+    writeUSBTimes(PulseTrainDelay);
     PPUSB.writeUint16Array(Phase1Voltage, 4);
     PPUSB.writeUint16Array(Phase2Voltage, 4);
     PPUSB.writeUint16Array(RestingVoltage, 4);
@@ -891,6 +996,11 @@ void loadCustomPulseTrain(byte trainID) {
   if (PPUSB.timedOut()) { // The rest of the train never arrived. loop() reports the failure.
     PPUSB.writeByte(0);
     return;
+  }
+  if (usbTimeFactor != 1) { // No channel plays this block yet
+    for (uint32_t i = 0; i < nPulses; i++) {
+      CustomPulseTimes[block][i] = usbTimeToCycles(CustomPulseTimes[block][i]);
+    }
   }
   noInterrupts();
   CustomTrainNpulses[block] = nPulses;

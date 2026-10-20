@@ -36,15 +36,21 @@ class FakePort:
     Bytes placed in `response` are returned first; after that, reads return the
     acknowledgement byte. They count as sent by the device only when they are
     read, so `in_waiting` is 0: the handshake reads exactly its 5 bytes.
+
+    With `answers_op_103` False, the port models firmware that ignores op 103 (Pulse Pal firmware from before
+    October 2026, Wave Pal and Synth Pal): after op 103, reads return nothing until op 72 is written.
     """
 
     in_waiting = 0
 
-    def __init__(self, ack=1):
+    def __init__(self, ack=1, answers_op_103=True):
         self.port = "FAKE"
+        self.timeout = 1
         self.writes = []
         self.reads = []
         self.ack = ack
+        self.answers_op_103 = answers_op_103
+        self.silent = False
         self.response = bytearray()
         self.resets = []  # The number of writes before each reset_input_buffer()
 
@@ -54,10 +60,16 @@ class FakePort:
 
     def write(self, data):
         self.writes.append(bytes(data))
+        if bytes(data) == bytes([OP_MENU_BYTE, 103]):
+            self.silent = not self.answers_op_103
+        elif bytes(data) == bytes([OP_MENU_BYTE, 72]):
+            self.silent = False
         return len(data)
 
     def read(self, n):
         self.reads.append(n)
+        if self.silent:
+            return b""
         if self.response:
             reply = bytes(self.response[:n])
             del self.response[:n]
@@ -131,7 +143,7 @@ def test_connection_programs_the_defaults():
     # Locked for this session on Linux and macOS too: another session that locks the port cannot open it
     assert opened[0].get("exclusive") is True, opened
     assert port.writes[:6] == [
-        bytes([OP_MENU_BYTE, 72]),
+        bytes([OP_MENU_BYTE, 103]),  # Times in the device's own cycles (see test_handshake_falls_back_to_op_72())
         bytes([OP_MENU_BYTE, 94]),
         bytes([OP_MENU_BYTE, 100]),
         bytes([OP_MENU_BYTE, 102]),
@@ -150,6 +162,44 @@ def test_connection_programs_the_defaults():
     assert device.trigger_mode == [None, "Normal", "Normal"]
     device.close()
     assert port.writes[-1] == bytes([OP_MENU_BYTE, 81]) and not port.is_open
+
+
+def test_handshake_falls_back_to_op_72():
+    """The class connects with op 103, so that the session's times are in the device's own cycles (10 us on Pulse
+    Pal 3). Firmware from before October 2026 ignores op 103, and its times are in 50 us cycles: the class then
+    connects with op 72, and takes the cycle that op 94 reports, 50 us."""
+    port = ClosablePort(answers_op_103=False)
+    port.response = bytearray([75]) + struct.pack("<I", 22) + PULSE_PAL_3_INFO
+    device = connect_to(port)
+    assert port.writes[:3] == [bytes([OP_MENU_BYTE, 103]), bytes([OP_MENU_BYTE, 72]), bytes([OP_MENU_BYTE, 94])], \
+        port.writes
+    assert port.timeout == 1, "the port's timeout was not restored after op 103"
+    assert device.info.cycle_period_us == 50 and device.info.cycle_frequency == 20000
+    port.writes.clear()
+    device.phase1_duration[1] = 0.0002
+    assert port.writes == [bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 4)], port.writes
+    device.close()
+
+
+def test_a_10_us_cycle_converts_exactly():
+    """Pulse Pal 3 runs a 10 us cycle. The cycle rate is 1e6 / period, exactly 100000: 1 / (10 / 1e6) is
+    99999.99999999999, and 10 cycles read back from the device would be 0.00010000000000000002 s."""
+    port = ClosablePort()
+    port.response = bytearray([75]) + struct.pack("<I", 22) + struct.pack("<BIBI", 3, 10, 4, 10000) \
+        + bytes([1]) + bytes([0])
+    device = connect_to(port)
+    assert device.info.cycle_frequency == 100000 and device.info.min_pulse_width_us == 10
+    assert device._cycles_to_seconds(10) == 0.0001 and device._cycles_to_seconds(12) == 0.00012
+    assert device._max_time_cycles() == 999999990  # 9999.9999 s, as the firmware's MAX_TIME_CYCLES
+    port.writes.clear()
+    device.phase1_duration[1] = 0.000123  # Rounds to 12 cycles
+    assert port.writes == [bytes([OP_MENU_BYTE, 74, 4, 1]) + struct.pack("<I", 12)], port.writes
+    assert device.phase1_duration[1] == 0.00012
+    port.writes.clear()
+    device.send_custom_pulse_train(1, [0, 0.00001, 0.00003], [1, 2, 3])
+    assert port.writes[0][:7] == bytes([OP_MENU_BYTE, 95, 0]) + struct.pack("<I", 3), port.writes
+    assert port.writes[0][7:19] == struct.pack("<III", 0, 1, 3), port.writes
+    device.close()
 
 
 def connect_to(port, *args, **kwargs):
@@ -1004,8 +1054,8 @@ def test_a_reply_that_does_not_arrive_mentions_a_comm_failure():
 class ClosablePort(FakePort):
     """A FakePort that can be closed, and refuses writes once it is, like a real port."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, answers_op_103=True):
+        super().__init__(answers_op_103=answers_op_103)
         self.is_open = True
 
     def close(self):
@@ -1054,7 +1104,7 @@ def test_connecting_to_other_firmware_says_so():
     Synth Pal firmware 83 ('S'). The class must say so, rather than only that the handshake was
     wrong, and must not send it op 81."""
     for reply, name, client in ((87, "Wave Pal", "WavePalDevice"), (83, "Synth Pal", "SynthPalDevice")):
-        port = ClosablePort()
+        port = ClosablePort(answers_op_103=False)  # Wave Pal and Synth Pal ignore op 103
         port.response = bytearray([reply, 1, 0, 0, 0])  # Then firmware v1
         original_serial = pulse_pal.serial.Serial
         pulse_pal.serial.Serial = lambda *args, **kwargs: port
@@ -1064,7 +1114,7 @@ def test_connecting_to_other_firmware_says_so():
             pulse_pal.serial.Serial = original_serial
         assert f"runs {name} firmware (v1)" in str(error), error
         assert client in str(error), error
-        assert port.writes == [bytes([OP_MENU_BYTE, 72])], port.writes
+        assert port.writes == [bytes([OP_MENU_BYTE, 103]), bytes([OP_MENU_BYTE, 72])], port.writes
         assert not port.is_open
 
 

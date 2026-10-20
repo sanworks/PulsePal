@@ -46,6 +46,8 @@ static const uint32_t CurrentFirmwareVersion = 22;
 // How long to wait for a reply. The device replies as soon as it has read and executed a command, which takes
 // milliseconds. A missing reply usually means that the device is showing COMM. FAILURE! (see readConfirm()).
 static const unsigned int ReplyTimeoutMs = 2000;
+// How long to wait for a reply to op 103 before trying op 72 (see initialize())
+static const unsigned int HandshakeDeviceCyclesTimeoutMs = 300;
 
 // The handshake's reply is the last 5 bytes the device sends before it has been quiet this long (see
 // readHandshakeReply()), and the device gets at most HandshakeMaxTime after the first 5 bytes to go quiet
@@ -135,17 +137,17 @@ static float outputParamValue(const PulsePal::OutputParams& params, uint8_t para
     return 0;
 }
 
-// Reads the reply to op 72, the handshake, once it has been written: 'K', then the firmware version. Returns false if
-// fewer than 5 bytes arrive within ReplyTimeoutMs. The reply is the last 5 bytes the device sends before it goes quiet.
+// Reads the reply to op 72, the handshake (or op 103), once it has been written: 'K', then the firmware version.
+// Returns false if fewer than 5 bytes arrive within timeoutMs. The reply is the last 5 bytes the device sends before it goes quiet.
 // A command that an earlier session sent just before it closed can still be waiting on the device when this session
 // connects, e.g. while the device redraws its screen. The device answers it first: after initialize() discarded the
 // input, and before the handshake. Its reply is skipped. Bytes are read until none has arrived for HandshakeQuietTime,
 // longer than the device takes to redraw its screen between two replies, and for at most HandshakeMaxTime, so that a
 // device that never stops sending is refused rather than waited for. The Python and MATLAB classes do the same.
-static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5])
+static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5], unsigned int timeoutMs = ReplyTimeoutMs)
 {
     std::vector<uint8_t> received(5);
-    if (serial->read(received.data(), 5, ReplyTimeoutMs) < 5) { // Waits for a whole reply
+    if (serial->read(received.data(), 5, timeoutMs) < 5) { // Waits for a whole reply
         return false;
     }
     const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
@@ -269,10 +271,19 @@ bool PulsePal::initialize(std::string portString)
                             // the device sends after this, to a command it had not reached yet, is skipped by
                             // readHandshakeReply().
 
-    // Op 72: handshake. The reply is 'K', then the firmware version (uint32)
+    // Op 103: handshake, and the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). The reply
+    // is 'K', then the firmware version (uint32). Firmware from before October 2026, Wave Pal and Synth Pal ignore it,
+    // and answer op 72, whose times are in 50 us cycles. A device that answers op 103 too late counts the session's
+    // times in 50 us cycles too, after the op 72 that follows: either way op 94 reports the session's unit.
+    const uint8_t handshakeDeviceCycles[2] = {OpMenuByte, OP_HANDSHAKE_DEVICE_CYCLES};
     const uint8_t handshake[2] = {OpMenuByte, OP_HANDSHAKE};
     uint8_t reply[5] = {0};
-    if (!serial->write(handshake, 2) || !readHandshakeReply(serial, reply) || (reply[0] != HandshakeReply)) {
+    bool replied = serial->write(handshakeDeviceCycles, 2) &&
+                   readHandshakeReply(serial, reply, HandshakeDeviceCyclesTimeoutMs);
+    if (!replied) {
+        replied = serial->write(handshake, 2) && readHandshakeReply(serial, reply);
+    }
+    if (!replied || (reply[0] != HandshakeReply)) {
         if ((reply[0] == WavePalHandshakeReply) || (reply[0] == SynthPalHandshakeReply)) {
             const char* name = (reply[0] == WavePalHandshakeReply) ? "Wave Pal" : "Synth Pal";
             std::ostringstream otherFirmwareError;
@@ -311,7 +322,8 @@ bool PulsePal::initialize(std::string portString)
                   << " is available: see /MATLAB/FirmwareLoader." << std::endl;
     }
 
-    // Op 94: hardware version, timer period (us, uint32), number of custom trains, maximum pulses per train (uint32).
+    // Op 94: hardware version, the session's time unit (us, uint32: the timer period after op 103, 50 after op 72), number
+    // of custom trains, maximum pulses per train (uint32).
     // Firmware v21 does not have op 94, and runs only on Pulse Pal 2.
     if (version > 21) {
         const uint8_t request[2] = {OpMenuByte, OP_SEND_HARDWARE_INFO};
@@ -914,7 +926,7 @@ bool PulsePal::program(uint8_t channel, uint8_t paramCode, uint32_t paramValue, 
 
 // Checks that a parameter value is in range for the connected device. channel is only used in the error message.
 // A custom train targeting bursts (customTrainTarget = 1) needs a burst duration: its times are burst onsets, and a
-// burst of no duration plays one 50 us cycle of a pulse at each. Checked whenever either parameter is sent, against the
+// burst of no duration plays one timer cycle of a pulse at each. Checked whenever either parameter is sent, against the
 // other as the device holds it, as in the MATLAB and Python classes.
 bool PulsePal::checkCustomBursts(int channel, int customTrainTarget, float burstDuration, const char* context)
 {
@@ -981,7 +993,7 @@ uint32_t PulsePal::encodeParam(uint8_t paramCode, float value)
 // Seconds to hardware timer cycles, rounded to the nearest cycle. The value must already be checked.
 // The shortest phase duration, inter-pulse interval and train duration, in seconds, and the step of custom pulse times,
 // as in the MATLAB and Python classes (info.minPulseWidth_us, min_pulse_width_us) and the joystick menu. One timer
-// cycle (50 us) on Pulse Pal 3, whose trigger channels latch every edge, and two (100 us) on Pulse Pal 2, whose trigger
+// cycle (10 us) on Pulse Pal 3, whose trigger channels latch every edge, and two (100 us) on Pulse Pal 2, whose trigger
 // channels read their inputs once per cycle, so that a one cycle pulse could fall between two reads.
 double PulsePal::minPulseTime()
 {

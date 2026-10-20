@@ -27,9 +27,11 @@
 %   P.autoSync = true;
 %
 % Units and values. Voltages are in volts, -10 to 10. Times are in seconds, from 0 to 9999.9999 (info.maxTime, the
-% longest time the device's screen shows), rounded to the nearest cycle of the device's timer (50 us); the property
-% then holds the time the device plays, so 0.00012 reads back as 0.0001. Phase durations, the inter-pulse interval and
-% the pulse train duration are at least info.minPulseWidth_us: 50 us on Pulse Pal 3 and 100 us on Pulse Pal 2, the
+% longest time the device's screen shows), rounded to the nearest cycle of the device's timer (info.cyclePeriod_us:
+% 10 us on Pulse Pal 3, and 50 us on Pulse Pal 2 and on Pulse Pal 3 with firmware from before October 2026); the
+% property then holds the time the device plays, so 0.000123 reads back as 0.00012 (0.0001 on a 50 us timer). Phase
+% durations, the inter-pulse interval and the pulse train duration are at least info.minPulseWidth_us: 10 us on Pulse
+% Pal 3 and 100 us on Pulse Pal 2, the
 % shortest pulse that each one's trigger channels detect reliably. Custom pulse times are not rounded: each must be a
 % multiple of info.minPulseWidth_us. On/off
 % parameters are logical (true or false; 1 and 0 work too), and modes are names, such as 'Gated' (not case sensitive;
@@ -273,7 +275,19 @@ classdef PulsePalDevice < handle
             % to the handshake. A reply the device sends after this, to a command it had not reached yet, is skipped by
             % readHandshakeReply().
             flush(obj.port);
-            obj.port.write([obj.OpMenuByte 72], 'uint8');
+            % Op 103: the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). Firmware from
+            % before October 2026, Wave Pal and Synth Pal ignore it, and answer op 72, whose times are in 50 us cycles.
+            % A device that answers op 103 too late counts the session's times in 50 us cycles too, after the op 72
+            % that follows: either way op 94 reports the session's unit, which the class then uses. Polled, not read,
+            % so that no read warns of a timeout.
+            obj.port.write([obj.OpMenuByte 103], 'uint8');
+            waitStart = tic;
+            while obj.port.NumBytesAvailable < 5 && toc(waitStart) < 0.3
+                pause(0.001);
+            end
+            if obj.port.NumBytesAvailable < 5
+                obj.port.write([obj.OpMenuByte 72], 'uint8');
+            end
             reply = obj.readHandshakeReply(); % 'K' (75), then the firmware version (uint32)
             HandShakeOkByte = [];
             replyVersion = 0;
@@ -311,8 +325,10 @@ classdef PulsePalDevice < handle
                 if obj.firmwareVersion > 21
                     obj.port.write([obj.OpMenuByte 94], 'uint8'); % Request hardware info
                     obj.hardwareVersion = obj.port.read(1, 'uint8');
-                    obj.cyclePeriod = obj.port.read(1, 'uint32');
-                    obj.cycleFrequency = 1/(obj.cyclePeriod/1000000);
+                    obj.cyclePeriod = obj.port.read(1, 'uint32'); % The session's time unit (see op 103 above)
+                    % Not 1/(cyclePeriod/1e6): at 10 us that is 99999.99999999999, and times read back from the device
+                    % would convert to 0.00010000000000000002 s instead of 0.0001 s
+                    obj.cycleFrequency = 1000000/obj.cyclePeriod;
                     obj.nCustomPulseTrains = obj.port.read(1, 'uint8');
                     obj.maxCustomPulses = obj.port.read(1, 'uint32');
                     obj.port.write([obj.OpMenuByte 100], 'uint8'); % Request the circuit board revision
@@ -544,7 +560,7 @@ classdef PulsePalDevice < handle
             % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
             % customTrainID: the train's number, 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
             % pulseTimes: in seconds from the start of the train, increasing, in multiples of info.minPulseWidth_us
-            %             (50 us on Pulse Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s (info.maxTime).
+            %             (10 us on Pulse Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s (info.maxTime).
             % voltages: one per pulse, in volts, -10 to 10.
             % An output channel plays the train when its customTrainID property is set to the train's number. Each
             % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
@@ -563,7 +579,7 @@ classdef PulsePalDevice < handle
 
         function sendCustomWaveform(obj, customTrainID, samplingPeriod, voltages)
             % Loads a sampled waveform onto the device, as a custom pulse train of adjoining pulses: one per sample,
-            % samplingPeriod seconds apart (a multiple of info.minPulseWidth_us: 50 us on Pulse Pal 3, 100 us on Pulse
+            % samplingPeriod seconds apart (a multiple of info.minPulseWidth_us: 10 us on Pulse Pal 3, 100 us on Pulse
             % Pal 2). Set phase1Duration to samplingPeriod on the output
             % channel that plays it, so that each sample lasts until the next. customTrainID: the train's number, 1-4
             % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10. It is loaded as a custom train is:
@@ -1176,7 +1192,7 @@ classdef PulsePalDevice < handle
         end
 
         function cycles = maxTimeCycles(obj)
-            % MaxTime in timer cycles: 199999998 on a 50 us timer
+            % MaxTime in timer cycles: 999999990 on a 10 us timer, 199999998 on a 50 us timer
             cycles = obj.roundHalfEven(obj.MaxTime*obj.cycleFrequency);
         end
 
@@ -1201,7 +1217,7 @@ classdef PulsePalDevice < handle
 
         function checkCustomBursts(~, targets, burstDurations)
             % Refuses a custom train targeting bursts on a channel with no burst duration. Its times are burst onsets,
-            % and a burst of no duration plays one 50 us cycle of a pulse at each: a program that cannot be what was
+            % and a burst of no duration plays one timer cycle of a pulse at each: a program that cannot be what was
             % meant. (The device once played one pulse and then left the channel "playing", ignoring triggers until it
             % was stopped.) The same check as the Python class's.
             for i = 1:4
@@ -1266,7 +1282,7 @@ classdef PulsePalDevice < handle
                     num2str(obj.info.hardwareVersion) ' can only store '...
                     num2str(obj.maxCustomPulses) ' pulses per custom pulse train.']);
             end
-            % Times are refused, not rounded, between two steps of info.minPulseWidth_us (50 us on Pulse Pal 3, 100 us
+            % Times are refused, not rounded, between two steps of info.minPulseWidth_us (10 us on Pulse Pal 3, 100 us
             % on Pulse Pal 2), as in the Python class, so that a train plays as written. Checked to the nearest
             % microsecond.
             microseconds = obj.roundHalfEven(double(pulseTimes(:)')*1000000);

@@ -29,6 +29,9 @@ import serial.tools.list_ports
 
 OP_MENU_BYTE = 213  # The first byte of every command, for all three firmwares
 OP_HANDSHAKE = 72
+# Pulse Pal's handshake of October 2026: as op 72, and the session's times are in the device's own timer cycles (10 us
+# on Pulse Pal 3) instead of 50 us cycles. Older Pulse Pal firmware, Wave Pal and Synth Pal ignore it.
+OP_HANDSHAKE_DEVICE_CYCLES = 103
 OP_SERIAL_NUMBER = 102  # The USB serial number, on all three firmwares
 
 # The firmwares that run on Pulse Pal hardware, by their reply to the handshake
@@ -64,12 +67,13 @@ HANDSHAKE_QUIET_TIME = 0.05  # Seconds without a byte that end the handshake's r
 HANDSHAKE_MAX_TIME = 1  # Seconds after the first 5 bytes, at most, to wait for the device to go quiet
 
 
-def read_handshake_reply(port):
-    """Read the reply to op 72, the handshake, once it has been written.
+def read_handshake_reply(port, timeout=None):
+    """Read the reply to op 72, the handshake (or Pulse Pal's op 103), once it has been written.
 
     Returns `(letter, version)`: the firmware's letter (see
     FIRMWARE_BY_HANDSHAKE_REPLY) and its version. Returns None if fewer than
-    5 bytes arrive within the port's timeout.
+    5 bytes arrive within the port's timeout, or within `timeout` seconds
+    if it is given.
 
     The reply is the last 5 bytes the device sends before it goes quiet. A
     command that an earlier session sent just before it closed can still be
@@ -81,7 +85,15 @@ def read_handshake_reply(port):
     at most HANDSHAKE_MAX_TIME, so that a device that never stops sending is
     refused rather than waited for.
     """
-    received = bytearray(port.read(HANDSHAKE_REPLY_BYTES))  # Waits for a whole reply, up to the port's timeout
+    if timeout is None:
+        received = bytearray(port.read(HANDSHAKE_REPLY_BYTES))  # Waits for a whole reply, up to the port's timeout
+    else:
+        port_timeout = port.timeout
+        port.timeout = timeout
+        try:
+            received = bytearray(port.read(HANDSHAKE_REPLY_BYTES))
+        finally:
+            port.timeout = port_timeout
     if len(received) < HANDSHAKE_REPLY_BYTES:
         return None
     started = last_arrival = time.monotonic()

@@ -44,6 +44,11 @@ byte. Its clients are `/Python/PulsePal/pulsepal/wave_pal.py` and `/MATLAB/@Wave
 does Synth Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients
 `/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
 bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is not its own.
+Pulse Pal also answers op 103, with which the current Pulse Pal classes connect: the session's
+times are then in the device's own timer cycles (10 µs on Pulse Pal 3), where op 72 makes them
+50 µs cycles, as every older client sends them (see "Time units" in `/Firmware/PROTOCOL.md`).
+Older firmware, Wave Pal and Synth Pal ignore op 103, and the classes fall back to op 72. A test
+harness that pings a Pulse Pal mid-session sends op 103: op 72 would switch the session's unit.
 All three answer op 100 with the circuit board revision, which they read from five pins at
 startup (`readHardwareRevision()`), and op 102 with the USB serial number. The Python and MATLAB
 classes read both into `info` when they connect, and the C++ class into `getHardwareRevision()`
@@ -95,6 +100,9 @@ share these conventions. Keep them in new code.
   all three Pulse Pal classes check, are listed in "Value limits" in `/Firmware/PROTOCOL.md`;
   change them there and in every class together. The Pulse Pal classes hold a time as the device
   plays it, rounded to the timer cycle, and store values read back from the device as they are.
+- **The cycle rate is 1e6 / period**, from the period op 94 reports. `1 / (period / 1e6)` is
+  99999.99999999999 at 10 µs, and 10 cycles read back from the device then converted to
+  0.00010000000000000002 s.
 - **Round halfway values to the even integer** when converting to timer cycles, DAC codes,
   microseconds or microvolts, as Python's `round()` and the C++ class do. MATLAB's `round()`
   and integer casts round halves away from zero, so the MATLAB classes call
@@ -125,7 +133,7 @@ share these conventions. Keep them in new code.
   usually belongs in all of them.
 - **The handshake reads until the device is quiet.** A command an earlier session sent just
   before it closed can still be queued on the device, which answers it after the client has
-  discarded its input. So every client reads the reply to op 72 until no byte has arrived for
+  discarded its input. So every client reads the handshake's reply until no byte has arrived for
   50 ms, and takes the last 5 bytes (see "Connecting" in `/Firmware/PROTOCOL.md`). A test fake
   that queues all its replies in advance must report none of them as waiting, or the handshake
   reads them all.

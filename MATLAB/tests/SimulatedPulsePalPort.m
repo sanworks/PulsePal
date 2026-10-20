@@ -1,5 +1,5 @@
 % SimulatedPulsePalPort stands in for a Pulse Pal's serial port in /MATLAB/tests/testPulsePalDeviceOffline.m. It records
-% every write, and replies as Pulse Pal firmware does (/Firmware/PROTOCOL.md): the handshake, the hardware info, the
+% every write, and replies as Pulse Pal firmware does (/Firmware/PROTOCOL.md): the handshakes (ops 103 and 72), the hardware info, the
 % circuit board revision, a confirm byte to each command that sends one, and the parameters of the last op 92 to op 93. It has the methods of
 % pulsepal.DotNetSerialPort that PulsePalDevice uses, so P = PulsePalDevice(SimulatedPulsePalPort()) connects to it.
 
@@ -35,6 +35,8 @@ classdef SimulatedPulsePalPort < handle
                               % left queued on the device
         circuitBoardRevision % The circuit board revision op 100 reports: 5 on Pulse Pal 3, 0 on Pulse Pal 2
         silent = false % true: reply to nothing, as a device showing COMM. FAILURE! until its joystick is clicked
+        answersOp103 = true % false: ignore op 103, as firmware from before October 2026 does (and Wave Pal, Synth Pal)
+        cyclePeriod = 50 % The timer cycle, in us. At 10 (Pulse Pal 3), an op 72 session's times are in 50 us cycles
         status = uint8([5 typecast(uint32([3 0 2 0 1 0 1]), 'uint8')]) % The reply to op 101: channels 1 and 3 playing,
                                                                        % then the counters
     end
@@ -43,6 +45,7 @@ classdef SimulatedPulsePalPort < handle
         hardwareVersion
         firmwareVersion
         replies = uint8([]) % Bytes waiting to be read
+        sessionCycles = 1 % The device cycles in each time unit of the session: 50 us cycles after op 72
     end
 
     properties (Dependent)
@@ -123,12 +126,19 @@ classdef SimulatedPulsePalPort < handle
                 return
             end
             switch bytes(2)
-                case 72 % Handshake: 'K', then the firmware version
+                case 72 % Handshake: 'K', then the firmware version. Times in 50 us cycles
+                    obj.sessionCycles = 50/obj.cyclePeriod;
                     obj.reply([75 typecast(uint32(obj.firmwareVersion), 'uint8')]);
-                case 94 % Hardware info: version, timer period (us), custom trains, pulses per train
+                case 103 % As op 72, and times in the device's own cycles
+                    if obj.answersOp103
+                        obj.sessionCycles = 1;
+                        obj.reply([75 typecast(uint32(obj.firmwareVersion), 'uint8')]);
+                    end
+                case 94 % Hardware info: version, the session's time unit (us), custom trains, pulses per train
                     nTrains = 2 + 2*(obj.hardwareVersion > 2);
                     maxPulses = 5000 + 5000*(obj.hardwareVersion > 2);
-                    obj.reply([obj.hardwareVersion typecast(uint32(50), 'uint8') nTrains ...
+                    period = obj.cyclePeriod*obj.sessionCycles;
+                    obj.reply([obj.hardwareVersion typecast(uint32(period), 'uint8') nTrains ...
                                typecast(uint32(maxPulses), 'uint8')]);
                 case 100 % Circuit board revision
                     obj.reply(obj.circuitBoardRevision);

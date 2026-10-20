@@ -115,12 +115,12 @@ P.trigger([1 2]);
 |---|---|
 | Output channels | 4, -10 V to +10 V |
 | Voltage steps | 0.305 mV on Pulse Pal 3 (16-bit DAC); 4.88 mV on Pulse Pal 2 (12-bit DAC, which plays the step at or below the voltage) |
-| Time steps | 50 µs: every time is rounded to the nearest 50 µs, and the property then holds the rounded time (0.00012 reads back as 0.0001) |
+| Time steps | 10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2 (`info.cycle_period_us`): every time is rounded to the nearest step, and the property then holds the rounded time (0.000123 reads back as 0.00012; on Pulse Pal 2, 0.00012 reads back as 0.0001). Pulse Pal 3 firmware from before October 2026 runs at 50 µs |
 | Longest time | 9999.9999 s, for every time setting and custom pulse time |
-| Shortest pulse | 50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 (`info.min_pulse_width_us`), for the phase durations, the inter-pulse interval and the pulse train duration: the shortest pulse each one's trigger inputs detect reliably. A Pulse Pal 2, or a Pulse Pal 3 with firmware from before October 2026, can miss a 50 µs pulse |
-| Custom trains | Pulse Pal 3: 4 trains of up to 10000 pulses. Pulse Pal 2: 2 trains of up to 5000. Pulse times are multiples of the shortest pulse: 50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 |
-| Trigger channels | 2, TTL. Measured on a Pulse Pal 3, an output starts 58 to 108 µs after a trigger's rising edge, depending on where the edge falls in the device's 50 µs cycle |
-| Soft triggers | `trigger()` reaches the device over USB, which adds a variable delay. The channels it names start together, in the same 50 µs cycle |
+| Shortest pulse | 10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 (`info.min_pulse_width_us`), for the phase durations, the inter-pulse interval and the pulse train duration: the shortest pulse each one's trigger inputs detect reliably. A Pulse Pal 2, or a Pulse Pal 3 with firmware from before October 2026, can miss a pulse shorter than 100 µs |
+| Custom trains | Pulse Pal 3: 4 trains of up to 10000 pulses. Pulse Pal 2: 2 trains of up to 5000. Pulse times are multiples of the shortest pulse: 10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 |
+| Trigger channels | 2, TTL. Measured on a Pulse Pal 3, an output starts 18 to 28 µs after a trigger's rising edge, depending on where the edge falls in the device's 10 µs cycle (58 to 108 µs with firmware from before October 2026) |
+| Soft triggers | `trigger()` reaches the device over USB, which adds a variable delay. The channels it names start together, in the same timer cycle |
 
 ### Pulse Pal 2 and Pulse Pal 3
 
@@ -246,7 +246,7 @@ P.continuous_loop[1] = True
 **Trial-by-trial parameters with param sync (Pulse Pal 3).** Each trial's parameters are sent
 during the trial before, and applied at the instant the next one starts. Wire the trial-start
 TTL to **both** trigger channels: trigger channel 2, in param sync mode, loads the stored
-parameters, and trigger channel 1 starts the train in the same 50 µs cycle, with the new
+parameters, and trigger channel 1 starts the train in the same timer cycle, with the new
 parameters.
 
 ```python
@@ -317,7 +317,7 @@ A Pulse Pal 3 holds 10000 samples per train, so a custom waveform lasts at most 
 For longer or faster waveforms, use Wave Pal.
 
 **Record exactly what was played.** `export_params()` returns every parameter as the device
-plays it (times rounded to 50 µs), in a form `json` can save:
+plays it (times rounded to the device's 10 µs or 50 µs step), in a form `json` can save:
 
 ```python
 import json
@@ -361,8 +361,9 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
 
 - **The inter-pulse interval is not the period.** It runs from the end of one pulse to the
   start of the next. 5 ms pulses at 20 Hz need an inter-pulse interval of 45 ms, not 50 ms.
-- **Times round to 50 µs.** 0.00012 s plays as 0.0001 s, and 125 µs (2.5 steps) as 100 µs.
-  Read the property back to see what the device plays.
+- **Times round to the device's step**, 10 µs on Pulse Pal 3 and 50 µs on Pulse Pal 2. On Pulse
+  Pal 3, 0.000123 s plays as 0.00012 s, and 125 µs (12.5 steps) as 120 µs; on Pulse Pal 2, 0.00012 s
+  plays as 0.0001 s. Read the property back to see what the device plays.
 - **The end of a train can cut pulses.** A monophasic pulse still playing when the train ends
   is cut short. A biphasic pulse starts only if it can finish before the train ends, and in
   bursts, a pulse starts only if it fits in the burst, so the last pulse may be missing.
@@ -381,7 +382,7 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
   ends, whatever the train duration; one that loops stops at the train duration, and continuous
   loop mode does not change either. Each pass of a looping train starts as the last pulse of the
   pass before ends: the first pulse's time is not repeated as a gap. Custom pulse times must be
-  multiples of the shortest pulse (50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2): a time in between
+  multiples of the shortest pulse (10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2): a time in between
   raises an error rather than being rounded. A train
   needs at least one pulse. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
   burst duration above 0: set `burst_duration` first, or both in a `batch()` block.

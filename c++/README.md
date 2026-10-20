@@ -121,12 +121,13 @@ These changed:
   that the device and `currentOutputParams` agree.
 - Out-of-range values are rejected, instead of silently limited. Voltages are -10 to 10 V. Times are 0 to
   9999.9999 s, the longest time the device's joystick menu shows, except phase durations, the inter-pulse interval
-  and the pulse train duration, whose minimum is 0.00005 s (one timer cycle) on Pulse Pal 3 and 0.0001 s (two) on
+  and the pulse train duration, whose minimum is 0.00001 s (one timer cycle) on Pulse Pal 3 and 0.0001 s (two) on
   Pulse Pal 2: the shortest pulse each one's trigger channels detect reliably. Custom pulse times must be multiples
   of that minimum. These are the MATLAB and Python classes' limits, listed in "Value limits" in
   [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
-- Times are rounded to the nearest 50 µs timer cycle, and voltages to the nearest DAC code, as in the Python
-  class. The legacy class truncated times, so e.g. a 0.0007 s phase was sent as 13 cycles (0.00065 s) instead of 14.
+- Times are rounded to the nearest timer cycle (10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2), and voltages to the
+  nearest DAC code, as in the Python class. `initialize()` connects with op 103, so that times are in the device's
+  own cycles, and with op 72 to firmware from before October 2026, whose cycle is 50 µs. The legacy class truncated times, so e.g. a 0.0007 s phase was sent as 13 cycles (0.00065 s) instead of 14.
 - The device's confirm bytes are read. The legacy class left them unread.
 - Fixed: `setInterPulseInterval()` stored its value in `interPhaseInterval`; `currentInputParams` (the trigger
   modes) was uninitialized, so `syncAllParams()` could send any trigger mode; `setPulseTrainDelay()` could not set

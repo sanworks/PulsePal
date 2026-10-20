@@ -42,13 +42,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 typedef std::vector<uint8_t> Bytes;
 
 // Records writes, and replies to reads with the bytes in `replies`. Once those run out, each read returns `ack`,
-// unless `silent` is set, in which case it times out. The first `waiting` bytes of `replies` count as sent by the
+// unless `silent` is set, in which case it times out. With `answersOp103` false, it ignores op 103, as firmware from
+// before October 2026 does (and Wave Pal, Synth Pal): reads time out from op 103 until op 72 is written. The first `waiting` bytes of `replies` count as sent by the
 // device before they are read (bytesWaiting()); the rest only when they are read, so by default the handshake reads
 // exactly its 5 bytes.
 class FakeSerialPort : public SerialPort
 {
 public:
-    FakeSerialPort() : portOpen(false), ack(1), silent(false), waiting(0) {}
+    FakeSerialPort() : portOpen(false), ack(1), silent(false), waiting(0), answersOp103(true), ignoring(false) {}
 
     bool open(const std::string& portName) override { openedName = portName; portOpen = true; return true; }
     void close() override { portOpen = false; }
@@ -57,11 +58,19 @@ public:
     bool write(const uint8_t* data, size_t nBytes) override
     {
         writes.push_back(Bytes(data, data + nBytes));
+        if ((nBytes == 2) && (data[0] == 213) && (data[1] == 103)) {
+            ignoring = !answersOp103;
+        } else if ((nBytes == 2) && (data[0] == 213) && (data[1] == 72)) {
+            ignoring = false;
+        }
         return true;
     }
     size_t read(uint8_t* data, size_t nBytes, unsigned int) override
     {
         reads.push_back(nBytes);
+        if (ignoring) {
+            return 0;
+        }
         for (size_t i = 0; i < nBytes; i++) {
             if (!replies.empty()) {
                 data[i] = replies.front();
@@ -82,13 +91,14 @@ public:
 
     // Queues the handshake reply, and on firmware v22 the replies to op 94 and op 100: a circuit board revision of 5
     // on Pulse Pal 3, and 0 on Pulse Pal 2, which encodes none
-    void queueConnectReplies(uint32_t firmwareVersion, uint8_t hardwareVersion)
+    // (op 94's timer period: cyclePeriod, in us)
+    void queueConnectReplies(uint32_t firmwareVersion, uint8_t hardwareVersion, uint8_t cyclePeriod = 50)
     {
         uint8_t handshake[5] = {75, (uint8_t)firmwareVersion, 0, 0, 0};
         replies.insert(replies.end(), handshake, handshake + 5);
         if (firmwareVersion > 21) {
             uint32_t maxPulses = (hardwareVersion > 2) ? 10000 : 5000;
-            uint8_t info[10] = {hardwareVersion, 50, 0, 0, 0, (uint8_t)((hardwareVersion > 2) ? 4 : 2),
+            uint8_t info[10] = {hardwareVersion, cyclePeriod, 0, 0, 0, (uint8_t)((hardwareVersion > 2) ? 4 : 2),
                                 (uint8_t)maxPulses, (uint8_t)(maxPulses >> 8), 0, 0};
             replies.insert(replies.end(), info, info + 10);
             replies.push_back((hardwareVersion > 2) ? 5 : 0);
@@ -107,6 +117,8 @@ public:
     uint8_t ack;
     bool silent;
     size_t waiting;
+    bool answersOp103;
+    bool ignoring; // Op 103 was written, and is ignored
     std::deque<uint8_t> replies;
     std::vector<Bytes> writes;
     std::vector<size_t> reads;
@@ -271,7 +283,7 @@ static void test_connect_to_pulse_pal_3()
     // (op 91), then defaults. No client name (op 89): the program sets that with setClientIDString()
     CHECK(port.writes.size() == 6);
     if (port.writes.size() == 6) {
-        CHECK_BYTES(port.writes[0], bytes({213, 72}));
+        CHECK_BYTES(port.writes[0], bytes({213, 103})); // Times in the device's own cycles
         CHECK_BYTES(port.writes[1], bytes({213, 94}));
         CHECK_BYTES(port.writes[2], bytes({213, 100}));
         CHECK_BYTES(port.writes[3], bytes({213, 102}));
@@ -308,19 +320,62 @@ static void test_connect_to_firmware_v21()
     FakeSerialPort port;
     PulsePal pulsePal(&port);
     port.queueConnectReplies(21, 2);
+    port.answersOp103 = false;
     CaptureErrors notice;
     CHECK(pulsePal.initialize("COM1"));
     CHECK(contains(notice.text(), "v22 is available"));
     CHECK(pulsePal.getFirmwareVersion() == 21);
     CHECK(pulsePal.getHardwareVersion() == 2);
     CHECK(pulsePal.getHardwareRevision() == 0);
-    // No op 94 or op 100 on firmware v21, and parameters are programmed with op 73
+    // Op 72 after op 103, which v21 ignores. No op 94 or op 100 on firmware v21, and parameters are programmed with op 73
+    CHECK(port.writes.size() == 3);
+    if (port.writes.size() == 3) {
+        CHECK_BYTES(port.writes[0], bytes({213, 103}));
+        CHECK_BYTES(port.writes[1], bytes({213, 72}));
+        CHECK(port.writes[2][1] == 73);
+        CHECK(port.writes[2].size() == 180);
+    }
+}
+
+static void test_handshake_falls_back_to_op_72()
+{
+    // Firmware v22 from before October 2026 ignores op 103 too, and its times are in 50 us cycles, as op 94 reports
+    FakeSerialPort port;
+    PulsePal pulsePal(&port);
+    port.queueConnectReplies(22, 3);
+    port.answersOp103 = false;
+    CHECK(pulsePal.initialize("COM1"));
+    CHECK(port.writes.size() >= 3);
+    if (port.writes.size() >= 3) {
+        CHECK_BYTES(port.writes[0], bytes({213, 103}));
+        CHECK_BYTES(port.writes[1], bytes({213, 72}));
+        CHECK_BYTES(port.writes[2], bytes({213, 94}));
+    }
+    port.writes.clear();
+    CHECK(pulsePal.setPhase1Duration(1, 0.0002f)); // 4 cycles of 50 us
+    CHECK(port.writes.size() == 1);
+    if (port.writes.size() == 1) {
+        CHECK_BYTES(port.writes[0], bytes({213, 74, 4, 1, 4, 0, 0, 0}));
+    }
+}
+
+static void test_a_10_us_cycle()
+{
+    // Pulse Pal 3 runs a 10 us cycle: times are rounded to it, and one cycle is the shortest phase
+    FakeSerialPort port;
+    PulsePal pulsePal(&port);
+    port.queueConnectReplies(22, 3, 10);
+    CHECK(pulsePal.initialize("COM1"));
+    port.writes.clear();
+    CHECK(pulsePal.setPhase1Duration(1, 0.000123f)); // 12 cycles
+    CHECK(pulsePal.setInterPulseInterval(2, 0.00001f)); // 1 cycle, the minimum
     CHECK(port.writes.size() == 2);
     if (port.writes.size() == 2) {
-        CHECK_BYTES(port.writes[0], bytes({213, 72}));
-        CHECK(port.writes[1][1] == 73);
-        CHECK(port.writes[1].size() == 180);
+        CHECK_BYTES(port.writes[0], bytes({213, 74, 4, 1, 12, 0, 0, 0}));
+        CHECK_BYTES(port.writes[1], bytes({213, 74, 7, 2, 1, 0, 0, 0}));
     }
+    CaptureErrors errors;
+    CHECK(!pulsePal.setPhase1Duration(1, 0.000004f)); // 0 cycles
 }
 
 static void test_a_late_reply_to_an_earlier_session_is_skipped()
@@ -810,6 +865,8 @@ int main()
         {"custom trains use ops 75 and 76 on firmware v21", test_custom_trains_use_ops_75_and_76_on_firmware_v21},
         {"custom trains reject bad IDs, sizes and times", test_custom_trains_reject_bad_ids_sizes_and_times},
         {"Pulse Pal 3 plays one cycle pulses", test_pulse_pal_3_plays_one_cycle_pulses},
+        {"Handshake falls back to op 72", test_handshake_falls_back_to_op_72},
+        {"A 10 us cycle", test_a_10_us_cycle},
         {"end() disconnects and closes the port", test_end_disconnects_and_closes_the_port},
         {"commands before initialize() send nothing", test_commands_before_initialize_send_nothing},
     };

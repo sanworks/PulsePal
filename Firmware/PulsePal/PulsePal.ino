@@ -104,21 +104,38 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 // Define other macros
-#define TIMER_PERIOD 50 // How often the hardware timer refreshes pulse pal. Units = μs
-                        // Limited by ~15μs analog read speed for joystick x/y and precision of the joystick UI (0.0000).
-                        // On HW3 this may be reduced in the future with the ADC library for fast analog reads + UI mods
+// How often the hardware timer runs handler(), in us: the unit of every time the device holds. Pulse Pal 3 (pin map 1)
+// runs at 10us: FlexPWM3 submodule 1 is its timer, and the same timer's output on the LDAC pin latches the DAC (see
+// startHardwareTimer()). Pulse Pal 2, and Pulse Pal 3 pin map 0, whose LDAC pin has no timer output, run at 50us.
+#if (HARDWARE_VERSION > 2) && (PIN_MAP_VERSION == 1)
+  #define TIMER_PERIOD 10
+  #define FLEXPWM_TIMER 1 // FlexPWM3 submodule 1 is the timer, and latches the DAC
+#else
+  #define TIMER_PERIOD 50
+  #define FLEXPWM_TIMER 0 // Pulse Pal 2's TC3, or Pulse Pal 3's PIT (IntervalTimer); handler() latches the DAC itself
+#endif
+// Times in 50us cycles, which every client before October 2026 sends and every settings file before then holds. A
+// session that connects with op 72 (every client that is not the current MATLAB, Python or C++ class) and a settings file
+// ending in SETTINGS_FILE_END_MARKER_50US count times in these. The device multiplies them by LEGACY_TIME_FACTOR, which
+// is exact, and divides what it sends back (see usbTimeToCycles() in USBOps.ino). A session that connects with op 103
+// uses the device's own cycles.
+#define LEGACY_TIMER_PERIOD 50
+#define LEGACY_TIME_FACTOR (LEGACY_TIMER_PERIOD / TIMER_PERIOD) // 5 on a 10us cycle, 1 on a 50us cycle
+static_assert(LEGACY_TIME_FACTOR * TIMER_PERIOD == LEGACY_TIMER_PERIOD, "TIMER_PERIOD must divide 50us");
 // Shortest phase, inter-pulse interval and train duration the joystick menu sets, in timer cycles. The MATLAB, Python and
 // C++ classes use the same limit, by hardware version. On Pulse Pal 2, 2 cycles (100us): its trigger channels read their
 // inputs once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads. Pulse Pal 3's trigger
-// channels also latch every edge (see setupTriggerEdgeLatches()), and detect 1 cycle (50us) pulses, so it plays them.
+// channels also latch every edge (see setupTriggerEdgeLatches()), and detect 1 cycle pulses (10us; 50us on pin map 0),
+// so it plays them.
 #if (HARDWARE_VERSION == 2)
   #define MIN_PULSE_CYCLES 2
 #else
   #define MIN_PULSE_CYCLES 1
 #endif
-#define MAX_TIME_CYCLES 199999998 // Longest time the joystick menu sets, in timer cycles: 9999.9999s, the most its time editor
-                                  // holds on Pulse Pal 2 (8 digits in 100us steps, 4 before the point). The MATLAB, Python
-                                  // and C++ classes use the same limit. Times sent over USB are not checked against it.
+#define MAX_TIME_CYCLES (199999998UL * LEGACY_TIME_FACTOR) // Longest time the joystick menu sets, in timer cycles: 9999.9999s,
+                                  // the most its time editor holds on Pulse Pal 2 (8 digits in 100us steps, 4 before the
+                                  // point). The MATLAB, Python and C++ classes use the same limit. Times sent over USB are
+                                  // not checked against it.
 
 
 #define TriggerLevel 0  // Trigger line level configuration. This defines the logic level when the trigger is activated.
@@ -162,7 +179,8 @@ enum OpCode {
   OP_SET_SCREEN_SAVER = 99,           // Switch the screen saver on or off, and set its timeout (stored in EEPROM on HW3)
   OP_SEND_HARDWARE_REVISION = 100,    // Return the circuit board revision read at startup (HW3; 0 on HW2)
   OP_SEND_STATUS = 101,               // Return the output channels playing, and counters since startup or the last op 101
-  OP_SEND_SERIAL_NUMBER = 102         // Return the USB serial number (HW3; HW2 has none, and sends an empty one)
+  OP_SEND_SERIAL_NUMBER = 102,        // Return the USB serial number (HW3; HW2 has none, and sends an empty one)
+  OP_HANDSHAKE_DEVICE_CYCLES = 103    // As op 72, and the session's times are in the device's own cycles (op 72: 50us cycles)
 };
 
 // The 4 bytes that must follow op 97 for it to format the card, so that two stray bytes, e.g. 213 and 97 in the data of
@@ -269,8 +287,18 @@ enum TriggerEventValue {
 };
 
 // microSD settings files. See the file layout above SaveCurrentProgram2SD().
-#define SETTINGS_FILE_END_MARKER 252 // Last byte of a valid settings file
+// The last byte of a valid settings file also says what its times count: 252, 50us cycles (every file written before
+// October 2026, and every file Pulse Pal 2 writes); 253, 10us cycles. Firmware from before October 2026 refuses a 253
+// file, as an unterminated one, rather than play it 5 times slower. A device saves files with the marker of its own cycle.
+#define SETTINGS_FILE_END_MARKER_50US 252
+#define SETTINGS_FILE_END_MARKER_10US 253
+#if (TIMER_PERIOD == 10)
+  #define SETTINGS_FILE_END_MARKER SETTINGS_FILE_END_MARKER_10US
+#else
+  #define SETTINGS_FILE_END_MARKER SETTINGS_FILE_END_MARKER_50US
+#endif
 #define SETTINGS_FILE_N_PARAM_BYTES 178 // Bytes in a settings file before the end marker
+#define SETTINGS_FILE_CHANNEL_N_BYTES 42 // Bytes of each output channel in a settings file. Its 8 times come first
 #define DEFAULT_SETTINGS_FILE_NAME "default.pps" // Written with default parameters in setup(). The joystick menu lists it
                                                  // first in the load menu, and cannot overwrite or erase it.
 
@@ -328,9 +356,13 @@ enum TriggerEventValue {
   // 2ND in the constructor name selects the second SPI bus, checked for above with U8X8_HAVE_2ND_HW_SPI
   U8G2_SSD1322_NHD_128X64_F_2ND_4W_HW_SPI u8g2(U8G2_R0, CS, DC, RST);
   LiquidCrystal_U8G2 lcd(u8g2);
-  IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
-  IMXRT_PIT_CHANNEL_t *hardwareTimerChannel = nullptr; // The PIT channel hardwareTimer uses, found by startHardwareTimer()
-  uint32_t tickCycles = 0; // ARM_DWT_CYCCNT at the timer tick that began the current cycle, for dacWriteTimed(). See advanceTickCycles()
+  #if FLEXPWM_TIMER
+    bool flexpwmTimerRunning = false; // FlexPWM3 submodule 1 runs handler() and drives LDAC (see startHardwareTimer())
+  #else // Pin map 0
+    IntervalTimer hardwareTimer; // Built-in hardware timer to ensure even sampling
+    IMXRT_PIT_CHANNEL_t *hardwareTimerChannel = nullptr; // The PIT channel hardwareTimer uses, found by startHardwareTimer()
+    uint32_t tickCycles = 0; // ARM_DWT_CYCCNT at the timer tick that began the current cycle, for dacWriteTimed(). See advanceTickCycles()
+  #endif
   IMXRT_GPIO_t *triggerGPIO[2] = {nullptr, nullptr}; // The GPIO ports of the trigger lines, and their bits, for the
   uint32_t triggerPinMask[2] = {0, 0};               // edge latches handler() reads (see setupTriggerEdgeLatches())
   #define N_CUSTOM_PULSE_TRAINS 4
@@ -342,6 +374,7 @@ enum TriggerEventValue {
   #define DAC_CHANNEL_WRITE_US 1.3 // Longest SPI write of one DAC channel (1.13us measured)
   #define DAC_LATCH_GAP_US 1.5 // Time from the last write to the latch. The DAC updates at once only some time after a write
   #define DAC_LATCH_US 7.5 // Outputs change this long after the timer tick: the interrupt's start, 4 channel writes, and the gap
+  #define FLEXPWM_LATCH_PULSE_US 0.1 // How long FlexPWM3 holds LDAC low to latch (FLEXPWM_TIMER). The DAC needs 20ns
   #define TRIGGER_CHATTER_NS 500 // Edges latched this soon after handler() reads the trigger lines are dropped (see handler())
   #define SCREEN_BRIGHTNESS 128 // Brightness of the oLED display (u8g2 contrast, 0-255). Use 128 max because:
                                 // 1. Higher values can draw excess current from the USB supply. 2. To extend the lifetime of the display
@@ -397,6 +430,8 @@ static_assert(PARAM_BUFFER_N_BYTES == sizeof(Phase1Duration) + sizeof(InterPhase
                                       sizeof(ContinuousLoopMode) + sizeof(TriggerAddress) + sizeof(TriggerMode),
               "paramBuffer must hold exactly one op 92 parameter set");
 #define PARAM_BUFFER_TRIGGER_MODE_OFFSET (PARAM_BUFFER_N_BYTES - sizeof(TriggerMode)) // Trigger mode is the last parameter in the set
+#define OP73_N_BYTES 178 // Op 73's data: for each output channel 8 uint32 times, then 3 uint16 voltages, then 4 bytes; 8 + 2 trigger bytes
+static_assert(OP73_N_BYTES == PARAM_BUFFER_N_BYTES - sizeof(ContinuousLoopMode), "Op 73 carries op 92's set without continuous loop mode");
 #if (HARDWARE_VERSION > 2)
   // Set by op 92 when a trigger channel is in param sync mode, and cleared by handler() once a rising edge on that
   // channel has loaded the buffer. It is set only after the whole set has been read, so a rising edge arriving while
@@ -670,7 +705,10 @@ union { // dacValue contains a single sample of raw 16-bit data to be written on
 // Other variables
 byte hardwareRevision = 0; // Circuit board (PCB) revision, read from pcbVersionMap by readHardwareRevision() in setup(). Op 100
                            // returns it. Pulse Pal 2 boards encode none, so it stays 0.
-unsigned int CycleFrequency = 20000; // in Hz, derived in the setup from TIMER_PERIOD
+unsigned int CycleFrequency = 1000000 / TIMER_PERIOD; // in Hz: timer cycles per second
+// The time unit of the USB session, in device cycles: LEGACY_TIME_FACTOR (50us cycles) after op 72, 1 after op 103. Until
+// a client connects, 50us cycles, as every client before October 2026 assumed. See usbTimeToCycles() in USBOps.ino.
+byte usbTimeFactor = LEGACY_TIME_FACTOR;
 void handler(void);
 boolean SoftTriggered[4] = {0}; // If a software trigger occurred this cycle (for timing reasons, it is scheduled to occur on the next cycle)
 boolean SoftTriggerScheduled[4] = {0}; // If a software trigger is scheduled for the next cycle
@@ -690,7 +728,7 @@ union { // typeCast converts bytes read from the microSD card to 16 and 32-bit i
     uint32_t uint32;
 } typeCast; // Union allows faster type conversion than a bit-shift macro
 
-void setup() {
+FLASHMEM void setup() { // Startup only, so it runs from flash (see FLASHMEM above)
   pinMode(SyncPin, OUTPUT); // Configure SPI bus pins as outputs
   pinMode(LDACPin, OUTPUT);
   SPI.begin();
@@ -793,7 +831,6 @@ void setup() {
   InputValuesLastCycle[0] = digitalRead(TriggerLines[0]); // Pre-read trigger channels
   InputValuesLastCycle[1] = digitalRead(TriggerLines[1]);
   SystemTime = 0;
-  CycleFrequency = 1.0/(TIMER_PERIOD/1000000.0); // Given as decimals to force floating point arithmetic
   startHardwareTimer();
 }
 

@@ -803,6 +803,12 @@ float digitsToVolts() {
   return volts;
 }
 
+// The time editor's digits: Digits[0-7] count 0.0001s steps, CYCLES_PER_100US cycles each. On Pulse Pal 3, Digits[8] is
+// the 5th decimal, which counts timer cycles: 0-9 at 10us, and 0 or 5 at 50us (pin map 0), FIFTH_DECIMAL_STEP a cycle.
+#define CYCLES_PER_100US (100 / TIMER_PERIOD)
+#define FIFTH_DECIMAL_STEP (10 / CYCLES_PER_100US)
+static_assert(CYCLES_PER_100US * TIMER_PERIOD == 100, "The time editor needs a timer cycle that divides 100us");
+
 unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, unsigned long UpperLimit, byte Units) {
       // This function returns a value that the user chooses by scrolling up and down a number list with the joystick, and clicks to select the desired number.
       // Editing starts at startValue. LowerLimit and UpperLimit are the limits for this selection; a time may go below
@@ -827,14 +833,14 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
      LCD_setCursor(0, 1); LCD_print(FormatNumberForDisplay(UserValue, Units));
      ChoiceMade = 0;
     // Read digits from User Value. Digits[0-7] hold a time in 100us steps, so a time above MAX_TIME_CYCLES (one sent
-    // over USB) keeps only its last 8 digits. On Pulse Pal 3, Digits[8] is the 5th decimal, 0.00005s steps: 0 or 5,
-    // one timer cycle or none (see the joystick moves below). Pulse Pal 2 shows that digit, but does not edit it.
+    // over USB) keeps only its last 8 digits. On Pulse Pal 3, Digits[8] is the 5th decimal: a timer cycle per step of
+    // FIFTH_DECIMAL_STEP (see the joystick moves below). Pulse Pal 2 shows that digit, but does not edit it.
     int x = 0;
     if (Units == UNITS_TIME) {
       #if (HARDWARE_VERSION > 2)
-        Digits[8] = (UVTemp % 2) ? 5 : 0;
+        Digits[8] = (UVTemp % CYCLES_PER_100US) * FIFTH_DECIMAL_STEP;
       #endif
-      UVTemp = UVTemp / 2;
+      UVTemp = UVTemp / CYCLES_PER_100US;
       while ((UVTemp > 0) && (x < 8)) {
         Digits[7-x] = (UVTemp % 10);
         UVTemp = UVTemp / 10;
@@ -882,7 +888,7 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
          #if (HARDWARE_VERSION < 3)
            CursorPosRightLimit = 7; // The 4th decimal: 100us steps (MIN_PULSE_CYCLES)
          #else
-           CursorPosRightLimit = 8; // The 5th decimal: 50us steps
+           CursorPosRightLimit = 8; // The 5th decimal: steps of one timer cycle (10us; 50us on pin map 0)
          #endif
        } break;
        case UNITS_VOLTS: {
@@ -935,15 +941,15 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
             } break;
             case UNITS_TIME: {
                 #if (HARDWARE_VERSION > 2)
-                  if (CursorPos == 8) { // The 5th decimal goes from 0 to 5 only: one timer cycle
-                    if ((Digits[8] == 0) && ((UserValue+1) <= UpperLimit)) {
+                  if (CursorPos == 8) { // The 5th decimal: one timer cycle per step (at 50us, from 0 to 5 only)
+                    if ((Digits[8] + FIFTH_DECIMAL_STEP <= 9) && ((UserValue+1) <= UpperLimit)) {
                       UserValue = UserValue + 1;
-                      Digits[8] = 5;
+                      Digits[8] = Digits[8] + FIFTH_DECIMAL_STEP;
                     }
                     break;
                   }
                 #endif
-                ValueToAdd = 2*(pow(10, ((5-CursorPos)+2)));
+                ValueToAdd = CYCLES_PER_100US*(pow(10, ((5-CursorPos)+2)));
                 if ((Digits[CursorPos] < 9) && ((UserValue+ValueToAdd) <= UpperLimit)) {
                  UserValue = UserValue + ValueToAdd;
                  Digits[CursorPos] = Digits[CursorPos] + 1;
@@ -992,16 +998,16 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
             } break;
             case UNITS_TIME: {
                 #if (HARDWARE_VERSION > 2)
-                  if (CursorPos == 8) { // The 5th decimal goes from 5 to 0 only
-                    if (Digits[8] == 5) { // May go below LowerLimit while editing (see the check after the loop)
+                  if (CursorPos == 8) { // The 5th decimal: one timer cycle per step
+                    if (Digits[8] >= FIFTH_DECIMAL_STEP) { // May go below LowerLimit while editing (see the check after the loop)
                       UserValue = UserValue - 1;
-                      Digits[8] = 0;
+                      Digits[8] = Digits[8] - FIFTH_DECIMAL_STEP;
                     }
                     break;
                   }
                 #endif
                 if (Digits[CursorPos] > 0)  { // May go below LowerLimit while editing (see the check after the loop)
-                 UserValue = UserValue - 2*(pow(10, ((5-CursorPos)+2)));
+                 UserValue = UserValue - CYCLES_PER_100US*(pow(10, ((5-CursorPos)+2)));
                   Digits[CursorPos] = Digits[CursorPos] - 1;
                 }
             } break;

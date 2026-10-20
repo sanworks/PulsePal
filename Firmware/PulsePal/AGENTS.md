@@ -72,18 +72,31 @@ the `--show` output before concluding that a function really changed.
    its current pulse short.
 
    Outputs change `DAC_LATCH_US` after the timer tick (7.5 µs on Pulse Pal 3, 21 µs on Pulse
-   Pal 2). `dacWriteTimed()` waits, writes the changed channels, and latches them together at
-   that time. Pulse Pal 2 times it with the timer's own counter. Pulse Pal 3 counts CPU cycles
-   from the tick (`advanceTickCycles()`): polling its timer's counter, each read about 0.1 µs,
-   moved edges by 40 ns when other channels changed and up to 80 ns under USB traffic.
-   Writing and latching straight away delayed each
-   update by 1.13 µs (Pulse Pal 3) or 3.7 µs (Pulse Pal 2) per channel written in that cycle.
-   The wait comes before the writes so that their digital feedthrough (a few mV on every
-   output) stays next to the edge. The writes end at least `DAC_LATCH_GAP_US` before the
-   latch: the DAC only updates at once about 1.4 µs after a write, and a sooner latch took
-   effect late. `DAC_LATCH_US` must cover the interrupt's start, four writes of
-   `DAC_CHANNEL_WRITE_US` and the gap: if SPI or the handler's start gets slower, measure again.
-   In a cycle that changes an output, the interrupt now runs for at least `DAC_LATCH_US`.
+   Pal 2), together, however many channels changed: writing and latching straight away delayed
+   each update by 1.13 µs (Pulse Pal 3) or 3.7 µs (Pulse Pal 2) per channel written in that
+   cycle. The writes end at least `DAC_LATCH_GAP_US` before the latch: the DAC only updates at
+   once about 1.4 µs after a write, and a sooner latch took effect late. `DAC_LATCH_US` must
+   cover the interrupt's start, four writes of `DAC_CHANNEL_WRITE_US` and the gap: if SPI or the
+   handler's start gets slower, measure again.
+
+   On Pulse Pal 3 (`FLEXPWM_TIMER`), the timer latches the DAC itself. FlexPWM3 submodule 1
+   runs `handler()` every 10 µs (`flexpwmTick()`), and drives LDAC (pin 28) from its B output:
+   high, with a 0.1 µs low pulse (`FLEXPWM_LATCH_PULSE_US`) at `DAC_LATCH_US` after each tick
+   (`startHardwareTimer()`). `dacWriteTimed()` writes at once and returns. The pulse is masked in
+   cycles that write nothing (`maskLatchPulse()`, `latchNextWrite()`): an LDAC edge in every cycle
+   coupled a 100 kHz comb into the outputs, up to 160 µV with LDAC low for 2.5 µs of each cycle,
+   17 µV with the narrow pulse. Writes that end too close to the pulse, or after it (`handler()`
+   started late), are latched again in the next cycle (`dacLoadForTimerLatch()`). A software
+   latch at 10 µs took 94-96% of the CPU with all four outputs changing every cycle, and lost
+   ticks; the hardware latch leaves 69-72%. While the timer runs, LDAC is not a GPIO, and
+   `dacLatch()` does nothing: `stopHardwareTimer()` makes it a GPIO again, low, for `dacWrite()`.
+   Pulse Pal 2 waits, writes the changed channels, and latches them together, timed with the
+   timer's own counter; the wait comes before the writes so that their digital feedthrough (a few
+   mV on every output) stays next to the edge, and the interrupt runs for at least
+   `DAC_LATCH_US` in a cycle that changes an output. Pulse Pal 3's pin map 0, whose LDAC pin has no
+   timer output, does the same at 50 µs with the PIT, counting CPU cycles from the tick
+   (`advanceTickCycles()`): polling the PIT's counter, each read about 0.1 µs, moved edges by
+   40 ns when other channels changed and up to 80 ns under USB traffic.
 
    `dacWrite()` latches straight after its writes, with little more than a `digitalWrite()`
    (about 50 ns) in between. On Pulse Pal 3 the AD5754R ignores an LDAC falling edge that comes
@@ -114,7 +127,11 @@ the `--show` output before concluding that a function really changed.
    (Pulse Pal 3). Otherwise a parameter set stored for param sync mode survives the channel
    leaving the mode, and loads at a later edge.
 7. **Use ArCOM for USB, and only from `loop()`.** A read gives up after 100 ms without a new
-   byte, returns zeros and sets `PPUSB.timedOut()`, which `loop()` checks once per pass.
+   byte, returns zeros and sets `PPUSB.timedOut()`, which `loop()` checks once per pass. An op
+   that programs parameters reads its whole message with `PPUSB.readBlock()` first, and changes
+   nothing if it returns false (ops 73, 74, 91, 92): read value by value into the parameters, a
+   message cut short set resting voltages of 0, and the comm failure handling then put −10 V on
+   every output until the joystick was clicked.
    Replies are buffered until `loop()` calls `PPUSB.flush()`, so no reply leaves the device
    during an op. Array reads and writes are single block copies, which rely on both boards
    being little-endian, like the wire format. See `ArCOM.h`. On Pulse Pal 2, ArCOM also takes
@@ -126,15 +143,23 @@ the `--show` output before concluding that a function really changed.
    that list USB devices poll it a few times a second) the device refused every request until it
    restarted.
 8. **Times are hardware timer cycles, not microseconds.** `SystemTime` counts ticks of
-   `TIMER_PERIOD` (50 µs). Settings files store cycles, and legacy code and installed clients
-   assume 50 µs, so a faster cycle (e.g. 25 µs on Pulse Pal 3) would have to be optional, with
-   50 µs the default. The joystick time editor in `Menu.ino` also assumes 50 µs (2 cycles per
-   0.0001 s digit step) where it reads the digits and where it adds and subtracts a step. On
-   Pulse Pal 3 it also edits the 5th decimal, which is only ever 0 or 5: 1 cycle or none.
+   `TIMER_PERIOD`: 10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2 (and on Pulse Pal 3's pin map 0).
+   Clients and settings files from before October 2026 count 50 µs cycles, so the device
+   converts them (see "Time units" in `/Firmware/PROTOCOL.md`). A USB session that connected with
+   op 72 sends and receives 50 µs cycles: `usbTimeToCycles()` multiplies each time it sends by
+   `usbTimeFactor` (`LEGACY_TIME_FACTOR`, 5, after op 72; 1 after op 103, the current classes'
+   handshake), and `cyclesToUSBTime()` divides each time the device sends. Every op that carries a
+   time converts it: ops 73, 74, 75, 76, 85, 91, 92, 93 and 95, and op 94 reports the session's
+   unit. A new op that carries times must too. Settings files end in 252 (50 µs cycles) or 253
+   (10 µs), and `RestoreParametersFromSD()` converts a 252 file (`settingsFileTimeFactor()`).
+   `LoadDefaultParameters()` gives its times in 50 µs cycles, times `LEGACY_TIME_FACTOR`. The
+   joystick time editor in `Menu.ino` steps each 0.0001 s digit by `CYCLES_PER_100US` cycles,
+   and on Pulse Pal 3 edits the 5th decimal one cycle per step (`FIFTH_DECIMAL_STEP`): 0-9 at
+   10 µs, 0 or 5 at 50 µs.
    Phases, the inter-pulse interval and the train duration have a minimum of
    `MIN_PULSE_CYCLES` in the menu and the clients: 2 cycles (100 µs) on Pulse Pal 2, whose
    trigger channels read their inputs once per cycle and can miss a 1 cycle pulse from another
-   Pulse Pal, and 1 cycle (50 µs) on Pulse Pal 3. Pulse Pal 3 also latches each trigger line's
+   Pulse Pal, and 1 cycle (10 µs) on Pulse Pal 3. Pulse Pal 3 also latches each trigger line's
    edges in its GPIO port (`setupTriggerEdgeLatches()`), and so detects any pulse longer than
    0.5 µs; Pulse Pal 2, and Pulse Pal 3 firmware from before October 2026, do not. Times have a
    maximum of `MAX_TIME_CYCLES` (9999.9999 s) in the menu and the clients: the most Pulse Pal
@@ -155,7 +180,7 @@ the `--show` output before concluding that a function really changed.
     triggers until it was stopped: biphasic custom pulses longer than the gap to the next one,
     custom bursts longer than the gap between burst onsets or of no duration, a delay shortened
     during the delay. `timeReached()` also works across `SystemTime`'s wrap after 2^32 cycles
-    (59.6 hours); compare two times by their difference, as `pulseFitsInBurst()` does, for the
+    (11.9 hours at 10 µs, 59.6 at 50 µs); compare two times by their difference, as `pulseFitsInBurst()` does, for the
     same reason.
 12. **Custom trains have memory blocks** (see "Custom train memory" in `PulsePal.ino`). Pulse
     Pal 3 keeps two per train, Pulse Pal 2 one. `handler()` reads a channel's train through
@@ -181,26 +206,29 @@ the `--show` output before concluding that a function really changed.
 
 ## What runs in the timer interrupt
 
-`handler()` runs every 50 µs. `TC3_Handler()` is its entry point on Pulse Pal 2; on Pulse
-Pal 3, `IntervalTimer` calls it directly. On Pulse Pal 2 the timer interrupt has a higher
+`handler()` runs every `TIMER_PERIOD`: 10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2.
+`TC3_Handler()` is its entry point on Pulse Pal 2, and `flexpwmTick()`, FlexPWM3 submodule 1's
+reload interrupt, on Pulse Pal 3 (on pin map 0, `IntervalTimer` calls it directly). On Pulse Pal 2 the timer interrupt has a higher
 priority than USB (`startHardwareTimer()`): the Due core's USB interrupt copied received bytes
 one at a time, and at equal priority it made the timer lose cycles. ArCOM now receives them in
 `loop()` instead (rule 7). On Pulse Pal 3 the timer interrupt's priority (64) is above the USB
 interrupt's (128, the Teensy core's default): at equal priority a USB interrupt running at a timer
 tick delayed `handler()` by up to 5.5 µs, and outputs changed up to 2 µs late while the PC opened
 the port or used the microSD card. USB loses nothing by waiting (DMA transfers, and the controller
-holds off the PC until a buffer is queued); `handler()` ran for 9.9 µs at most, with all four
-outputs changing every cycle and param sync edges arriving. It calls `killChannel()`, `setDAC()`, `dacWriteTimed()` (which waits up to `DAC_LATCH_US`), `dacWrite()`,
+holds off the PC until a buffer is queued). At 10 µs, `handler()` ran for 7.6 µs at most (a
+prototype, measured in October 2026), with all four outputs changing every cycle and param sync
+edges arriving; at 50 µs with the software latch, 9.9 µs. It calls `killChannel()`, `setDAC()`,
+`dacWriteTimed()` (which waits up to `DAC_LATCH_US` on Pulse Pal 2 and pin map 0), `dacWrite()`,
 `mirrorAboutZero()`, `pulseFitsInBurst()`, `pulseFitsInTrain()`, `AbortAllPulseTrains()`, `digitalReadDirect()` and
 `digitalWriteDirect()`, `timeReached()`, `startCustomPulse()`, `endCustomTrainPass()`,
 `dropOverlappedCustomPulses()`, `dropOverlappedCustomBursts()` (both through `firstCustomTimeFrom()`),
 `startBurst()` and `startCustomBurstPass()`. On
-Pulse Pal 3 it also calls `advanceTickCycles()` as it starts, `triggerEdgeLatched()` after reading each trigger line and
+Pulse Pal 3 it also calls `advanceTickCycles()` as it starts (pin map 0), `triggerEdgeLatched()` after reading each trigger line and
 `clearTriggerEdgeLatches()` `TRIGGER_CHATTER_NS` (0.5 µs) later, `startParamSync()` and `applyStoredCustomTrains()` when a trigger
 channel in param sync mode goes high, and `loadWaitingParamSyncChannels()` on each cycle while
 an output channel is still finishing the train it was playing at that edge.
 
-Param sync costs, measured on a Teensy 4.1 against the 50 µs cycle:
+Param sync costs, measured on a Teensy 4.1 (with the 50 µs cycle):
 
 | Event | Cost |
 |---|---|
@@ -275,6 +303,10 @@ playback, the menu or the USB ops, ask the user to check:
 - Ops 101 and 102: with TTLs from a second Pulse Pal, `status()` counts each rising edge, and a
   start only for a linked channel that was not already playing; `info.serial_number` is the
   serial number the computer lists the port with.
+- After a change to the time units (Pulse Pal 3): a client that connects with op 72 (the legacy
+  MATLAB functions, the legacy Python class) plays its times as on a 50 µs device and reads them
+  back unchanged; a settings file saved by older firmware (end marker 252) loads with the same
+  times; the joystick editor's 5th decimal steps by 0.00001 s.
 - After a change to serial code: USB latency and throughput, with
   `/Python/PulsePal/tests/benchmark_serial.py`, before and after the change. Also unplug the
   USB cable during a pulse: the device shows "COMM. FAILURE!" and the outputs return to their

@@ -28,8 +28,10 @@ Every command from the PC is:
 ```
 
 - Multi-byte values are little-endian.
-- Times are in hardware timer cycles of 50 µs (20000 cycles per second). Op 94 reports the
-  cycle period.
+- Times are in hardware timer cycles: 10 µs on Pulse Pal 3 (100000 cycles per second), 50 µs on
+  Pulse Pal 2 (20000 per second). Pulse Pal 3 ran at 50 µs before October 2026. A session that
+  connects with op 72 counts its times in 50 µs cycles on every device: see
+  [Time units](#time-units). Op 94 reports the session's unit.
 - Voltages are 16-bit DAC codes: 0 is −10 V, 32768 is 0 V and 65535 is +10 V.
 - Output channels are numbered 1-4 and trigger channels 1-2, except in op 96 (0-3).
 
@@ -37,21 +39,25 @@ Every command from the PC is:
 
 The Python, MATLAB and C++ classes connect in this order:
 
-1. Op 72 (handshake). The reply is `75` ('K') and the firmware version. A device running
+1. Op 103 (handshake, with times in the device's own cycles). The reply is `75` ('K') and the
+   firmware version. Pulse Pal firmware from before October 2026 ignores op 103, as Wave Pal and
+   Synth Pal do: with no reply within 0.3 s, the classes send op 72 (handshake, with times in 50 µs
+   cycles), which every Pulse Pal firmware answers in the same way. A device running
    Wave Pal firmware (`/Firmware/WavePal`) replies `87` ('W') instead, and one running Synth
    Pal firmware (`/Firmware/SynthPal`) `83` ('S'). The Python, MATLAB and C++ classes then
    say which firmware the device runs, and that it needs Pulse Pal firmware. They refuse
    firmware older than v21, and connect to v21 with a notice that v22 is available.
    A firmware version newer than the client knows is used, with a warning: new firmware only
    adds ops, so the client's ops work as before.
-   The Python, MATLAB and C++ classes discard any bytes waiting in the port before op 72: the end
-   of a reply that an earlier session did not read would be taken as the handshake. That does not
-   cover a command that an earlier session sent just before it closed, if the device has not
-   reached it yet (it may be redrawing its screen, which takes a few ms): the device answers it
-   after the discard, just before op 72. So the classes read the reply to op 72 until no byte has
-   arrived for 50 ms (at most 1 s), and take the last 5 bytes. This adds about 50 ms to
+   The Python, MATLAB and C++ classes discard any bytes waiting in the port before the handshake:
+   the end of a reply that an earlier session did not read would be taken as the handshake. That
+   does not cover a command that an earlier session sent just before it closed, if the device has
+   not reached it yet (it may be redrawing its screen, which takes a few ms): the device answers it
+   after the discard, just before the handshake. So the classes read the handshake's reply until no
+   byte has arrived for 50 ms (at most 1 s), and take the last 5 bytes. This adds about 50 ms to
    connecting.
-2. Op 94, on firmware v22 and newer: hardware version, timer period, and custom train limits.
+2. Op 94, on firmware v22 and newer: hardware version, the session's time unit (the timer period
+   after op 103, 50 µs after op 72), and custom train limits.
 3. Op 100, on firmware v22 and newer: the [circuit board revision](#circuit-board-revision).
    Then op 102: the [USB serial number](#usb-serial-number).
 4. Op 89, to show the client's name on the device's screen (Python and MATLAB). The C++
@@ -88,7 +94,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 
 | Op | Name | Data sent after the op code | Reply |
 |---|---|---|---|
-| 72 | Handshake | none | `75` ('K'), then firmware version (uint32) |
+| 72 | Handshake. The session's times are in 50 µs cycles (see [Time units](#time-units)) | none | `75` ('K'), then firmware version (uint32) |
 | 73 | Program all parameters (legacy) | For each output channel: 8 uint32 times. Then for each output channel: 3 uint16 voltages. Then for each output channel: 4 bytes (biphasic, custom train ID, custom train target, custom train loop). Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
 | 74 | Program one parameter | Parameter code, channel (1-4, or 1-2 for trigger parameters), value (1, 2 or 4 bytes, see [Parameter codes](#parameter-codes-ops-74-and-91)) | 1 / 0 |
 | 75 | Load custom train 1 (legacy) | Pulse count (uint32), that many uint32 times, that many uint16 voltages | 1 / 0 |
@@ -97,9 +103,9 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 78 | Show a message on the screen | Length byte, then that many characters. A character of 254 moves to the second line | none |
 | 79 | Set a fixed voltage | Channel (1-4), DAC code (uint16) | 1 / 0 |
 | 80 | Stop all channels | none | none |
-| 81 | Disconnect: stop all channels and restore the device's own screen title. Wave Pal and Synth Pal firmware do the same | none | none |
+| 81 | Disconnect: stop all channels and restore the device's own screen title. The time unit returns to 50 µs cycles until the next handshake. Wave Pal and Synth Pal firmware do the same (they have no time units) | none | none |
 | 82 | Set continuous loop mode | Channel (1-4), state (0 or 1) | 1 / 0 |
-| 85 | Send the current settings file | none | 178 bytes: the file without its end marker |
+| 85 | Send the current settings file | none | 178 bytes: the file without its end marker, its times in the session's unit |
 | 86 | Write a pin (debugging) | Pin number, value | none |
 | 87 | Read a pin (debugging) | Pin number | Pin state (1 byte) |
 | 89 | Set the client name | 6 characters, shown as "NAME Connected" | none |
@@ -107,7 +113,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 91 | Program one parameter on all channels | Parameter code, then one value per output channel (4 values), or per trigger channel (2 values) for code 128 | 1 / 0 |
 | 92 | Program all parameters | 182 bytes, grouped by parameter: each array holds one parameter for output channels 1-4. 8 uint32 arrays (times), 3 uint16 arrays (voltages), then byte arrays: biphasic, custom train ID, custom train target, custom train loop, continuous loop. Then 8 trigger link bytes, then 2 trigger mode bytes | 1 / 0 |
 | 93 | Send all parameters | none | 178 bytes, in op 92 order without the continuous loop bytes |
-| 94 | Send hardware info | none | Hardware version (byte), timer period in µs (uint32), number of custom trains (byte), maximum pulses per train (uint32) |
+| 94 | Send hardware info | none | Hardware version (byte), the session's time unit in µs (uint32: the timer period after op 103, 50 after op 72), number of custom trains (byte), maximum pulses per train (uint32) |
 | 95 | Load a custom train | Train index (0 = train 1), pulse count (uint32, 1 or more), that many uint32 times, that many uint16 voltages. See [Custom trains](#custom-trains) | 1 / 0 |
 | 96 | Set DAC calibration | Channel (0-3), zero-code offset (int16). Pulse Pal 3 keeps it through power cycles; Pulse Pal 2 does not | 1 / 0 |
 | 97 | Format the microSD card (Pulse Pal 3; Pulse Pal 2 reads the key and does nothing more) | The 4 ASCII characters `WIPE`, so that two stray bytes can never erase the card. With any other 4 bytes, the op does nothing and sends nothing | Lines of ASCII status text; the last contains `!` and ends in `\r\n`. Then 1 / 0, once the default parameters have been reloaded, which can be well after the text. Read this byte before sending the next command |
@@ -116,10 +122,32 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 100 | Send the [circuit board revision](#circuit-board-revision) | none | Revision (byte, 0-31), read at startup. Pulse Pal 2 sends 0 |
 | 101 | Send the [status](#status) | none | Output channels playing (byte, one bit per channel, bit 0 = channel 1), then counters since startup or the previous op 101 (uint32 each): rising edges on trigger channels 1 and 2, starts of output channels 1-4, comm failures. 29 bytes |
 | 102 | Send the [USB serial number](#usb-serial-number) | none | Length (byte, 0 on Pulse Pal 2), then that many ASCII characters |
+| 103 | Handshake, with the session's times in the device's own cycles (firmware from October 2026). Used by the Python, MATLAB and C++ classes | none | As op 72 |
+
+### Time units
+
+Pulse Pal 3 runs its timer at 10 µs from October 2026, and Pulse Pal 2 at 50 µs. The firmware
+version stayed v22. Every client before then sends times in 50 µs cycles, and every settings file
+before then holds them, so a session's times are in one of two units, chosen by its handshake:
+
+- **Op 103** (the current Python, MATLAB and C++ classes): the device's own cycles, which op 94
+  reports.
+- **Op 72** (every other client: the legacy MATLAB functions and Python class, the Bonsai package,
+  older copies of the classes): 50 µs cycles, on every device. A 10 µs device multiplies each time
+  it receives by 5 (ops 73, 74, 75, 76, 91, 92 and 95), and divides each time it sends by 5, to the
+  nearest (ops 85 and 93); op 94 reports 50 µs. 50 µs is exactly 5 cycles, so an older client's
+  program plays exactly as it did on a 50 µs device. A time off the 50 µs grid (set with the
+  joystick, from a settings file, or by an op 103 session) reads back rounded.
+- Until the first handshake, and after op 81, times are in 50 µs cycles.
+- A time that converts to more than 2^32 - 1 cycles is held as 2^32 - 1 (11.9 hours at 10 µs).
+
+Op 72 later in a session switches it to 50 µs cycles: a client that checks that the device
+answers sends op 103. Firmware from before October 2026, Wave Pal and Synth Pal ignore op 103.
+Pulse Pal 2 answers both handshakes; its unit is 50 µs cycles either way.
 
 ### Soft triggers and stops
 
-A soft trigger (op 77) starts a channel's pulse train in the next 50 µs cycle. A channel that is
+A soft trigger (op 77) starts a channel's pulse train in the next timer cycle. A channel that is
 already playing, or waiting out its pulse train delay, ignores it, as it ignores a trigger line
 in normal mode. Soft triggers read before that cycle add up: two op 77s in one USB packet trigger
 the channels of both. A stop (ops 80, 81 and 98) also cancels a soft trigger that the channel has
@@ -301,9 +329,9 @@ value back as it is (op 93).
 | Value | Limit |
 |---|---|
 | Voltages | -10 to 10 V, sent as the nearest DAC code (a halfway value to the even code) |
-| Times | 0 to 9999.9999 s, rounded to the nearest 50 µs cycle (a halfway value to the even cycle). 9999.9999 s (199999998 cycles) is the longest time the joystick menu shows and edits: four digits before the point. The Python and MATLAB classes hold the rounded time, as the device plays it |
-| Phase 1 and 2 durations, inter-pulse interval, pulse train duration | At least 1 cycle (50 µs) on Pulse Pal 3, and 2 cycles (100 µs) on Pulse Pal 2: the hardware version from op 94. Pulse Pal 2's trigger channels read their inputs once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse they detect reliably. Pulse Pal 3's also latch every edge (firmware from October 2026 on), and detect a pulse of any length above 0.5 µs. A Pulse Pal 3 with earlier firmware can miss a 1 cycle pulse |
-| Custom pulse times, and a custom waveform's sampling period | Multiples of that minimum (50 µs on Pulse Pal 3, 100 µs on Pulse Pal 2), up to 9999.9999 s, each later than the one before. A time between two steps is refused, not rounded, so that a train plays as written |
+| Times | 0 to 9999.9999 s, rounded to the nearest cycle (10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2; a halfway value to the even cycle). 9999.9999 s (999999990 cycles of 10 µs, 199999998 of 50 µs) is the longest time the joystick menu shows and edits: four digits before the point. The Python and MATLAB classes hold the rounded time, as the device plays it |
+| Phase 1 and 2 durations, inter-pulse interval, pulse train duration | At least 1 cycle (10 µs) on Pulse Pal 3, and 2 cycles (100 µs) on Pulse Pal 2: the hardware version from op 94. Pulse Pal 2's trigger channels read their inputs once per cycle, so a 1 cycle pulse from another Pulse Pal can fall between two reads; 2 cycles is the shortest pulse they detect reliably. Pulse Pal 3's also latch every edge (firmware from October 2026 on), and detect a pulse of any length above 0.5 µs. A Pulse Pal 3 with earlier firmware, which reads its inputs once per 50 µs cycle, can miss a pulse of 50 µs or less |
+| Custom pulse times, and a custom waveform's sampling period | Multiples of that minimum (10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2), up to 9999.9999 s, each later than the one before. A time between two steps is refused, not rounded, so that a train plays as written |
 | Pulses per custom train | 1 to 5000 on Pulse Pal 2, 1 to 10000 on Pulse Pal 3 (op 94 reports the maximum) |
 | Custom train target "Bursts" (1) | Needs a burst duration above 0 on that channel. The classes check it whenever either is sent: a parameter assigned alone against the other as the device holds it, a whole set as a whole |
 | Custom train ID | 0 to 2 on Pulse Pal 2, 0 to 4 on Pulse Pal 3 |
@@ -383,9 +411,9 @@ mode by an earlier session would store those defaults instead of running them.
 
 The device loads its default parameters at startup, after a comm failure and after op 97
 formats its card, and writes them to `default.pps` at startup: on every output channel,
-monophasic pulses of 5 V (DAC code 49152) lasting 2 cycles (0.1 ms), 20 cycles (1 ms) apart, for
-a pulse train of 20000 cycles (1 s), with no delay and no bursts, resting at 0 V; for biphasic
-pulses, an inter-phase interval of 2 cycles and a phase 2 of -5 V lasting 2 cycles; no custom
+monophasic pulses of 5 V (DAC code 49152) lasting 0.1 ms, 1 ms apart, for a pulse train of 1 s,
+with no delay and no bursts, resting at 0 V; for biphasic pulses, an inter-phase interval of 0.1 ms
+and a phase 2 of -5 V lasting 0.1 ms; no custom
 train, and continuous loop mode off. No output channel is linked to a trigger channel, so a TTL
 starts nothing until a program links it, and both trigger channels are in normal mode. The Python
 and MATLAB classes program the same defaults when they connect (`set_default_params()` /
@@ -417,8 +445,15 @@ For each output channel 1-4 (42 bytes each):
   custom train ID, custom train target, custom train loop                  uint8 each
 For each trigger channel 1-2 (5 bytes each):
   trigger mode, then 4 bytes linking the trigger to output channels 1-4    uint8 each
-End marker: 252                                                            uint8
+End marker: 252 or 253                                                     uint8
 ```
+
+The end marker also says what the file's times count: 252, 50 µs cycles (every file saved before
+October 2026, and every file Pulse Pal 2 saves); 253, 10 µs cycles (Pulse Pal 3 from October 2026).
+A device saves its own cycles. Pulse Pal 3 loads both, and multiplies the times of a 252 file by 5,
+so that it plays as it did. Pulse Pal 2, and firmware from before October 2026, refuse a 253 file,
+as one that lacks the end marker, rather than play it 5 times slower. Op 85 sends a file's times in
+the session's unit (see [Time units](#time-units)), whatever its marker.
 
 Continuous loop mode is not saved. The device writes `default.pps` with the default
 parameters at startup, and the joystick menu cannot overwrite or erase it.
@@ -428,7 +463,7 @@ joystick menu) fails, and the device keeps its parameters and its current settin
 file:
 
 - is missing, or shorter than 179 bytes;
-- lacks the end marker;
+- lacks the end marker (252, or 253 on Pulse Pal 3);
 - or holds a value the device cannot play: a custom train ID above the device's number of
   custom trains, a biphasic, custom train target or custom train loop byte above 1, a phase or
   monophasic inter-pulse interval of 0, or a trigger mode the device does not have.
@@ -459,8 +494,11 @@ missed. Pulse Pal 3's card has a bus of its own, and none of this applies to it.
   it receives until the port has been quiet for 100 ms: the rest of the broken command, whose
   data could otherwise be read as commands. A timeout usually means a faulty cable, hub or
   client.
-- The interrupted op still sends its reply, if it has one, and that reply can be 1. A confirm
-  byte therefore does not reveal a timeout.
+- The ops that program parameters (73, 74, 91 and 92) change nothing if their data is cut short,
+  and reply 0, so the outputs go to the resting voltages they had. Until October 2026 they
+  programmed the bytes that arrived and zeros for the rest: resting voltages of 0 (−10 V), which
+  every output then played until the joystick was clicked. Other interrupted ops still send their
+  reply, if they have one, and that reply can be 1.
 - Replies are buffered and sent as one USB packet when the command finishes, so a reply means
   the command is done and the next command can follow at once. For example, a client can read
   the parameters (op 93) as soon as op 90 confirms a settings file load.
@@ -469,8 +507,8 @@ missed. Pulse Pal 3's card has a bus of its own, and none of this applies to it.
 
 | Firmware | Notes |
 |---|---|
-| v22 | Current. Adds ops 91-102, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode |
+| v22 | Current. Adds ops 91-102, and on Pulse Pal 3, custom trains 3 and 4 and param sync trigger mode. From October 2026, Pulse Pal 3 runs a 10 µs cycle, and op 103 (see [Time units](#time-units)) |
 | v21 | No ops 91-100. Clients program parameters with ops 73 and 74, and custom trains with ops 75 and 76 |
 
-Clients read the firmware version from the handshake (op 72), and the device properties from
-op 94.
+Clients read the firmware version from the handshake (op 103, or op 72), and the device properties
+from op 94.

@@ -59,10 +59,11 @@ def raw_params(P):
 
 
 def handshake(P, timeout=1.0):
+    """Op 103, the class's handshake. Op 72 would make the device count the session's times in 50 us cycles."""
     old = P.port.timeout
     P.port.timeout = timeout
     try:
-        P.port.write(bytes([OP, 72]))
+        P.port.write(bytes([OP, 103]))
         reply = P.port.read(5)
     finally:
         P.port.timeout = old
@@ -147,7 +148,7 @@ def test_connection(P, D, report):
         assert P.info.serial_number.isdigit(), P.info.serial_number
     else:
         assert P.info.serial_number == "", P.info.serial_number
-    assert P.info.cycle_period_us == 50
+    assert P.info.cycle_period_us == (10 if P.info.hardware_version == 3 else 50), P.info.cycle_period_us
     assert P.info.max_custom_pulses == (10000 if P.info.hardware_version == 3 else 5000)
     assert_in_step(P, what="after connecting")
 
@@ -164,7 +165,8 @@ def test_parameters_read_back_as_programmed(P, D, report):
             params["phase1_voltage"][x] = rng.choice([-10, -2.5, 0, 0.001, 5, 10])
             params["phase2_voltage"][x] = rng.choice([-10, -5, 3.3])
             params["resting_voltage"][x] = rng.choice([0, 0.5, -1.25])
-            params["phase1_duration"][x] = rng.choice([0.0001, 0.00015, 0.001, 9999.9999])
+            # 0.00012 s is off a 50 us cycle: it reads back from Pulse Pal 3 as sent (12 cycles of 10 us)
+            params["phase1_duration"][x] = rng.choice([0.0001, 0.00012, 0.00015, 0.001, 9999.9999])
             params["inter_phase_interval"][x] = rng.choice([0, 0.0001, 0.5])
             params["phase2_duration"][x] = rng.choice([0.0001, 0.002])
             params["inter_pulse_interval"][x] = rng.choice([0.0001, 0.01, 3600])
@@ -244,7 +246,7 @@ def test_bytes_that_are_no_command_are_ignored(P, D, report):
     noise = bytes(b for b in (rng.randrange(256) for _ in range(20000)) if b != OP)
     P.port.write(noise)
     assert_in_step(P, expected, "after 20000 bytes of noise")
-    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 103)]  # Ops 72-102 exist
+    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 104)]  # Ops 72-103 exist
     for op in unknown:
         P.port.write(bytes([OP, op]))
     assert_in_step(P, expected, "after every unknown op code")
@@ -263,7 +265,7 @@ def test_commands_while_playing_keep_the_device_in_step(P, D, report):
         P.sync_to_device()                        # Op 92, the same program
         raw_params(P)                             # Op 93
         P.send_custom_pulse_train(4 if P.info.n_custom_pulse_trains == 4 else 2, times, volts)  # A train nobody plays
-        P.port.write(bytes([OP, 78, 12]) + b"STRESS TEST " + bytes([OP, 72]))  # A screen message, then a handshake
+        P.port.write(bytes([OP, 78, 12]) + b"STRESS TEST " + bytes([OP, 103]))  # A screen message, then a handshake
         assert P.port.read(5)[:1] == b"K"
         P.port.write(bytes([OP, 89]) + b"HWTEST")  # Client name
         P.trigger([1, 2])                         # Ignored: the channels play

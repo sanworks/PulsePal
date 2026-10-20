@@ -44,7 +44,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   playbackOngoing() (HW2 only)
 
 #if (HARDWARE_VERSION == 2)
-  // Interrupt service routine for timer counter TC3, configured in startHardwareTimer(). On Pulse Pal 3, IntervalTimer calls handler() directly.
+  // Interrupt service routine for timer counter TC3, configured in startHardwareTimer(). On Pulse Pal 3, flexpwmTick() calls it (pin map 0: IntervalTimer calls handler() directly).
   void TC3_Handler(void) {
     TC_GetStatus(TC1, 0); // Read the status register to clear the interrupt
     handler();
@@ -55,8 +55,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // and makes it in the first cycle at or after that time. It used to wait for SystemTime to equal the time, so a time
 // scheduled in the past (a biphasic custom pulse longer than the gap to the next one, a custom burst longer than the
 // gap between burst onsets, a delay shortened during the delay...) was never met: the channel stayed "playing", at a
-// pulse's voltage or at rest, and ignored triggers until it was stopped, or until SystemTime wrapped around 59.6 hours
-// later. The subtraction works across that wrap, for times up to 2^31 cycles (29.8 hours) apart.
+// pulse's voltage or at rest, and ignored triggers until it was stopped, or until SystemTime wrapped around 2^32 cycles
+// later (11.9 hours at 10us, 59.6 at 50us). The subtraction works across that wrap, for times up to 2^31 cycles (6 hours
+// at 10us) apart: more than MAX_TIME_CYCLES.
 static inline bool timeReached(uint32_t time) {
   return (int32_t)(SystemTime - time) >= 0;
 }
@@ -262,8 +263,9 @@ static inline void startBurst(byte channel, byte block) {
 
 // ---------------------------------------------------------------------------------------------------------------
 // handler() is the hardware timer callback, and it does all pulse train playback. It runs every TIMER_PERIOD
-// microseconds (50us). Time is counted in timer cycles: SystemTime is the number of cycles since playback started,
-// and all durations and custom pulse times are also in cycles (20000 cycles = 1 second).
+// microseconds (10us on Pulse Pal 3, 50us on Pulse Pal 2). Time is counted in timer cycles: SystemTime is the number of
+// cycles since playback started, and all durations and custom pulse times are also in cycles (CycleFrequency cycles = 1
+// second). Times from the PC are converted to cycles as they arrive (see usbTimeToCycles()).
 //
 // Each cycle:
 //  1. If any channel is playing: write DAC updates requested on the previous cycle, and abort all playback if the
@@ -311,7 +313,7 @@ static inline void startBurst(byte channel, byte block) {
 // loop() only runs the joystick menu while StimulatingState is 0.
 // ---------------------------------------------------------------------------------------------------------------
 void handler(void) {
-  #if (HARDWARE_VERSION > 2)
+  #if (HARDWARE_VERSION > 2) && !FLEXPWM_TIMER
     advanceTickCycles(); // First: dacWriteTimed() times the outputs' change from this cycle's tick
   #endif
   if (StimulatingState == 0) {

@@ -27,7 +27,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   dacLoad()
 //   dacLatch()
 //   dacWrite()
-//   advanceTickCycles() (HW3 only)
+//   latchNextWrite() (FLEXPWM_TIMER only)
+//   maskLatchPulse() (FLEXPWM_TIMER only)
+//   advanceTickCycles() (HW3 pin map 0 only)
 //   timerCountsSinceTick()
 //   waitForTimerCount()
 //   dacWriteTimed()
@@ -35,6 +37,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   setRestingVoltageIfIdle()
 //   clampU16()
 //   ProgramDAC()
+//   flexpwmTick() (FLEXPWM_TIMER only)
 //   startHardwareTimer()
 //   stopHardwareTimer()
 //   pauseTimerForSD()
@@ -83,6 +86,36 @@ static inline void dacLatch() {
   digitalWriteDirect(LDACPin,LOW);
 }
 
+#if FLEXPWM_TIMER
+  // FlexPWM3 submodule 1 ticks every TIMER_PERIOD and, on its B output (pin 28, LDAC), pulses LDAC low for
+  // FLEXPWM_LATCH_PULSE_US at DAC_LATCH_US after each tick: the falling edge updates every output to what was written
+  // since the last one. The pulse is masked in every cycle that writes nothing (flexpwmTick() masks it as the cycle
+  // starts, and latchNextWrite() unmasks it): an LDAC edge every 10us coupled into the outputs as a 100kHz comb of up to
+  // 160uV (LDAC low for 2.5us of each cycle) or 17uV (this narrow pulse), and outputs at rest should carry nothing of
+  // the timer. Both take effect at once (UPDATE_MASK). LDAC is high from the unmasking on, so the DAC holds the writes
+  // that follow in its input registers until the pulse.
+  static const uint16_t FLEXPWM_SM1 = 1 << 1;
+  static uint16_t flexpwmLateWriteCount = 0; // Writes that end after this count of the cycle may miss its latch (set by startHardwareTimer())
+  static bool latchNextCycle = false; // The last writes ended too late for their cycle's latch: flexpwmTick() leaves the next one unmasked
+  static inline void latchNextWrite() {
+    IMXRT_FLEXPWM3.MASK = (IMXRT_FLEXPWM3.MASK & ~FLEXPWM_MASK_MASKB(FLEXPWM_SM1)) | FLEXPWM_MASK_UPDATE_MASK(FLEXPWM_SM1);
+  }
+  static inline void maskLatchPulse() {
+    IMXRT_FLEXPWM3.MASK = IMXRT_FLEXPWM3.MASK | FLEXPWM_MASK_MASKB(FLEXPWM_SM1) | FLEXPWM_MASK_UPDATE_MASK(FLEXPWM_SM1);
+  }
+  // Writes flagged channels for the timer to latch, from handler(). If the writes end within DAC_LATCH_GAP_US of the
+  // latch, or after it (handler() started late, behind a higher priority interrupt, or ran past the next tick: the reload
+  // flag is set again), the latch can miss some or all of them, so the next cycle latches too. Without that, the pulse
+  // would be masked in a next cycle that writes nothing, and the outputs would keep the old voltages until some later write.
+  static inline void dacLoadForTimerLatch() {
+    latchNextWrite();
+    dacLoad();
+    if ((IMXRT_FLEXPWM3.SM[1].CNT >= flexpwmLateWriteCount) || (IMXRT_FLEXPWM3.SM[1].STS & FLEXPWM_SMSTS_RF)) {
+      latchNextCycle = true;
+    }
+  }
+#endif
+
 // Writes flagged channels and updates the outputs at once: for setup(), loop()'s comm failure handling (while the timer
 // is stopped) and AbortAllPulseTrains(). handler() uses dacWriteTimed(). The same rules as dacLoad() apply.
 // The AD5754R (Pulse Pal 3) ignores a latch that comes less than about 60ns after the first channel write since the
@@ -90,7 +123,17 @@ static inline void dacLatch() {
 // separates the last write from the latch. That is enough because every caller writes all four channels, so the first
 // write is microseconds old. To write a single channel and latch at once, wait longer first (Wave Pal and Synth Pal wait
 // DAC_WRITE_TO_LATCH_NS, 200ns).
+//
+// While FlexPWM3 drives LDAC (FLEXPWM_TIMER, once startHardwareTimer() has run), the pin is not a GPIO and dacLatch()
+// does nothing: the timer latches the writes instead, DAC_LATCH_US after the tick of the cycle they are written in (or
+// after the next tick, if they end too close to that latch). AbortAllPulseTrains() is the only caller then.
 void dacWrite() {
+  #if FLEXPWM_TIMER
+    if (flexpwmTimerRunning) {
+      dacLoadForTimerLatch();
+      return;
+    }
+  #endif
   dacLoad();
   #if (HARDWARE_VERSION > 2)
     digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! A short wait before the latch (see above)
@@ -100,7 +143,7 @@ void dacWrite() {
 
 #if (HARDWARE_VERSION == 2)
   #define DAC_TIMING_COUNTS_PER_US TIMER_COUNTS_PER_US // dacWriteTimed() reads the timer's own counter
-#else
+#elif !FLEXPWM_TIMER // Pulse Pal 3, pin map 0
   static const uint32_t HARDWARE_TIMER_LOAD = (TIMER_PERIOD * TIMER_COUNTS_PER_US) - 1; // IntervalTimer's PIT load value
   static const uint32_t CPU_CYCLES_PER_TIMER_PERIOD = TIMER_PERIOD * CPU_CYCLES_PER_US; // 30000 at 600MHz
   static_assert(F_CPU % 1000000 == 0, "A timer cycle must be a whole number of CPU cycles");
@@ -120,6 +163,7 @@ void dacWrite() {
   }
 #endif
 
+#if !FLEXPWM_TIMER
 // Counts since the current cycle's timer tick, of the clock dacWriteTimed() is timed with (DAC_TIMING_COUNTS_PER_US per
 // microsecond). Pulse Pal 2 reads the timer's own counter. Pulse Pal 3 reads the CPU's cycle counter, from tickCycles,
 // its count at the tick (see advanceTickCycles()): its PIT counts at 24MHz (41.7ns per count), and each read of the PIT
@@ -151,6 +195,7 @@ static inline void waitForTimerCount(uint32_t count) {
 static const uint32_t DAC_LATCH_COUNT = DAC_LATCH_US * DAC_TIMING_COUNTS_PER_US;
 static const uint32_t DAC_CHANNEL_WRITE_COUNT = DAC_CHANNEL_WRITE_US * DAC_TIMING_COUNTS_PER_US;
 static const uint32_t DAC_LATCH_GAP_COUNT = DAC_LATCH_GAP_US * DAC_TIMING_COUNTS_PER_US;
+#endif
 static_assert(DAC_LATCH_US >= (4 * DAC_CHANNEL_WRITE_US) + DAC_LATCH_GAP_US, "DAC_LATCH_US must allow 4 channel writes and the gap");
 
 // handler()'s DAC write. The outputs change DAC_LATCH_US after the timer tick, however many channels changed.
@@ -164,24 +209,34 @@ static_assert(DAC_LATCH_US >= (4 * DAC_CHANNEL_WRITE_US) + DAC_LATCH_GAP_US, "DA
 // (measured on Pulse Pal 2), and a sooner latch took effect late by the difference, so edges moved by 0.3-0.4us per
 // channel written again.
 // The cost: in a cycle that changes any output, the interrupt runs for at least DAC_LATCH_US.
+//
+// With FLEXPWM_TIMER (Pulse Pal 3 at 10us), the timer itself latches the DAC DAC_LATCH_US after the tick, so the writes
+// go out at once and the interrupt does not wait: at 10us, waiting took nearly all of the CPU (94-96% with all four
+// outputs changing every cycle, and ticks were lost), and the hardware latch leaves 69-72%. The writes must end
+// DAC_LATCH_GAP_US before the latch; four of them end about 5.2us after the tick. Their digital feedthrough comes up to
+// about 7us before the edge, instead of just before it.
 void dacWriteTimed() {
   byte nChannels = DACFlags[0] + DACFlags[1] + DACFlags[2] + DACFlags[3];
   if (nChannels == 0) {
     return;
   }
-  #if (HARDWARE_VERSION > 2)
-    if (hardwareTimerChannel == nullptr) { // startHardwareTimer() did not find the timer: write at once
-      dacWrite();
-      return;
-    }
+  #if FLEXPWM_TIMER
+    dacLoadForTimerLatch();
+  #else
+    #if (HARDWARE_VERSION > 2)
+      if (hardwareTimerChannel == nullptr) { // startHardwareTimer() did not find the timer: write at once
+        dacWrite();
+        return;
+      }
+    #endif
+    waitForTimerCount(DAC_LATCH_COUNT - DAC_LATCH_GAP_COUNT - (nChannels * DAC_CHANNEL_WRITE_COUNT));
+    dacLoad();
+    waitForTimerCount(DAC_LATCH_COUNT);
+    #if (HARDWARE_VERSION > 2)
+      digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
+    #endif
+    dacLatch();
   #endif
-  waitForTimerCount(DAC_LATCH_COUNT - DAC_LATCH_GAP_COUNT - (nChannels * DAC_CHANNEL_WRITE_COUNT));
-  dacLoad();
-  waitForTimerCount(DAC_LATCH_COUNT);
-  #if (HARDWARE_VERSION > 2)
-    digitalWrite(LDACPin, HIGH); // Teensy 4.1 is too fast! Wait for DAC register to update
-  #endif
-  dacLatch();
 }
 
 // Sets all idle output channels to their resting voltage (written by handler() on its next cycle). Call after loading new parameters.
@@ -228,8 +283,25 @@ void ProgramDAC(byte Data1, byte Data2, byte Data3) {
   digitalWriteDirect(LDACPin,LOW);
 }
 
-// Starts the hardware timer that calls handler() every TIMER_PERIOD microseconds
-void startHardwareTimer() {
+#if FLEXPWM_TIMER
+  // FlexPWM3 submodule 1's reload interrupt, every TIMER_PERIOD: the timer tick. This cycle's LDAC pulse is masked first,
+  // and dacWriteTimed() unmasks it if handler() writes the DAC (see latchNextWrite()). It stays unmasked after writes
+  // that ended too late for the last cycle's latch (see dacLoadForTimerLatch()).
+  void flexpwmTick() {
+    IMXRT_FLEXPWM3.SM[1].STS = FLEXPWM_SMSTS_RF;
+    if (latchNextCycle) {
+      latchNextCycle = false;
+    } else {
+      maskLatchPulse();
+    }
+    handler();
+    asm volatile("dsb"); // The flag's clear must reach the peripheral before the interrupt returns, or it runs again
+  }
+#endif
+
+// Starts the hardware timer that calls handler() every TIMER_PERIOD microseconds. Runs at startup and after a comm
+// failure only, so it runs from flash (see FLASHMEM in PulsePal.ino)
+FLASHMEM void startHardwareTimer() {
   #if (HARDWARE_VERSION == 2)
     // The following hardware timer setup for Pulse Pal v2 is adapted from the DueTimer library by Ivan Seidel. (Thanks Ivan!!)
     // https://github.com/ivanseidel/DueTimer
@@ -254,6 +326,44 @@ void startHardwareTimer() {
     TC_Start(TC1, 0);
   #else
     clearTriggerEdgeLatches();
+  #if FLEXPWM_TIMER
+    // FlexPWM3 submodule 1 counts the bus clock (F_BUS_ACTUAL, 150MHz) from 0 to a period's counts - 1, and its reload
+    // interrupt runs handler() through flexpwmTick(). Its B output drives LDAC (pin 28): inverted (POLB), so that LDAC
+    // stays high and falls for FLEXPWM_LATCH_PULSE_US at DAC_LATCH_US after each tick. The DAC updates on that falling
+    // edge. The pulse is masked in cycles that write nothing (see latchNextWrite()). The timer's clock comes from the
+    // CPU's crystal, as the PIT's did. Priority 64, above USB's 128, for the reasons given for the PIT below.
+    {
+      IMXRT_FLEXPWM_t *p = &IMXRT_FLEXPWM3;
+      uint32_t countsPerUs = F_BUS_ACTUAL / 1000000;
+      uint32_t latchCount = (uint32_t)(DAC_LATCH_US * countsPerUs);
+      flexpwmLateWriteCount = latchCount - (uint32_t)(DAC_LATCH_GAP_US * countsPerUs);
+      latchNextCycle = false;
+      NVIC_DISABLE_IRQ(IRQ_FLEXPWM3_1);
+      p->MCTRL &= ~FLEXPWM_MCTRL_RUN(FLEXPWM_SM1);
+      p->MCTRL |= FLEXPWM_MCTRL_CLDOK(FLEXPWM_SM1);
+      p->SM[1].CTRL2 = FLEXPWM_SMCTRL2_INDEP | FLEXPWM_SMCTRL2_WAITEN | FLEXPWM_SMCTRL2_DBGEN | FLEXPWM_SMCTRL2_FRCEN;
+      p->SM[1].CTRL = FLEXPWM_SMCTRL_FULL | FLEXPWM_SMCTRL_PRSC(0);
+      p->SM[1].OCTRL = FLEXPWM_SMOCTRL_POLB;
+      p->SM[1].DTCNT1 = 0;
+      p->SM[1].INIT = 0;
+      p->SM[1].VAL0 = 0;
+      p->SM[1].VAL1 = TIMER_PERIOD * countsPerUs - 1;
+      p->SM[1].VAL4 = latchCount;
+      p->SM[1].VAL5 = latchCount + (uint32_t)(FLEXPWM_LATCH_PULSE_US * countsPerUs);
+      p->MCTRL |= FLEXPWM_MCTRL_LDOK(FLEXPWM_SM1);
+      p->SM[1].CTRL2 |= FLEXPWM_SMCTRL2_FORCE; // Start the count at INIT
+      maskLatchPulse();
+      p->SM[1].STS = 0xFFFF;
+      p->SM[1].INTEN = FLEXPWM_SMINTEN_RIE;
+      p->OUTEN |= FLEXPWM_OUTEN_PWMB_EN(FLEXPWM_SM1);
+      p->MCTRL |= FLEXPWM_MCTRL_RUN(FLEXPWM_SM1);
+      *(portConfigRegister(LDACPin)) = 1; // Pin 28's ALT1: FLEXPWM3_PWMB01
+      flexpwmTimerRunning = true;
+      attachInterruptVector(IRQ_FLEXPWM3_1, flexpwmTick);
+      NVIC_SET_PRIORITY(IRQ_FLEXPWM3_1, 64);
+      NVIC_ENABLE_IRQ(IRQ_FLEXPWM3_1);
+    }
+  #else
     // The timer interrupt must be able to preempt the USB interrupt (lower numbers are higher priorities). The Teensy
     // core starts every interrupt at priority 128, the timer's and USB's included, so a USB interrupt running at a
     // timer tick held handler() back until it returned: up to 5.5us while the PC opened the port, and dacWriteTimed()
@@ -285,6 +395,7 @@ void startHardwareTimer() {
       interrupts();
     }
   #endif
+  #endif
 }
 
 // Stops the hardware timer, so handler() no longer runs
@@ -292,6 +403,13 @@ void stopHardwareTimer() {
   #if (HARDWARE_VERSION == 2)
     NVIC_DisableIRQ(TC3_IRQn);
     TC_Stop(TC1, 0);
+  #elif FLEXPWM_TIMER
+    NVIC_DISABLE_IRQ(IRQ_FLEXPWM3_1);
+    IMXRT_FLEXPWM3.SM[1].INTEN = 0;
+    IMXRT_FLEXPWM3.MCTRL &= ~FLEXPWM_MCTRL_RUN(FLEXPWM_SM1);
+    flexpwmTimerRunning = false;
+    pinMode(LDACPin, OUTPUT); // LDAC back to a GPIO, low, so dacWrite() can latch while the timer is stopped
+    digitalWriteDirect(LDACPin, LOW);
   #else
     hardwareTimer.end();
   #endif
@@ -347,7 +465,7 @@ byte digitalReadDirect(int pin){
 
 #if (HARDWARE_VERSION > 2)
   // handler() reads each trigger line once per cycle, and a pulse shorter than a cycle can come and go between two
-  // reads. A 1 cycle (50us) pulse from another Pulse Pal is one: it reached the trigger pin about 0.4us short of a cycle,
+  // reads. A 1 cycle pulse from another Pulse Pal (50us, before Pulse Pal 3 ran at 10us) is one: it reached the trigger pin about 0.4us short of a cycle,
   // so at some phases of the two devices' timers every pulse fell between reads, and a cycle that writes the DAC reads
   // the lines DAC_LATCH_US late, so reads can be 57.5us apart. Measured on a Pulse Pal 3: 0.6% of 50us pulses missed
   // with no channel playing, 9% with channels playing.

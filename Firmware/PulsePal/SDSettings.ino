@@ -30,6 +30,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   readShortFromSD()
 //   readByteFromSD()
 //   SaveCurrentProgram2SD()
+//   settingsFileTimeFactor()
 //   RestoreParametersFromSD()
 //   rewindDirectory()
 //   isDefaultSettingsFile()
@@ -40,6 +41,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // settings file. It does not write to the microSD card: setup() and op 97 write the default settings file with SaveCurrentProgram2SD().
 // The MATLAB and Python classes' default parameters are the same (set_default_params()), so after a comm failure or a
 // format the device plays what a client that just connected programs. No output channel is linked to a trigger channel.
+// Times are given in 50us cycles (100us phases, 1ms inter-pulse interval, 1s trains), the same on every device.
 // Continuous loop mode goes off, and a parametric train playing in continuous loop mode stops, as op 92 stops it.
 void LoadDefaultParameters() {
   for (int x = 0; x < 4; x++) {
@@ -47,13 +49,13 @@ void LoadDefaultParameters() {
         ContinuousLoopMode[x] = 0;
         endContinuousLoop(x);
       }
-      Phase1Duration[x] = 2;
-      InterPhaseInterval[x] = 2;
-      Phase2Duration[x] = 2;
-      InterPulseInterval[x] = 20;
+      Phase1Duration[x] = 2 * LEGACY_TIME_FACTOR;
+      InterPhaseInterval[x] = 2 * LEGACY_TIME_FACTOR;
+      Phase2Duration[x] = 2 * LEGACY_TIME_FACTOR;
+      InterPulseInterval[x] = 20 * LEGACY_TIME_FACTOR;
       BurstDuration[x] = 0;
       BurstInterval[x] = 0;
-      PulseTrainDuration[x] = 20000;
+      PulseTrainDuration[x] = 20000 * LEGACY_TIME_FACTOR;
       PulseTrainDelay[x] = 0;
       IsBiphasic[x] = 0;
       Phase1Voltage[x] = 49152;
@@ -131,6 +133,8 @@ byte readByteFromSD() {
 //   For each trigger channel 1-2 (5 bytes each):
 //     TriggerMode, TriggerAddress[ch][0-3]                                    uint8 each
 //   SETTINGS_FILE_END_MARKER                                                  uint8
+// Times are in timer cycles: 50us cycles in a file ending in SETTINGS_FILE_END_MARKER_50US (252), 10us cycles in one ending
+// in SETTINGS_FILE_END_MARKER_10US (253). A device saves its own cycles, and loads either (see settingsFileTimeFactor()).
 // ContinuousLoopMode is not saved. Op 85 sends the first SETTINGS_FILE_N_PARAM_BYTES bytes of this file.
 // Note: ops 73, 92 and 93 send parameters in a different order, with each parameter grouped across all channels.
 // If this layout changes, update SaveCurrentProgram2SD(), RestoreParametersFromSD() and the constants above.
@@ -176,9 +180,24 @@ FLASHMEM bool SaveCurrentProgram2SD() { // microSD speed limits it: run from fla
   return written;
 }
 
+// The device cycles in each time unit of a settings file, from its end marker: LEGACY_TIME_FACTOR for a file of 50us
+// cycles (5 on a 10us device), 1 for a file of the device's own cycles, or 0 for a file the device cannot load: one with
+// no end marker, or of 10us cycles on a 50us device (Pulse Pal 2), which would round its times. Older firmware refuses a
+// file of 10us cycles too, as one with no end marker, rather than play it 5 times slower.
+byte settingsFileTimeFactor(byte endMarker) {
+  if (endMarker == SETTINGS_FILE_END_MARKER_50US) {
+    return LEGACY_TIME_FACTOR;
+  }
+  if (endMarker == SETTINGS_FILE_END_MARKER) {
+    return 1;
+  }
+  return 0;
+}
+
 // Loads the parameters in the current settings file (settingsFile). Returns SETTINGS_FILE_END_MARKER if the file is
 // valid, or 0 if it is missing, too short, has no end marker, or holds a value the device cannot play (e.g. custom
-// train 3, in a file saved on Pulse Pal 3 and loaded on Pulse Pal 2). The whole file is read into a parameter set in
+// train 3, in a file saved on Pulse Pal 3 and loaded on Pulse Pal 2). Times in a file of 50us cycles, every file saved
+// before October 2026, are converted to the device's cycles (see settingsFileTimeFactor()), so it plays as it did. The whole file is read into a parameter set in
 // op 92's layout, and checked, before anything is loaded: an invalid file changes nothing, and the device keeps its
 // parameters. A valid one is loaded as op 92 loads a set (applyParamBuffer()), at once, also in param sync mode.
 // Continuous loop mode is not in the file, so each channel keeps its own.
@@ -219,9 +238,11 @@ FLASHMEM byte RestoreParametersFromSD() { // microSD speed limits it: run from f
       triggerLinks[chan * 4 + i] = readByteFromSD();
     }
   }
-  if (readByteFromSD() != SETTINGS_FILE_END_MARKER) {
+  byte fileTimeFactor = settingsFileTimeFactor(readByteFromSD());
+  if (fileTimeFactor == 0) {
     return 0;
   }
+  multiplyTimeBytes(times, 8 * 4, fileTimeFactor);
   if (!validateParamBuffer(set)) { // It corrects out of range values in the set, which is then not loaded
     return 0;
   }

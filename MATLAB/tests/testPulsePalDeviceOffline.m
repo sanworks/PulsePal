@@ -28,7 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testPulsePalDeviceOffline()
 tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testALateReplyIsSkipped, ...
-    @testOtherFirmwareVersionsWarn, ...
+    @testHandshakeFallsBackToOp72, @testATenMicrosecondCycleConvertsExactly, @testOtherFirmwareVersionsWarn, ...
     @testDefaultParametersMessage, @testSingleValuesAreRefused, @testAssignmentsSendTheChannelsTheyChange, ...
     @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testMinimumPulseByHardwareVersion, @testCustomPulseTimesAreMultiplesOfTheMinimumPulse, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
@@ -58,7 +58,7 @@ function testConnectionProgramsTheDefaults()
 port = SimulatedPulsePalPort();
 P = PulsePalDevice(port);
 w = port.writes;
-assert(isequal(w(1:6), {uint8([213 72]), uint8([213 94]), uint8([213 100]), uint8([213 102]), ...
+assert(isequal(w(1:6), {uint8([213 103]), uint8([213 94]), uint8([213 100]), uint8([213 102]), ...
                         uint8([213 89 double('MATLAB')]), uint8([213 91 128 0 0])}), 'connection commands');
 assert(numel(w) == 7 && w{7}(2) == 92, 'the defaults are not one op 92');
 assert(port.NumBytesAvailable == 0, 'a reply was left unread');
@@ -97,6 +97,40 @@ for lateReply = {op93Reply, [75 99 0 0 0], 1}
     assert(isequal(port.writes{2}, uint8([213 94])) && port.NumBytesAvailable == 0, 'replies after the handshake');
     delete(P);
 end
+end
+
+function testHandshakeFallsBackToOp72()
+% The class connects with op 103, so that the session's times are in the device's own cycles (10 us on Pulse Pal 3).
+% Firmware from before October 2026 ignores op 103, and its times are in 50 us cycles: the class then connects with
+% op 72, and takes the cycle that op 94 reports. A 10 us device counts an op 72 session's times in 50 us cycles too.
+for cyclePeriod = [50 10]
+    port = SimulatedPulsePalPort();
+    port.answersOp103 = false;
+    port.cyclePeriod = cyclePeriod;
+    P = PulsePalDevice(port);
+    assert(isequal(port.writes(1:3), {uint8([213 103]), uint8([213 72]), uint8([213 94])}), 'op 72 after op 103');
+    assert(P.info.cyclePeriod_us == 50 && P.info.cycleFrequency == 20000, 'the session''s unit is 50 us');
+    port.clearWrites();
+    P.phase1Duration(1) = 0.0002;
+    assert(isequal(port.writes, {uint8([213 74 4 1 typecast(uint32(4), 'uint8')])}), '4 cycles of 50 us');
+    delete(P);
+end
+end
+
+function testATenMicrosecondCycleConvertsExactly()
+% Pulse Pal 3 runs a 10 us cycle. The cycle rate is 1e6/period, exactly 100000: 1/(10/1e6) is 99999.99999999999, and
+% 10 cycles read back from the device would be 0.00010000000000000002 s
+port = SimulatedPulsePalPort();
+port.cyclePeriod = 10;
+P = PulsePalDevice(port);
+assert(P.info.cycleFrequency == 100000 && P.info.cyclePeriod_us == 10, 'cycle rate');
+port.clearWrites();
+P.phase1Duration(1) = 0.000123; % Rounds to 12 cycles
+assert(isequal(port.writes, {uint8([213 74 4 1 typecast(uint32(12), 'uint8')])}), '12 cycles of 10 us');
+assert(P.phase1Duration(1) == 0.00012, 'the time the device plays');
+P.syncFromDevice(); % Op 93: the last op 92's times (the simulated port does not apply op 74), back to seconds
+assert(P.phase1Duration(1) == 0.0001 && P.interPulseInterval(1) == 0.001, 'times read back');
+delete(P);
 end
 
 function testOtherFirmwareVersionsWarn()
@@ -469,6 +503,7 @@ assert(isequal(P.info.triggerModes, {'Normal', 'Toggle', 'Gated'}), 'Pulse Pal 2
 assert(P.info.circuitBoardRevision == 0, 'Pulse Pal 2 hardware revision');
 assert(isequal(P.info.serialNumber, ''), 'Pulse Pal 2 has no USB serial number');
 port = SimulatedPulsePalPort(2, 21);
+port.answersOp103 = false; % As firmware from before October 2026
 P = []; % Assigned in evalc, which hides the warning that v22 is available
 evalc('P = PulsePalDevice(port);');
 assert(isequal(port.writes{end}(1:2), uint8([213 73])) && numel(port.writes{end}) == 2+128+24+16+8+2, ...
