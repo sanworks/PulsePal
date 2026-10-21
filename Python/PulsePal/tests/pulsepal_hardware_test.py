@@ -165,7 +165,8 @@ def test_parameters_read_back_as_programmed(P, D, report):
             params["phase1_voltage"][x] = rng.choice([-10, -2.5, 0, 0.001, 5, 10])
             params["phase2_voltage"][x] = rng.choice([-10, -5, 3.3])
             params["resting_voltage"][x] = rng.choice([0, 0.5, -1.25])
-            # 0.00012 s is off a 50 us cycle: it reads back from Pulse Pal 3 as sent (12 cycles of 10 us)
+            # 0.00012 s is off a 50 us cycle: it reads back from Pulse Pal 3 as sent (12 cycles of 10 us), and from
+            # Pulse Pal 2 as the class holds it, rounded to 2 cycles (0.0001 s)
             params["phase1_duration"][x] = rng.choice([0.0001, 0.00012, 0.00015, 0.001, 9999.9999])
             params["inter_phase_interval"][x] = rng.choice([0, 0.0001, 0.5])
             params["phase2_duration"][x] = rng.choice([0.0001, 0.002])
@@ -181,9 +182,10 @@ def test_parameters_read_back_as_programmed(P, D, report):
             params["link_trigger_channel2"][x] = rng.random() < 0.5
         params["trigger_mode"] = [rng.choice(["Normal", "Toggle", "Gated"]) for _ in range(2)]
         P.import_params(params)
+        held = P.export_params()  # Times as the device plays them: on Pulse Pal 2, 0.00012 s is held as 0.0001
         expected = raw_params(P)
         P.sync_from_device()
-        assert P.export_params() == params, f"program {k}: sync_from_device() read back other values"
+        assert P.export_params() == held, f"program {k}: sync_from_device() read back other values"
         # The same program again, one assignment at a time (op 74 / op 91), must give the same bytes
         P.set_default_params()
         for name, values in params.items():

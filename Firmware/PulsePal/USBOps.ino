@@ -222,6 +222,12 @@ void storeUSBTimes(uint32_t *times, const uint8_t *values) {
 
 // Sends a time array of the output channels (op 93), in the session's unit
 void writeUSBTimes(const uint32_t *times) {
+  // With nothing to convert (always on Pulse Pal 2, and after op 103), the array is sent as it is. Converting each time
+  // (a 64-bit division, done in software on Pulse Pal 2's Cortex-M3) made op 93 take 0.34 ms there, not 0.21 ms.
+  if (usbTimeFactor == 1) {
+    PPUSB.writeUint32Array(times, 4);
+    return;
+  }
   uint32_t sent[4];
   for (int i = 0; i < 4; i++) {
     sent[i] = cyclesToUSBTime(times[i]);
