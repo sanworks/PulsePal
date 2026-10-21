@@ -123,6 +123,7 @@ Ops 73, 92 and 93 carry every parameter, in this order:
 | 101 | Send the [status](#status) | none | Output channels playing (byte, one bit per channel, bit 0 = channel 1), then counters since startup or the previous op 101 (uint32 each): rising edges on trigger channels 1 and 2, starts of output channels 1-4, comm failures. 29 bytes |
 | 102 | Send the [USB serial number](#usb-serial-number) | none | Length (byte, 0 on Pulse Pal 2), then that many ASCII characters |
 | 103 | Handshake, with the session's times in the device's own cycles (firmware from October 2026). Used by the Python, MATLAB and C++ classes | none | As op 72 |
+| 104 | Run the [joystick test](#joystick-test), for bench testing and diagnostics (firmware from October 2026). Stops playback, and holds the device until the test ends | Seconds allowed for each step (byte, 1-255) | 0 if that byte is 0. Otherwise 1 at once, as the test starts, and 23 more bytes when it ends: see [Joystick test](#joystick-test) |
 
 ### Time units
 
@@ -280,6 +281,40 @@ The Python and MATLAB classes read it when they connect, into `info.circuit_boar
 `info.circuitBoardRevision` (0 on firmware v21, which has no op 100), and the C++ class returns
 it from `getHardwareRevision()`. A script can copy it to its data, with the hardware version, to
 record exactly which hardware ran an experiment.
+
+### Joystick test
+
+Op 104 tests the thumb joystick with an operator, for bench testing (the QC panel,
+`/MATLAB/tests/PulsePal3_QCTest.m`) and diagnostics; it is not in the joystick menu, and the
+classes do not send it. The device stops playback, and then takes over until the test ends: it
+reads no other command meanwhile. Unlike other ops, it sends the first byte of its reply at once,
+as the test starts, so that a client can tell within a moment whether the firmware has op 104
+(older firmware sends nothing). The rest comes when the test ends, up to 5 times the timeout
+later, plus 14 s of messages; meanwhile the client sends nothing.
+
+On the screen, the device asks for the joystick to be left alone while it measures the resting
+position (1.5 s), then pushed fully up, down, left and right in turn, and then clicked 3 times. It
+shows the position as it moves, in analogRead counts (0-1023, 10 bits; up and left read low).
+Once a direction reaches its pass level the screen says so, and the next direction is asked for
+once the joystick is back in the middle. The pass levels are `JOYSTICK_TEST_MARGIN` (100 counts)
+past the thresholds at which the menu acts on the joystick: up 200 (300 - 100), down 800
+(700 + 100), left 100 (the menus scroll left below 200), right 800. The resting position must lie
+the same margin inside the thresholds, 400-600 on both axes, or the menu would see a push that
+nobody made. Each step that has not passed when its time is up fails, and the test goes on. A click
+is the button pressed for 30 ms after being released for as long, and one already held when the
+clicks are asked for does not count. The screen shows PASSED or FAILED, then the top menu.
+
+The reply is 24 bytes (positions and levels in analogRead counts):
+
+| Bytes | Value |
+|---|---|
+| 1 | 1, sent as the test starts (0, the only byte, if the timeout byte was 0) |
+| 2 | 1 if the test passed: every direction reached its pass level, the resting position is in the middle, and 3 clicks were counted |
+| 3-6 | Resting position: X, then Y (uint16 each) |
+| 7-14 | The farthest the joystick went while each direction was asked for (uint16 each): up (lowest Y), down (highest Y), left (lowest X), right (highest X) |
+| 15-22 | Pass levels, in the same order (uint16 each) |
+| 23 | Bits 0-3: up, down, left and right passed. Bit 4: the resting position is in the middle |
+| 24 | Clicks counted (0-3) |
 
 ## Parameter codes (ops 74 and 91)
 

@@ -133,7 +133,9 @@ the `--show` output before concluding that a function really changed.
    message cut short set resting voltages of 0, and the comm failure handling then put −10 V on
    every output until the joystick was clicked.
    Replies are buffered until `loop()` calls `PPUSB.flush()`, so no reply leaves the device
-   during an op. Array reads and writes are single block copies, which rely on both boards
+   during an op. The one exception is op 104, the joystick test (`runJoystickTest()`), which
+   flushes its reply's first byte as it starts, because the test then holds the device for up to
+   minutes. Array reads and writes are single block copies, which rely on both boards
    being little-endian, like the wire format. See `ArCOM.h`. On Pulse Pal 2, ArCOM also takes
    received packets off the USB controller itself (`receiveUSB()`), because the Due core's
    `Serial_::accept()` drops a packet that arrives while it empties the one before; never read

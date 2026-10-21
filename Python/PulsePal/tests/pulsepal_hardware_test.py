@@ -246,7 +246,7 @@ def test_bytes_that_are_no_command_are_ignored(P, D, report):
     noise = bytes(b for b in (rng.randrange(256) for _ in range(20000)) if b != OP)
     P.port.write(noise)
     assert_in_step(P, expected, "after 20000 bytes of noise")
-    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 104)]  # Ops 72-103 exist
+    unknown = [op for op in range(256) if op not in DESTRUCTIVE_OPS and op not in range(72, 105)]  # Ops 72-104 exist
     for op in unknown:
         P.port.write(bytes([OP, op]))
     assert_in_step(P, expected, "after every unknown op code")

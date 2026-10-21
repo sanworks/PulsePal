@@ -41,6 +41,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   redrawEditValue()
 //   digitsToVolts()
 //   ReturnUserValue()
+//   runJoystickTest()
 
 // ---------------------------------------------------------------------------------------------------------------
 // Thumb joystick menu map. UpdateSettingsMenu() is called from loop() whenever no channel is playing.
@@ -464,7 +465,7 @@ void UpdateSettingsMenu() {
     if (ClickerButtonState == 0 && LastClickerButtonState == 1) {
       LastClickerButtonState = 0;
     }
-    if (LastClickerXState != 1 && ClickerX < 200) {
+    if (LastClickerXState != 1 && ClickerX < CLICKER_SCROLL_LEFT_THRESHOLD) {
       LastClickerXState = 1;
       NeedUpdate = 1;
       if (inMenu == MENU_CHANNEL_LIST) {SelectedChannel = SelectedChannel - 1;}
@@ -1074,3 +1075,155 @@ unsigned int ReturnUserValue(unsigned int startValue, unsigned long LowerLimit, 
      //LCD_noCursor();
      return UserValue;
 } 
+
+// Joystick test, for bench testing and diagnostics (op 104; it is not in the menu). The screen asks for the joystick to
+// be pushed fully up, down, left and right, then clicked 3 times, and shows its position (analogRead counts, 0-1023) as
+// it moves. A direction passes once the joystick goes JOYSTICK_TEST_MARGIN past the threshold where the menu acts on
+// it: up below ClickerMinThreshold, left below CLICKER_SCROLL_LEFT_THRESHOLD (the lower of the two left thresholds),
+// down and right above ClickerMaxThreshold. The screen says so, and asks for the next direction once the joystick is
+// back in the middle. The resting position is measured first, with the joystick left alone: it must lie
+// JOYSTICK_TEST_MARGIN inside the thresholds, or the menu would see a push that nobody made. Each step waits up to
+// stepTimeout seconds. Writes the reply described under op 104 in /Firmware/PROTOCOL.md: its first byte as the test
+// starts, the rest as it ends.
+// The test takes the device over until it ends: playback is stopped first, USB commands wait, and the screen returns
+// to the top menu.
+FLASHMEM void runJoystickTest(byte stepTimeout) { // Bench testing only, so it runs from flash (see FLASHMEM in PulsePal.ino)
+  const uint32_t stepTimeoutMs = (uint32_t)stepTimeout * 1000;
+  const uint32_t debounceMs = 30; // A click: the button pressed for this long, after being released for as long
+  const char *prompts[4] = {"Push UP fully", "Push DOWN fully", "Push LEFT fully", "Push RIGHT fully"};
+  const char *names[4] = {"UP", "DOWN", "LEFT", "RIGHT"};
+  const bool onX[4] = {false, false, true, true}; // Up and down move Y, left and right move X
+  const bool readsLow[4] = {true, false, true, false}; // Up and left read low
+  const uint16_t passLevel[4] = {
+    (uint16_t)(ClickerMinThreshold - JOYSTICK_TEST_MARGIN),
+    (uint16_t)(ClickerMaxThreshold + JOYSTICK_TEST_MARGIN),
+    (uint16_t)(min(CLICKER_SCROLL_LEFT_THRESHOLD, ClickerMinThreshold) - JOYSTICK_TEST_MARGIN),
+    (uint16_t)(ClickerMaxThreshold + JOYSTICK_TEST_MARGIN)};
+  uint16_t extreme[4] = {0}; // The farthest the joystick went in each direction while it was asked for
+  byte resultBits = 0; // Bits 0-3: up, down, left and right passed. Bit 4: the resting position is in the middle
+  char line1[17];
+  char line2[17];
+  for (int i = 0; i < 4; i++) {
+    killChannel(i);
+  }
+  if (screenDimmed) {
+    endScreenSaver();
+  }
+  // The reply's first byte goes at once, unlike other ops' replies: the client then knows the test has started (firmware
+  // without op 104 sends nothing), and waits for the rest
+  PPUSB.writeByte(1);
+  PPUSB.flush();
+
+  // The resting position: the mean over the last half second of 1.5 s with the joystick left alone
+  write2Screen("JOYSTICK TEST", "Do not touch");
+  uint32_t sumX = 0;
+  uint32_t sumY = 0;
+  uint16_t nReads = 0;
+  uint32_t stepStart = millis();
+  while (millis() - stepStart < 1500) {
+    if (millis() - stepStart >= 1000) {
+      sumX += analogRead(ClickerXLine);
+      sumY += analogRead(ClickerYLine);
+      nReads++;
+    }
+    delayMicroseconds(1000);
+  }
+  uint16_t restX = sumX / nReads;
+  uint16_t restY = sumY / nReads;
+  int restLow = ClickerMinThreshold + JOYSTICK_TEST_MARGIN;
+  int restHigh = ClickerMaxThreshold - JOYSTICK_TEST_MARGIN;
+  if ((restX >= restLow) && (restX <= restHigh) && (restY >= restLow) && (restY <= restHigh)) {
+    resultBits |= (1 << 4);
+  }
+
+  // Each direction in turn
+  for (int d = 0; d < 4; d++) {
+    bool reached = false;
+    bool showNow = true;
+    uint32_t reachedTime = 0;
+    uint32_t centredSince = millis();
+    uint32_t lastShown = 0;
+    extreme[d] = onX[d] ? restX : restY;
+    stepStart = millis();
+    while (millis() - stepStart < stepTimeoutMs) {
+      int x = analogRead(ClickerXLine);
+      int y = analogRead(ClickerYLine);
+      int position = onX[d] ? x : y;
+      if (readsLow[d] ? (position < extreme[d]) : (position > extreme[d])) {
+        extreme[d] = position;
+      }
+      if (!reached && (readsLow[d] ? (position <= passLevel[d]) : (position >= passLevel[d]))) {
+        reached = true;
+        reachedTime = millis();
+        showNow = true;
+      }
+      if ((x <= ClickerMinThreshold) || (x >= ClickerMaxThreshold) ||
+          (y <= ClickerMinThreshold) || (y >= ClickerMaxThreshold)) {
+        centredSince = millis(); // Not back in the middle, where the menu sees no push
+      }
+      // The next direction once this one has been acknowledged for 0.8 s and the joystick back in the middle for 0.3 s
+      if (reached && (millis() - reachedTime >= 800) && (millis() - centredSince >= 300)) {
+        break;
+      }
+      if (showNow || (millis() - lastShown >= 100)) {
+        showNow = false;
+        lastShown = millis();
+        snprintf(line1, sizeof(line1), "%s: OK", names[d]);
+        snprintf(line2, sizeof(line2), "X %d  Y %d", x, y);
+        write2Screen(reached ? line1 : prompts[d], line2);
+      }
+      delayMicroseconds(1000);
+    }
+    if (reached) {
+      resultBits |= (1 << d);
+    } else {
+      snprintf(line1, sizeof(line1), "%s: FAILED", names[d]);
+      snprintf(line2, sizeof(line2), "%c %s %u (%u)", onX[d] ? 'X' : 'Y', readsLow[d] ? "min" : "max",
+               extreme[d], passLevel[d]);
+      write2Screen(line1, line2);
+      delayMicroseconds(2000000);
+    }
+  }
+
+  // Three clicks. A press held from before is not counted: the button must be seen released first.
+  byte clicks = 0;
+  bool pressed = (digitalRead(ClickerButtonLine) == LOW); // The debounced state
+  bool lastRead = pressed;
+  uint32_t lastChange = millis();
+  write2Screen("Click 3 times", "Clicks: 0 of 3");
+  stepStart = millis();
+  while ((clicks < 3) && (millis() - stepStart < stepTimeoutMs)) {
+    bool now = (digitalRead(ClickerButtonLine) == LOW);
+    if (now != lastRead) {
+      lastRead = now;
+      lastChange = millis();
+    } else if ((now != pressed) && (millis() - lastChange >= debounceMs)) {
+      pressed = now;
+      if (pressed) {
+        clicks++;
+        snprintf(line2, sizeof(line2), "Clicks: %d of 3", clicks);
+        write2Screen("Click 3 times", line2);
+      }
+    }
+    delayMicroseconds(1000);
+  }
+  // The menu must not take the last click as its own: it waits for a release before it acts on a press
+  stepStart = millis();
+  while ((digitalRead(ClickerButtonLine) == LOW) && (millis() - stepStart < 2000)) {
+    delayMicroseconds(1000);
+  }
+  LastClickerButtonState = 1;
+
+  bool passed = (resultBits == 0x1F) && (clicks == 3);
+  write2Screen("JOYSTICK TEST", passed ? "PASSED" : "FAILED");
+  delayMicroseconds(2000000);
+  inMenu = MENU_TOP;
+  write2Screen(CommanderString, " Click for menu");
+  PPUSB.writeByte(passed);
+  PPUSB.writeUint16(restX);
+  PPUSB.writeUint16(restY);
+  PPUSB.writeUint16Array(extreme, 4);
+  PPUSB.writeUint16Array(passLevel, 4);
+  PPUSB.writeByte(resultBits);
+  PPUSB.writeByte(clicks);
+}

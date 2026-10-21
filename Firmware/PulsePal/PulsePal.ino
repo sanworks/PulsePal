@@ -180,7 +180,8 @@ enum OpCode {
   OP_SEND_HARDWARE_REVISION = 100,    // Return the circuit board revision read at startup (HW3; 0 on HW2)
   OP_SEND_STATUS = 101,               // Return the output channels playing, and counters since startup or the last op 101
   OP_SEND_SERIAL_NUMBER = 102,        // Return the USB serial number (HW3; HW2 has none, and sends an empty one)
-  OP_HANDSHAKE_DEVICE_CYCLES = 103    // As op 72, and the session's times are in the device's own cycles (op 72: 50us cycles)
+  OP_HANDSHAKE_DEVICE_CYCLES = 103,   // As op 72, and the session's times are in the device's own cycles (op 72: 50us cycles)
+  OP_JOYSTICK_TEST = 104              // Bench test and diagnostics: the joystick test on the screen, and its results
 };
 
 // The 4 bytes that must follow op 97 for it to format the card, so that two stray bytes, e.g. 213 and 97 in the data of
@@ -650,6 +651,10 @@ int ClickerX = 0; // Value of analog reads from X line of joystick input device
 int ClickerY = 0; // Value of analog reads from Y line of joystick input device
 int ClickerMinThreshold = 300; // Joystick position to consider an upwards or leftwards movement (on Y and X lines respectively)
 int ClickerMaxThreshold = 700;
+// The menus scroll left below this X, and the value editor's cursor moves left below ClickerMinThreshold
+#define CLICKER_SCROLL_LEFT_THRESHOLD 200
+// Op 104 (runJoystickTest()): how far past these thresholds, in analogRead counts (0-1023), the joystick must go
+#define JOYSTICK_TEST_MARGIN 100
 boolean ClickerButtonState = 0; // Value of digital reads from button line of joystick input device
 boolean LastClickerButtonState = 1;
 unsigned int DebounceTime = 0; // Time since the joystick button changed states

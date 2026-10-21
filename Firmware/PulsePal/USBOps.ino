@@ -60,7 +60,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // The ops that program parameters (73, 74, 91 and 92) read their whole message first, and change nothing if it was cut
 // short: read value by value into the parameters, the missing bytes set resting voltages of 0 (-10V), which loop()'s
 // comm failure handling then put on every output until the joystick was clicked.
-// Replies are buffered, and sent by the PPUSB.flush() call in loop().
+// Replies are buffered, and sent by the PPUSB.flush() call in loop(). Op 104 (runJoystickTest()) also sends its first
+// byte as it starts.
 //
 // Note on confirm bytes: ops that reply send 1 if the command was executed, or 0 if it was rejected. A command is
 // rejected when a channel number, parameter code or data length is out of range. The data of a rejected command is
@@ -737,6 +738,15 @@ void processUSBCommands() {
         } break;
         case OP_SEND_SERIAL_NUMBER: { // Op 102. Send the USB serial number. Used by the MATLAB, Python and C++ classes
           sendSerialNumber();
+        } break;
+        case OP_JOYSTICK_TEST: { // Op 104. Joystick test, for bench testing and diagnostics only (runJoystickTest()). Used by
+                                 // /MATLAB/tests/PulsePal3_QCTest.m. Replies 1 as it starts, and the results when it ends.
+          inByte2 = PPUSB.readByte(); // Seconds allowed for each of the test's steps
+          if (inByte2 == 0) {
+            PPUSB.writeByte(0);
+            break;
+          }
+          runJoystickTest(inByte2);
         } break;
      }
     }
