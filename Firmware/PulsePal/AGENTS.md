@@ -319,3 +319,10 @@ playback, the menu or the USB ops, ask the user to check:
 - The joystick menu cannot list a settings file whose name is 12 characters plus `.pps`.
 - `mirrorAboutZero()` maps a −10 V custom pulse's phase 2 to +10 V (DAC code 65535), because
   the exact mirror of code 0 would be 65536, which is out of range.
+- `loop()` runs one command per pass, from a stream of bytes: it never sees USB writes or
+  packets. On Pulse Pal 3 a pass takes about 30 µs while no channel plays (measured October 2026;
+  probably mostly `UpdateSettingsMenu()`'s two `analogRead()`s) and a few µs while one plays. So
+  whether two commands that arrive together take effect in the same 10 µs cycle depends on
+  whether a channel is playing, and separate calls from the classes on Windows arrive 0.05 to
+  1.5 ms apart. This is documented ("Commands in series" in `/Firmware/PROTOCOL.md`) rather than
+  changed: commands run in order, and one command acts on several channels in the same cycle.

@@ -120,7 +120,7 @@ P.trigger([1 2]);
 | Shortest pulse | 10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 (`info.min_pulse_width_us`), for the phase durations, the inter-pulse interval and the pulse train duration: the shortest pulse each one's trigger inputs detect reliably. A Pulse Pal 2, or a Pulse Pal 3 with firmware from before October 2026, can miss a pulse shorter than 100 µs |
 | Custom trains | Pulse Pal 3: 4 trains of up to 10000 pulses. Pulse Pal 2: 2 trains of up to 5000. Pulse times are multiples of the shortest pulse: 10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2 |
 | Trigger channels | 2, TTL. Measured on a Pulse Pal 3, an output starts 18 to 28 µs after a trigger's rising edge, depending on where the edge falls in the device's 10 µs cycle (58 to 108 µs with firmware from before October 2026) |
-| Soft triggers | `trigger()` reaches the device over USB, which adds a variable delay. The channels it names start together, in the same timer cycle |
+| Soft triggers | `trigger()` reaches the device over USB, which adds a variable delay. The channels it names start together, in the same timer cycle. Separate calls run in the order made, but how far apart is not fixed: on Windows, `trigger(1)` then `trigger(2)` started channel 2 0.05 to 1.5 ms after channel 1, and on Linux and macOS two calls can reach the device together. To start channels together, name them in one call: `trigger([1, 2])` (MATLAB: `trigger([1 2])`) |
 
 ### Pulse Pal 2 and Pulse Pal 3
 

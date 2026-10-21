@@ -150,9 +150,38 @@ Pulse Pal 2 answers both handshakes; its unit is 50 µs cycles either way.
 
 A soft trigger (op 77) starts a channel's pulse train in the next timer cycle. A channel that is
 already playing, or waiting out its pulse train delay, ignores it, as it ignores a trigger line
-in normal mode. Soft triggers read before that cycle add up: two op 77s in one USB packet trigger
-the channels of both. A stop (ops 80, 81 and 98) also cancels a soft trigger that the channel has
-not started yet.
+in normal mode. Soft triggers read before that cycle add up: a second op 77 adds its channels to
+those of the first. A stop (ops 80, 81 and 98) also cancels a soft trigger that the channel has
+not started yet. To start or stop several channels in the same cycle, set their bits in one op 77
+or op 98: separate commands run one after another (see [Commands in series](#commands-in-series)).
+
+### Commands in series
+
+The device reads commands from a stream of bytes and runs them one at a time, in the order they
+arrive, each to its end. It cannot see how the bytes were sent: in one USB write or several, in
+one USB packet or several. A command takes effect in the first timer cycle after it has run, so
+whether two separate commands take effect in the same cycle depends on how close together they
+arrive and on what the device is doing, and is not defined. On Pulse Pal 3 (10 µs cycle,
+measured in October 2026):
+
+- Commands that arrive together (in one write, or back to back) run about 30 µs apart while no
+  output channel plays, because the device reads its joystick between them: two op 77s start
+  their channels 3 or 4 cycles apart, and a stop (op 98) straight after an op 77 ends the channel
+  20 to 30 µs after it starts. While a channel plays they run within a few µs: two op 77s started
+  their channels in the same cycle in 43 of 50 trials and one cycle apart in 7, and a stop
+  straight after an op 77 cancelled it in 50 of 50.
+- The Python and MATLAB classes on Windows wait for each write to be sent, so their consecutive
+  calls arrived 0.05 to 1.5 ms apart, and never took effect in the same cycle. On Linux and
+  macOS a write returns once the operating system has buffered it, so consecutive calls can
+  arrive together.
+
+With a 50 µs cycle (Pulse Pal 2, and Pulse Pal 3 before October 2026), commands that arrive
+together take effect in the same cycle or the next, and a stop sent with a soft trigger ended the
+channel before its output changed.
+
+To act on several channels in the same timer cycle, use one command that carries them all: op 77
+or op 98 with several channel bits, op 91 or op 92 for parameters, or the channels' links to a
+trigger channel.
 
 ### Programming during playback
 
