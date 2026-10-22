@@ -382,6 +382,8 @@ enum TriggerEventValue {
   #define SCREEN_SAVER_DIM_BRIGHTNESS 8 // Brightness while the screen saver dims the screen
   // Teensy 4.1 runs code from RAM1 (ITCM), which it takes in 32kB blocks, so code just over a multiple of 32kB costs a
   // whole block of RAM. Functions that run only at startup are marked FLASHMEM, which runs them from flash instead.
+  // printf's floating point support (18kB) is left out too: format with siprintf() and sniprintf(), never sprintf() or
+  // snprintf() (see FormatNumberForDisplay() in Menu.ino).
 #endif
 
 // Variables for SPI bus

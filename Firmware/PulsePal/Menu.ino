@@ -678,75 +678,80 @@ boolean ReadDebouncedButton() {
 const char* FormatNumberForDisplay(unsigned int InputNumber, int Units) {
   // Units: see enum DisplayUnits. Times are shown with leading zeros when inMenu is MENU_OUTPUT_TRIGGER,
   // which ReturnUserValue() sets temporarily while a value is being edited.
+  // Numbers are formatted from integers, with siprintf() and sniprintf(), which have no floating point. sprintf() and
+  // snprintf() link printf's floating point support, which took 18kB of the code Pulse Pal 3 runs from RAM1 (see
+  // FLASHMEM in PulsePal.ino), so the sketch uses neither. The text is the same as printf's %f gave.
   // Clear var
   for (int x = 0; x < 17; x++) {
     Value2Display[x] = ' ';
   }
-  // Figure out how many digits
-double InputNum = double(InputNumber);
-  if (Units == UNITS_TIME) {
-  InputNum = InputNum/CycleFrequency;
-  }
-if (Units == UNITS_VOLTS) {
-  // Convert volts from bytes to volts
-  InputNum = (((InputNum/65536)*10)*2 - 10);
-}
   switch (Units) {
-    case UNITS_INDEX: {sprintf (Value2Display, "       %.0f", InputNum);} break;
+    case UNITS_INDEX: {siprintf (Value2Display, "       %u", InputNumber);} break;
     case UNITS_TIME: {
+      // A time is a whole number of cycles, so its seconds and its 5 decimals (10us steps) are exact integers.
+      // sniprintf(): on a 50us cycle, times from USB over 99999.99999s have 12 digits, one more than the buffer holds.
+      unsigned long wholeSeconds = InputNumber / CycleFrequency;
+      unsigned long fifthDecimals = (InputNumber % CycleFrequency) * (100000 / CycleFrequency);
       if (inMenu == MENU_OUTPUT_TRIGGER) {
-        sprintf (Value2Display, "  %010.5f s ", InputNum);
+        sniprintf (Value2Display, sizeof(Value2Display), "  %04lu.%05lu s ", wholeSeconds, fifthDecimals);
       } else {
-        if (InputNum < 100) {
-          sprintf (Value2Display, "    %.5f s ", InputNum);
+        if (wholeSeconds < 100) {
+          sniprintf (Value2Display, sizeof(Value2Display), "    %lu.%05lu s ", wholeSeconds, fifthDecimals);
         } else {
-          sprintf (Value2Display, "   %.5f s ", InputNum);
+          sniprintf (Value2Display, sizeof(Value2Display), "   %lu.%05lu s ", wholeSeconds, fifthDecimals);
         }
       }
     } break;
     case UNITS_VOLTS: {
-        if (InputNum == 0) {
-          if (isNegativeZero) {
-            InputNum = InputNum-0.000001;
-          }
+        // The 16-bit code spans -10V to +10V: code * 20 / 65536 - 10 volts, or (code * 125 - 4096000) / 4096 hundredths
+        // of a volt. That is rounded as %.2f rounded the exact voltage: to the nearest hundredth, and halfway (16 codes,
+        // e.g. 6144, -8.125V) to the even one. A voltage below 0 that rounds to 0.00 keeps its sign, and so does 0V
+        // when the value editor stepped down to it from below zero (isNegativeZero).
+        long scaled = (long)InputNumber * 125 - 4096000;
+        boolean negative = (scaled < 0) || ((scaled == 0) && isNegativeZero);
+        unsigned long magnitude = (scaled < 0) ? -scaled : scaled;
+        unsigned long hundredths = magnitude / 4096;
+        unsigned long remainder = magnitude % 4096;
+        if ((remainder > 2048) || ((remainder == 2048) && (hundredths & 1))) {
+          hundredths++;
         }
-        if (InputNum >= 0) {
-          sprintf (Value2Display, "     %04.2f V ", InputNum);
+        if (negative) {
+          siprintf (Value2Display, "    -%lu.%02lu V ", hundredths / 100, hundredths % 100);
         } else {
-          sprintf (Value2Display, "    %05.2f V ", InputNum);
+          siprintf (Value2Display, "     %lu.%02lu V ", hundredths / 100, hundredths % 100);
         }
     } break;
     case UNITS_OFF_ON:{
-      if (InputNum == 0) {
-        sprintf(Value2Display, "      Off");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "       On");
+      if (InputNumber == 0) {
+        siprintf(Value2Display, "      Off");
+      } else if (InputNumber == 1) {
+        siprintf(Value2Display, "       On");
       } else {
-        sprintf(Value2Display, "Error");
+        siprintf(Value2Display, "Error");
       }
     } break;
     case UNITS_PULSES_BURSTS: {
-      if (InputNum == 0) {
-        sprintf(Value2Display, "     Pulses");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "     Bursts");
+      if (InputNumber == 0) {
+        siprintf(Value2Display, "     Pulses");
+      } else if (InputNumber == 1) {
+        siprintf(Value2Display, "     Bursts");
       } else {
-        sprintf(Value2Display, "     Error");
+        siprintf(Value2Display, "     Error");
       }
     } break;
     case UNITS_TRIGGER_MODE: {
-      if (InputNum == 0) {
-        sprintf(Value2Display, "     Normal   ");
-      } else if (InputNum == 1) {
-        sprintf(Value2Display, "     Toggle   ");
-      } else if (InputNum == 2) {
-        sprintf(Value2Display, "  Pulse Gated  ");
+      if (InputNumber == 0) {
+        siprintf(Value2Display, "     Normal   ");
+      } else if (InputNumber == 1) {
+        siprintf(Value2Display, "     Toggle   ");
+      } else if (InputNumber == 2) {
+        siprintf(Value2Display, "  Pulse Gated  ");
       #if (HARDWARE_VERSION > 2)
-      } else if (InputNum == TRIGGER_MODE_PARAM_SYNC) {
-        sprintf(Value2Display, "  Param Sync  ");
+      } else if (InputNumber == TRIGGER_MODE_PARAM_SYNC) {
+        siprintf(Value2Display, "  Param Sync  ");
       #endif
       } else {
-        sprintf(Value2Display, "     Error   ");
+        siprintf(Value2Display, "     Error   ");
       }
     } break;
   }
@@ -1168,8 +1173,8 @@ FLASHMEM void runJoystickTest(byte stepTimeout) { // Bench testing only, so it r
       if (showNow || (millis() - lastShown >= 100)) {
         showNow = false;
         lastShown = millis();
-        snprintf(line1, sizeof(line1), "%s: OK", names[d]);
-        snprintf(line2, sizeof(line2), "X %d  Y %d", x, y);
+        sniprintf(line1, sizeof(line1), "%s: OK", names[d]);
+        sniprintf(line2, sizeof(line2), "X %d  Y %d", x, y);
         write2Screen(reached ? line1 : prompts[d], line2);
       }
       delayMicroseconds(1000);
@@ -1177,8 +1182,8 @@ FLASHMEM void runJoystickTest(byte stepTimeout) { // Bench testing only, so it r
     if (reached) {
       resultBits |= (1 << d);
     } else {
-      snprintf(line1, sizeof(line1), "%s: FAILED", names[d]);
-      snprintf(line2, sizeof(line2), "%c %s %u (%u)", onX[d] ? 'X' : 'Y', readsLow[d] ? "min" : "max",
+      sniprintf(line1, sizeof(line1), "%s: FAILED", names[d]);
+      sniprintf(line2, sizeof(line2), "%c %s %u (%u)", onX[d] ? 'X' : 'Y', readsLow[d] ? "min" : "max",
                extreme[d], passLevel[d]);
       write2Screen(line1, line2);
       delayMicroseconds(2000000);
@@ -1201,7 +1206,7 @@ FLASHMEM void runJoystickTest(byte stepTimeout) { // Bench testing only, so it r
       pressed = now;
       if (pressed) {
         clicks++;
-        snprintf(line2, sizeof(line2), "Clicks: %d of 3", clicks);
+        sniprintf(line2, sizeof(line2), "Clicks: %d of 3", clicks);
         write2Screen("Click 3 times", line2);
       }
     }
