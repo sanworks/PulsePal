@@ -1792,12 +1792,14 @@ class PulsePalGUI:
             else:
                 send = new_mode == self._PARAM_SYNC_MODE and not was_param_sync
             if send:
+                # Sent at once, whatever the user set. Set by its private attribute: auto_sync refuses to turn on
+                # while the device object holds changes not yet sent, and the sync that follows replaces them
                 auto_sync = device.auto_sync
-                device.auto_sync = True  # Sent at once, whatever the user set
+                device._auto_sync = True
                 try:
                     device.trigger_mode[channel] = TRIGGER_MODES[new_mode]
                 finally:
-                    device.auto_sync = auto_sync
+                    device._auto_sync = auto_sync
                 device_modes[channel - 1] = new_mode
         return self._PARAM_SYNC_MODE in device_modes
 

@@ -81,12 +81,19 @@ share these conventions. Keep them in new code.
   address channels (`P.phase1Voltage(1) = 5`, `P.phase1Voltage(:) = 5`). With
   `auto_sync` / `autoSync` off (Pulse Pal and Synth Pal), assignments stay local until
   `sync_to_device()` / `syncToDevice()`, which works whatever auto_sync is; Python's `batch()`
-  block does both. `trigger(channels)` and `stop(channels)` take one channel number or several
-  as the language's array (a list, tuple or NumPy array; `[1 3]`), nothing else.
+  block does both. Pulse Pal's and Synth Pal's classes refuse to turn auto_sync on while changes
+  made with it off are unsent, and warn of them when the object is closed; code that turns it on
+  for one step and back sets the private `_auto_sync` / `autoSyncEnabled` instead, as the GUIs,
+  `batch()` and Synth Pal's `setDefaultParams()` do. The Python classes refuse to assign an
+  attribute that is not a setting (a misspelled name, or a MATLAB one:
+  `_common.refuse_unknown_attribute()`), as MATLAB refuses an unknown property.
+  `trigger(channels)` and `stop(channels)` take one channel number or several as the language's
+  array (a list, tuple or NumPy array; `[1 3]`), nothing else.
   `set_default_params()` / `setDefaultParams()` programs the defaults, whatever auto_sync is
   (Pulse Pal's are the firmware's own, which it loads at startup and after a comm failure).
   `export_params()` / `exportParams()` return every setting, and `import_params()` /
-  `importParams()` check all of them before they program any.
+  `importParams()` check all of them before they program any. Pulse Pal's also take a whole
+  program file and the other language's names, and raise an error if no name is a parameter.
   Modes are names (case-insensitive) and on/off settings are booleans; Pulse Pal's classes also
   take the integer codes of older clients. `info` has the same fields in both languages. Methods
   that program the device return nothing: a failure raises an error. Closing a connection stops
@@ -111,7 +118,20 @@ share these conventions. Keep them in new code.
   (`setSamplingRate()`), so at 3072 Hz the device plays 7813 cycles per sample, not 7812.
 - **Read every reply.** An unread reply is taken as the reply to the next command, and every
   reply after it is read one byte late. In MATLAB, `read()` returns `[]` with only a warning
-  when a reply does not arrive, and `[] ~= 1` is false, so check `isempty()` first.
+  when a reply does not arrive, and `[] ~= 1` is false, so check `isempty()` first. A reply can
+  still go unread: its read timed out, or Ctrl-C stopped the call between the write and the
+  read. The classes therefore mark each command's reply as pending from its write (Python
+  `_write_raw()` in `PulsePalDevice`, `_write_command()` in the others; MATLAB `send()` in
+  `PulsePalDevice`, `writeCommand()` in the others) until it has been read in full: in Python
+  `_read_raw()` clears the mark, and in MATLAB the method that read the reply sets `replyPending`
+  back to 0 (Wave Pal's and Synth Pal's `readBytes()` and `confirmWrite()`). A command that finds
+  one pending first discards what arrives until the device is quiet, warns, and brings the object
+  back in step: Pulse Pal and Synth Pal read their settings back (op 93, op 'R'), outside param
+  sync mode; Wave Pal, which cannot report its settings, sends the lost command's setting again
+  as the object holds it, and loads its waveforms again after a lost output range. A new MATLAB
+  method that reads a reply clears the mark, as must a Python one that reads without
+  `_read_raw()`; a new op without a reply joins the ops left untracked
+  (`_OPS_WITHOUT_TRACKED_REPLY` in Python, the list in `send()` / `writeCommand()`).
 - **MATLAB help text comes first.** `help` shows a file's first comment block, so each class
   file starts with its help, above the `%{ ... %}` license block; with the license first,
   `help` shows only "{". The same goes for a method in a file of its own, such as
@@ -127,10 +147,11 @@ share these conventions. Keep them in new code.
   MATLAB set to .NET Core with `dotnetenv`), the classes use `serialport`.
 - **Shared code.** The Python classes share `PulsePalError`, `ChannelSettings` (the
   channel-indexed lists), `serialportlist()`, the handshake table of the three firmwares,
-  `read_handshake_reply()` and `batch()`, in `pulsepal/_common.py`. The three MATLAB classes
-  have no shared code: their constructors' port setup and handshake are copies, as are
-  `readHandshakeReply()`, `namesToCodes()`, `channelBits()` and `roundHalfEven()`. A fix to one
-  usually belongs in all of them.
+  `read_handshake_reply()`, `read_until_quiet()`, `refuse_unknown_attribute()`,
+  `warn_lost_reply()` and `batch()`, in `pulsepal/_common.py`. The three MATLAB classes have no
+  shared code: their constructors' port setup and handshake are copies, as are
+  `readHandshakeReply()`, `readUntilQuiet()`, `namesToCodes()`, `channelBits()` and
+  `roundHalfEven()`. A fix to one usually belongs in all of them.
 - **The handshake reads until the device is quiet.** A command an earlier session sent just
   before it closed can still be queued on the device, which answers it after the client has
   discarded its input. So every client reads the handshake's reply until no byte has arrived for

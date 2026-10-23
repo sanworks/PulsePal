@@ -135,6 +135,10 @@ _TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Param Sync": 3, "M
 # The channel settings export_params() returns, after the sampling rate and the output range
 _CHANNEL_SETTINGS = ("current_waveform", "loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
                      "link_trigger_channel2")
+_SETTING_NAMES = ("sampling_rate", "output_range", *_CHANNEL_SETTINGS)  # The names a script assigns
+# The ops whose reply _write_command() does not track: those with no reply ('P', 'X', 81 and 89), and the handshake
+# (72), whose reply read_handshake_reply() reads until the device is quiet
+_OPS_WITHOUT_TRACKED_REPLY = frozenset({72, 81, 89, ord("P"), ord("X")})
 
 
 @dataclass
@@ -319,6 +323,10 @@ class WavePalDevice:
     _DAC_BITMAX = 65535
     _UINT32_MAX = 2**32 - 1
     _ALL_CHANNELS = 0x0F
+    # The ops that carry a setting, which _discard_lost_reply() sends again if the reply to one is lost
+    _SETTING_OPS = frozenset(map(ord, "SRCODTI"))
+
+    _reply_pending = None  # The op code of a command whose reply has not been read in full yet (see _write_command())
 
     def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Wave Pal.
@@ -1007,6 +1015,7 @@ class WavePalDevice:
         if getattr(self, "_closed", True):
             return
         self._closed = True
+        self._reply_pending = None  # Nothing more is read, so a reply still to come needs no discarding
         try:
             if send_disconnect and self.port and self.port.is_open:
                 self._write_command(self._OP_DISCONNECT)
@@ -1037,6 +1046,13 @@ class WavePalDevice:
             # Destructors should not raise; the serial object may already be
             # gone during interpreter shutdown.
             pass
+
+    def __setattr__(self, name, value):
+        """Refuse a public attribute that is not a setting, such as a misspelled one: it would program nothing (see
+        _common.refuse_unknown_attribute())."""
+        if name[0] != "_":
+            _common.refuse_unknown_attribute(self, name, _SETTING_NAMES)
+        super().__setattr__(name, value)
 
     def __repr__(self):
         """Describe the device and its settings, e.g. with `print(W)`."""
@@ -1297,7 +1313,17 @@ class WavePalDevice:
         return int(number)
 
     def _write_command(self, op_code, data=b""):
-        """Send one command, with its framing byte, in a single write."""
+        """Send one command, with its framing byte, in a single write.
+
+        A command whose reply was not read in full, because the read timed out or was interrupted (Ctrl-C), leaves
+        that reply, or the rest of it, to arrive later. Read as the reply to the next command, it would put every
+        reply after it out of step. So it is discarded first (_discard_lost_reply()), and this command's reply, if it
+        has one, is pending until _read_raw() has read it, as in PulsePalDevice.
+        """
+        if self._reply_pending is not None:
+            self._discard_lost_reply()
+        if op_code not in _OPS_WITHOUT_TRACKED_REPLY:
+            self._reply_pending = op_code  # Before the write: a Ctrl-C can come as soon as it returns
         message = bytes([self._OP_MENU_BYTE, op_code]) + data
         bytes_written = self.port.write(message)
         if bytes_written != len(message):
@@ -1306,14 +1332,66 @@ class WavePalDevice:
                 f"{len(message)} byte(s)."
             )
 
+    def _discard_lost_reply(self):
+        """Discard what arrives of a reply that was not read in full (see _write_command()), and bring the device
+        back in step with this object.
+
+        The command may have changed a setting, unknown to this object: an assignment interrupted after its write,
+        for one, which the device took and this object did not. Wave Pal cannot report its settings, so the setting
+        such a command carried is sent again as this object holds it. A change of output range unloads the device's
+        waveforms, so after one they are loaded again too. A waveform whose load was lost is already left out of
+        `waveforms`.
+        """
+        op = self._reply_pending
+        self._reply_pending = None
+        n_late = len(_common.read_until_quiet(self.port))
+        send_again = op in self._SETTING_OPS
+        _common.warn_lost_reply(f"op {chr(op)!r}", n_late,
+                                ", and the setting it carried was sent again as this object holds it" if send_again
+                                else "")
+        if send_again:
+            try:
+                self._send_setting_again(op)
+            except PulsePalError as exc:
+                raise PulsePalError(f"After the reply to an earlier command was lost: {exc}") from exc
+
+    def _send_setting_again(self, op):
+        """Send the setting that op carries, as this object holds it (see _discard_lost_reply())."""
+        if op == self._OP_SET_SAMPLING_RATE:
+            self._write_command(op, struct.pack("<I", self._sampling_rate))
+            self._read_ack("setting sampling_rate")
+        elif op == self._OP_SET_OUTPUT_RANGE:
+            self._write_command(op, bytes([list(OUTPUT_RANGES).index(self._output_range)]))
+            self._read_ack("setting output_range")
+            waveforms = self._waveforms
+            self._waveforms = [None] * len(waveforms)
+            for number, waveform in enumerate(waveforms):
+                if waveform is not None:
+                    self.load_waveform(number, waveform)
+        elif op == self._OP_SET_CURRENT_WAVEFORMS:
+            self._write_command(op, bytes(self._current_waveform[1:]))
+            self._read_ack("setting current_waveform")
+        elif op == self._OP_SET_LOOP_MODE:
+            self._write_command(op, bytes(map(int, self._loop_mode[1:])))
+            self._read_ack("setting loop_mode")
+        elif op == self._OP_SET_LOOP_DURATION:
+            self._send_loop_duration_samples(self._durations_to_samples(self._loop_duration[1:], self._sampling_rate))
+        elif op == self._OP_SET_TRIGGER_MODE:
+            self._write_command(op, bytes(_TRIGGER_MODE_CODES[name] for name in self._trigger_mode[1:]))
+            self._read_ack("setting trigger_mode")
+        else:  # Trigger links
+            self._send_trigger_links(self._link_trigger_channel1[1:], self._link_trigger_channel2[1:])
+
     def _read_raw(self, n_bytes):
-        """Read exactly n_bytes from the serial port."""
+        """Read exactly n_bytes from the serial port: the whole reply to the command last sent, which is then no
+        longer pending (see _write_command()). Only connecting reads a reply in more than one call."""
         message = self.port.read(n_bytes)
         if len(message) < n_bytes:
             raise PulsePalError(
                 f"Wave Pal sent {len(message)} of the {n_bytes} byte(s) of its reply within "
                 f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
+        self._reply_pending = None
         return message
 
     def _read_ack(self, context):

@@ -73,7 +73,9 @@
 % Param sync and autoSync. With autoSync on (the default), assigning a setting programs the device at once, also
 % while a trigger channel is in param sync mode; so leaving param sync mode means assigning triggerMode with autoSync
 % on. With autoSync off, assignments change only this object's copy of the settings, checking each value, and
-% syncToDevice() sends all of them in one command. While a trigger channel is in param sync mode the device stores
+% syncToDevice() sends all of them in one command. Turning autoSync back on before that raises an error, rather than
+% leave the changes unsent (syncFromDevice() discards them instead), and clear S warns of changes never sent.
+% While a trigger channel is in param sync mode the device stores
 % that set, replacing any stored before, for the channel's next rising edge; otherwise it applies it at once. When no
 % trigger channel is left in the mode, the device discards a stored set. setDefaultParams(), which the constructor
 % calls, programs the device at once and takes both trigger channels out of param sync mode.
@@ -141,8 +143,11 @@ classdef SynthPalDevice < handle
         linkTriggerChannel2 = false(1,4) % 1x4. true if trigger channel 2 triggers the output channel
         triggerMode = {'Normal', 'Normal'} % 1x2 cell array, one per trigger channel: 'Normal', 'Toggle', 'Gated' or
                                            % 'Param Sync'. See "Triggers" above. Not case sensitive.
-        autoSync = true % true: assigning a setting programs the device at once. false: assignments change only this
-                        % object's copy, and syncToDevice() sends them all. See "Param sync and autoSync" above.
+    end
+
+    properties (Dependent)
+        autoSync % true: assigning a setting programs the device at once. false: assignments change only this
+                 % object's copy, and syncToDevice() sends them all. See "Param sync and autoSync" above.
     end
 
     properties (SetAccess = private)
@@ -165,6 +170,11 @@ classdef SynthPalDevice < handle
         deviceWaveform = {'Sine', 'Sine', 'Sine', 'Sine'}
         deviceAmplitude_uV = [5 5 5 5]*1e6
         deviceMean_uV = [0 0 0 0]
+        % autoSync's value. Set directly where autoSync is turned on or off for a step and back (setDefaultParams(),
+        % syncFromDevice(), importParams()): set.autoSync refuses to turn it on while changes made with it off are unsent
+        autoSyncEnabled = true
+        unsentParams = {} % The settings assigned with autoSync off since the settings were last sent or read
+        replyPending = 0 % The op code of a command whose reply has not been read in full yet, or 0 (see writeCommand())
     end
 
     properties (Constant, Access = private)
@@ -269,6 +279,7 @@ classdef SynthPalDevice < handle
                 % Op 81 puts the device's own name back on its screen. It means something else to other devices,
                 % so it is sent only once the device has identified itself as a Synth Pal.
                 if isstruct(obj.info)
+                    obj.replyPending = 0; % Nothing more is read, so a reply still to come needs no discarding
                     try
                         obj.writeCommand(obj.OpDisconnect, []);
                     catch
@@ -287,8 +298,8 @@ classdef SynthPalDevice < handle
             % 'Normal' mode, and no output channel linked to a trigger channel (a TTL starts nothing until a script
             % links it). They
             % match the settings the device starts with. They are sent at once, also while autoSync is off.
-            autoSyncState = obj.autoSync;
-            obj.autoSync = true;
+            autoSyncState = obj.autoSyncEnabled;
+            obj.autoSyncEnabled = true;
             cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
             obj.frequency = 100;
             % In this order, each is valid whatever the device holds: a mean of 0 V goes with any amplitude, 5 V is
@@ -302,6 +313,7 @@ classdef SynthPalDevice < handle
             obj.triggerMode = {'Normal', 'Normal'};
             obj.linkTriggerChannel1 = false(1,4);
             obj.linkTriggerChannel2 = false(1,4);
+            obj.unsentParams = {}; % Every setting has been sent
             clear cleanup
         end
 
@@ -313,6 +325,7 @@ classdef SynthPalDevice < handle
             % loads it. Otherwise the device applies it at once. The properties read as sent, including while a set
             % waits for its edge. See "Param sync and autoSync" above.
             obj.checkLevels(obj.peakToPeak, obj.meanVoltage, 'sync');
+            obj.unsentParams = {}; % All are sent below
             [waveforms, amplitudes, means] = obj.deviceLevels(obj.waveform, obj.peakToPeak, obj.fixedVoltage, ...
                                                                obj.meanVoltage);
             waveformCodes = obj.namesToCodes(waveforms, obj.WaveformNames, 4, 'waveform', 'output channel');
@@ -393,6 +406,12 @@ classdef SynthPalDevice < handle
                 [waveforms, amplitudes, means] = obj.deviceLevels(levels.waveform, levels.peakToPeak, ...
                                                                    levels.fixedVoltage, levels.meanVoltage);
                 obj.sendLevels(waveforms, amplitudes, means);
+            else
+                for i = 1:numel(levelNames)
+                    if isfield(newValues, levelNames{i})
+                        obj.markUnsent(levelNames{i}); % storeLevels() below stores them without
+                    end
+                end
             end
             obj.storeLevels(levels.waveform, levels.peakToPeak, levels.fixedVoltage, levels.meanVoltage);
             otherNames = {'restingVoltage', 'playDuration', 'onRampDuration', 'offRampDuration'};
@@ -490,9 +509,10 @@ classdef SynthPalDevice < handle
             newFixedVoltage(isFixed) = amplitudes_uV(isFixed)/1e6;
             % This object's own peak to peak voltage must still suit the mean voltage (see checkLevels())
             newPeakToPeak(isFixed) = min(newPeakToPeak(isFixed), (2*obj.MaxVoltage_uV - 2*abs(means_uV(isFixed)))/1e6);
-            autoSyncState = obj.autoSync;
-            obj.autoSync = false; % Stored, not sent
-            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
+            autoSyncState = obj.autoSyncEnabled;
+            unsentState = obj.unsentParams;
+            obj.autoSyncEnabled = false; % Stored, not sent
+            cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState, unsentState));
             obj.frequency = centiHz/100;
             obj.storeLevels(waveforms, newPeakToPeak, newFixedVoltage, means_uV/1e6);
             obj.restingVoltage = rests_uV/1e6;
@@ -503,6 +523,7 @@ classdef SynthPalDevice < handle
             obj.linkTriggerChannel1 = links(1:4);
             obj.linkTriggerChannel2 = links(5:8);
             clear cleanup
+            obj.unsentParams = {}; % Every setting is read: changes made with autoSync off are discarded
             obj.deviceWaveform = waveforms;
             obj.deviceAmplitude_uV = amplitudes_uV;
             obj.deviceMean_uV = means_uV;
@@ -540,9 +561,10 @@ classdef SynthPalDevice < handle
                         ', which this version of SynthPalDevice does not have.'])
             end
             snapshot = obj.exportParams();
-            autoSyncState = obj.autoSync;
+            unsentSnapshot = obj.unsentParams;
+            autoSyncState = obj.autoSyncEnabled;
             cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
-            obj.autoSync = false;
+            obj.autoSyncEnabled = false;
             levelNames = {'waveform', 'peakToPeak', 'fixedVoltage', 'meanVoltage'};
             try
                 % The levels are checked each alone, then together, and stored: an assignment would check each
@@ -567,6 +589,7 @@ classdef SynthPalDevice < handle
                 for i = 1:numel(names)
                     obj.(names{i}) = snapshot.(names{i});
                 end
+                obj.unsentParams = unsentSnapshot;
                 rethrow(err)
             end
             obj.syncToDevice();
@@ -594,6 +617,7 @@ classdef SynthPalDevice < handle
                 obj.samplesPerCycle = double(typecast(uint8(reply(2:5)), 'uint32')); %#ok<MCSUP>
             else
                 obj.samplesPerCycle = 4*floor(2500000/centiHz); %#ok<MCSUP> As the device works it out
+                obj.markUnsent('frequency');
             end
             obj.frequency = centiHz/100;
         end
@@ -627,6 +651,8 @@ classdef SynthPalDevice < handle
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetRestingVoltage, typecast(int32(obj.roundHalfEven(volts*1e6)), 'uint8'));
                 obj.confirmWrite('setting restingVoltage');
+            else
+                obj.markUnsent('restingVoltage');
             end
             obj.restingVoltage = volts;
         end
@@ -636,6 +662,8 @@ classdef SynthPalDevice < handle
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetPlayDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting playDuration');
+            else
+                obj.markUnsent('playDuration');
             end
             obj.playDuration = seconds;
         end
@@ -645,6 +673,8 @@ classdef SynthPalDevice < handle
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetOnRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting onRampDuration');
+            else
+                obj.markUnsent('onRampDuration');
             end
             obj.onRampDuration = seconds;
         end
@@ -654,6 +684,8 @@ classdef SynthPalDevice < handle
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetOffRampDuration, typecast(uint32(obj.roundHalfEven(seconds*1e6)), 'uint8'));
                 obj.confirmWrite('setting offRampDuration');
+            else
+                obj.markUnsent('offRampDuration');
             end
             obj.offRampDuration = seconds;
         end
@@ -663,6 +695,8 @@ classdef SynthPalDevice < handle
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.writeCommand(obj.OpSetTriggerMode, uint8(codes));
                 obj.confirmWrite('setting triggerMode');
+            else
+                obj.markUnsent('triggerMode');
             end
             obj.triggerMode = obj.TriggerModeNames(codes+1);
         end
@@ -671,6 +705,8 @@ classdef SynthPalDevice < handle
             links = obj.checkLogical(links, 'linkTriggerChannel1');
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.sendTriggerLinks(links, obj.linkTriggerChannel2); %#ok<MCSUP>
+            else
+                obj.markUnsent('linkTriggerChannel1');
             end
             obj.linkTriggerChannel1 = links;
         end
@@ -679,23 +715,40 @@ classdef SynthPalDevice < handle
             links = obj.checkLogical(links, 'linkTriggerChannel2');
             if obj.initialized && obj.autoSync %#ok<MCSUP>
                 obj.sendTriggerLinks(obj.linkTriggerChannel1, links); %#ok<MCSUP>
+            else
+                obj.markUnsent('linkTriggerChannel2');
             end
             obj.linkTriggerChannel2 = links;
+        end
+
+        function value = get.autoSync(obj)
+            value = obj.autoSyncEnabled;
         end
 
         function set.autoSync(obj, value)
             if ~(islogical(value) || isnumeric(value)) || ~isscalar(value) || ~(value == 0 || value == 1)
                 error('autoSync must be true or false.')
             end
-            obj.autoSync = logical(value);
+            if value && ~isempty(obj.unsentParams)
+                % Turned on, autoSync would leave them unsent, and the device playing its old settings
+                error('SynthPalDevice:unsentChanges', ['Changes made with autoSync off have not been sent to the ' ...
+                      'device: ' obj.unsentNames() '. Call syncToDevice() to send them, or syncFromDevice() to ' ...
+                      'discard them, before turning autoSync on.'])
+            end
+            obj.autoSyncEnabled = logical(value);
         end
 
         function delete(obj)
             % Runs on clear S or delete(S). Tells the device that MATLAB is disconnecting, which stops playback (each
             % channel over its off ramp), as on Pulse Pal, and puts the device's own name back on its screen in place
             % of "MATLAB Connected", and releases the serial port. The device keeps its settings, so TTL triggers
-            % still play the channels.
+            % still play the channels. Warns of changes made with autoSync off and never sent.
+            if ~isempty(obj.unsentParams)
+                warning('SynthPalDevice:unsentChanges', ['SynthPalDevice closed with changes made with autoSync ' ...
+                        'off that were never sent to the device: ' obj.unsentNames() '.'])
+            end
             if obj.initialized
+                obj.replyPending = 0; % Nothing more is read, so a reply still to come needs no discarding
                 try
                     obj.writeCommand(obj.OpDisconnect, []);
                 catch
@@ -817,9 +870,14 @@ classdef SynthPalDevice < handle
             obj.confirmWrite('setting the trigger channel links');
         end
 
-        function restoreAutoSync(obj, state)
-            % For setDefaultParams() and syncFromDevice(): puts autoSync back, also if they failed
-            obj.autoSync = state;
+        function restoreAutoSync(obj, state, unsent)
+            % For setDefaultParams(), syncFromDevice() and importParams(): puts autoSync back, also if they failed,
+            % and, given unsent, the record of the changes not yet sent. Directly: set.autoSync refuses to turn
+            % autoSync on while changes made with it off are unsent, and a step that failed can leave some
+            obj.autoSyncEnabled = state;
+            if nargin > 2
+                obj.unsentParams = unsent;
+            end
         end
 
         function value = checkSetting(obj, name, value)
@@ -855,7 +913,22 @@ classdef SynthPalDevice < handle
                 [waveforms, amplitudes, means] = obj.deviceLevels(levels.waveform, levels.peakToPeak, ...
                                                                    levels.fixedVoltage, levels.meanVoltage);
                 obj.sendLevels(waveforms, amplitudes, means);
+            else
+                obj.markUnsent(name);
             end
+        end
+
+        function markUnsent(obj, name)
+            % Records that a setting was assigned with autoSync off, once the constructor has connected: it is unsent
+            % until syncToDevice() sends it, and set.autoSync refuses to turn autoSync on meanwhile
+            if obj.initialized && ~any(strcmp(obj.unsentParams, name))
+                obj.unsentParams{end+1} = name;
+            end
+        end
+
+        function names = unsentNames(obj)
+            % The settings assigned with autoSync off and not yet sent, for messages, in exportParams()'s order
+            names = strjoin(obj.SettingNames(ismember(obj.SettingNames, obj.unsentParams)), ', ');
         end
 
         function storeLevels(obj, waveforms, peakToPeak, fixedVoltage, meanVoltage)
@@ -1088,17 +1161,75 @@ classdef SynthPalDevice < handle
         end
 
         function writeCommand(obj, opCode, data)
-            % Sends one command, with its framing byte, in a single write
+            % Sends one command, with its framing byte, in a single write. A command whose reply was not read in full,
+            % because the read timed out or Ctrl-C stopped it, leaves that reply, or the rest of it, to arrive later.
+            % Read as the reply to the next command, it would put every reply after it out of step. So it is
+            % discarded first (discardLostReply()), and this command's reply, if it has one, is pending until
+            % readBytes() or confirmWrite() has read it, as in PulsePalDevice. Ops 'P', 'X', 81 and 89 have no reply,
+            % and the handshake's (op 72) is read until the device is quiet (readHandshakeReply()).
+            if obj.replyPending
+                obj.discardLostReply();
+            end
+            if ~any(double(opCode) == [72 81 89 double('PX')])
+                obj.replyPending = double(opCode); % Before the write: Ctrl-C can come as soon as it returns
+            end
             write(obj.port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
         end
 
+        function discardLostReply(obj)
+            % Discards what arrives of a reply that was not read in full (see writeCommand()), and brings the
+            % properties back in step with the device. The command may have changed settings, unknown to this object:
+            % an assignment stopped by Ctrl-C after its write, for one, which the device took and the property did
+            % not. So after one that can (ops 'F', 'W', 'A', 'V', 'M', 'D', 'B', 'E', 'I', 'T' and 'U'), they are read
+            % back (op 'R'), outside param sync mode, where op 'R' returns the settings playing rather than a set
+            % stored for the next sync edge.
+            op = obj.replyPending;
+            obj.replyPending = 0;
+            nLate = numel(obj.readUntilQuiet());
+            readBack = any(op == double('FWAVMDBEITU')) && ~any(strcmp(obj.triggerMode, 'Param Sync'));
+            message = ['The reply to an earlier command (op ''' char(op) ''') was not read in full: its call was ' ...
+                       'stopped, or the reply came too late. ' num2str(nLate) ' byte(s) of it arrived since, and ' ...
+                       'were discarded'];
+            if readBack
+                message = [message ', and the settings were read back from the device'];
+            end
+            warning('SynthPalDevice:lostReply', '%s.', message)
+            if readBack
+                try
+                    obj.syncFromDevice();
+                catch err
+                    error('SynthPalDevice:noReply', ['Synth Pal did not send its settings, read back after the ' ...
+                          'reply to an earlier command was lost (%s). %s'], err.message, obj.NoReplyHint)
+                end
+            end
+        end
+
+        function bytes = readUntilQuiet(obj)
+            % Reads the bytes the device sends until none has arrived for 50 ms, for at most 1 s, as
+            % readHandshakeReply() does, and returns them
+            bytes = [];
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    bytes = [bytes obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+        end
+
         function data = readBytes(obj, nBytes, context)
-            % Reads exactly nBytes from the device, as a row of doubles
+            % Reads exactly nBytes from the device, as a row of doubles: the whole reply to the command last sent,
+            % which is then no longer pending (see writeCommand()). Only connecting reads a reply in more than one call.
             data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Synth Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
                        num2str(nBytes) ' byte(s) arrived. ' obj.NoReplyHint])
             end
+            obj.replyPending = 0;
         end
 
         function confirmWrite(obj, context)
@@ -1109,6 +1240,7 @@ classdef SynthPalDevice < handle
                 error(['Synth Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
                        ' s. ' obj.NoReplyHint])
             end
+            obj.replyPending = 0; % The whole reply is read (see writeCommand())
             if reply ~= 1
                 error('SynthPalDevice:rejected', 'Synth Pal rejected %s. A value was out of range.', context)
             end

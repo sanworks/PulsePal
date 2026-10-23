@@ -1047,8 +1047,12 @@ def test_a_reply_that_does_not_arrive_mentions_a_comm_failure():
     device = make_device()
     device.port = SilentPort()
     for call in (lambda d: d.phase1_voltage.__setitem__(1, 1), lambda d: d.sync_from_device()):
-        error = expect_error(call, device)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            error = expect_error(call, device)
         assert "COMM. FAILURE!" in str(error) and "click its joystick" in str(error), error
+    # The second call first read the parameters back, for the reply the first one did not get (see _write_raw())
+    assert "op 74" in str(caught[0].message), caught
 
 
 class ClosablePort(FakePort):
@@ -1267,6 +1271,214 @@ def test_set_calibration_refuses_bad_values_with_pulse_pal_error():
         expect_error(device.set_calibration, channel, offset)
     device.set_calibration(2, -0.01)
     assert device.port.writes == [bytes([OP_MENU_BYTE, 96, 1]) + struct.pack("<h", round(-0.01 * 65536 / 20))]
+
+
+def test_custom_train_arrays_must_be_one_dimensional():
+    """One value per pulse is a list or a 1-D array. A 2-D array, or a list of lists, is refused rather than
+    flattened (the MATLAB class sent a matrix's surplus to the device, which read it as commands)."""
+    for times, volts in ((np.array([[0, 0.1], [0.2, 0.3]]), np.array([[1, 2], [3, 4]])),
+                         ([0, 0.1, 0.2, 0.3], np.ones((2, 4))),
+                         ([[0, 0.1], [0.2, 0.3]], [1, 2, 3, 4]),
+                         (np.zeros((1, 4)), [1, 2, 3, 4])):
+        device = make_device()
+        error = expect_error(device.send_custom_pulse_train, 1, times, volts)
+        assert "one-dimensional" in str(error) and "shape" in str(error), error
+        assert device.port.writes == []
+    device = make_device()
+    error = expect_error(device.send_custom_waveform, 1, 0.001, np.ones((2, 100)))
+    assert "shape (2, 100)" in str(error), error
+    assert device.port.writes == []
+    device.send_custom_pulse_train(1, np.array([0, 0.1]), (1, 2))  # 1-D arrays, lists and tuples still work
+    device.send_custom_pulse_train(1, 0, 5)                        # and one pulse as a number
+    device.send_custom_waveform(1, 0.001, [1, 2, 3])
+    assert [w[1] for w in device.port.writes] == [95, 95, 95]
+
+
+class InterruptiblePort(FakePort):
+    """A FakePort whose next read can be interrupted, as by Ctrl-C between a command's write and its reply: the
+    reply then arrives anyway, and waits (in_waiting) to be read as the reply to the next command."""
+
+    def __init__(self):
+        super().__init__()
+        self.late = bytearray()
+        self.interrupt = None  # The bytes of the reply that arrives after the interrupted read
+
+    @property
+    def in_waiting(self):
+        return len(self.late)
+
+    def read(self, n):
+        if self.interrupt is not None:
+            self.late += self.interrupt
+            self.interrupt = None
+            raise KeyboardInterrupt
+        if self.late:
+            reply = bytes(self.late[:n])
+            del self.late[:n]
+            self.reads.append(n)
+            return reply
+        return super().read(n)
+
+
+def test_a_reply_left_unread_is_discarded_before_the_next_command():
+    """An assignment interrupted after its write (Ctrl-C) leaves its acknowledgement to arrive later. Read as
+    the next command's reply, it put every reply after it a byte late: status() reported a channel playing,
+    and assignments the device took raised refusals. Now the next command discards it first, and as the
+    device may have taken the assignment, reads the parameters back (op 93), with a warning."""
+    device = make_device()
+    port = device.port = InterruptiblePort()
+    port.interrupt = bytes([1])
+    expect_error(device.phase1_voltage.__setitem__, 1, 3, error=KeyboardInterrupt)
+    assert device.phase1_voltage[1] == 5 and port.in_waiting == 1
+    port.response = bytearray(parameter_message(volt_bits=volts_to_bits(3))
+                              + bytes([0]) + struct.pack("<7I", 1, 0, 1, 0, 0, 0, 0))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        status = device.status()
+    assert "op 74" in str(caught[0].message) and "read back" in str(caught[0].message), caught[0].message
+    assert caught[0].filename == __file__  # Points at the script's line, so that it shows each time
+    assert [w[1] for w in port.writes] == [74, 93, 101], port.writes
+    assert device.phase1_voltage[1] == 3                     # As the device took it
+    assert status.playing == [] and status.trigger_edges == [None, 1, 0], status
+    device.phase1_voltage[2] = 4                             # In step again: its own ack
+    assert port.writes[-1][1] == 74 and port.response == bytearray()
+
+    # A lost reply to a command that changes no parameter is discarded without reading them back
+    device = make_device()
+    port = device.port = InterruptiblePort()
+    port.interrupt = bytes([0b0001]) + struct.pack("<7I", 0, 0, 0, 0, 0, 0, 0)
+    expect_error(device.status, error=KeyboardInterrupt)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.set_fixed_voltage(1, 2)
+    assert "op 101" in str(caught[0].message) and "read back" not in str(caught[0].message)
+    assert [w[1] for w in port.writes] == [101, 79] and port.in_waiting == 0
+
+    # Commands with no reply leave nothing pending, and a complete reply leaves nothing to discard
+    device = make_device()
+    port = device.port = InterruptiblePort()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.trigger(1)
+        device.stop()
+        device.phase1_voltage[1] = 2
+        device.sync_to_device()
+        device.trigger([1, 2])
+    assert caught == [] and device._reply_pending is None
+
+
+def test_misspelled_and_matlab_names_are_refused():
+    """Assigning an attribute PulsePalDevice does not have made one of its own, and programmed nothing: a
+    misspelled setting, a MATLAB name, or P.autosync = False, which left auto_sync on."""
+    device = make_device()
+    for name, meant in (("phase1_votlage", "phase1_voltage"), ("phase1Voltage", "phase1_voltage"),
+                        ("autosync", "auto_sync"), ("autoSync", "auto_sync"), ("customTrainID", "custom_train_id"),
+                        ("triggerMode", "trigger_mode"), ("my_flag", None)):
+        error = expect_error(setattr, device, name, [1, 2, 3, 4], error=AttributeError)
+        assert f"no setting {name!r}" in str(error), error
+        assert (f"Did you mean {meant!r}" in str(error)) == (meant is not None), error
+        assert name not in vars(device)
+    assert device.port.writes == [] and device.auto_sync is True
+    device.port = device.port        # The public attributes, the settings and private ones are assigned as before
+    device.info = device.info
+    device.phase1_voltage = [1, 2, 3, 4]
+    device._scratch = 1
+
+    class Rig(PulsePalDevice):
+        rig_name = None  # A subclass declares its own public attributes in its class body
+
+    rig = make_device()
+    rig.__class__ = Rig
+    rig.rig_name = "Rig 1"
+
+
+def test_auto_sync_cannot_be_turned_on_with_changes_unsent():
+    """Turning auto_sync back on did not send the changes made with it off, so the device went on playing its
+    old parameters. Now it raises while there are any, naming them, and close() warns of them."""
+    device = make_device()
+    device.auto_sync = False
+    device.phase1_voltage[1] = 2
+    device.trigger_mode[2] = "Toggle"
+    error = expect_error(setattr, device, "auto_sync", True)
+    assert "phase1_voltage, trigger_mode" in str(error) and "sync_to_device()" in str(error), error
+    assert device.auto_sync is False and device.port.writes == []
+    device.sync_to_device()
+    device.auto_sync = True
+
+    # sync_from_device() discards them, but for continuous_loop, which the device does not report
+    device.auto_sync = False
+    device.phase1_voltage[1] = 3
+    device.continuous_loop[1] = True
+    device.port.response = bytearray(parameter_message())
+    device.sync_from_device()
+    error = expect_error(setattr, device, "auto_sync", True)
+    assert "continuous_loop" in str(error) and "phase1_voltage" not in str(error), error
+    device.set_default_params()                # Sends them all
+    device.auto_sync = True
+
+    # batch() and import_params() turn auto_sync off and on again around their changes, and send them
+    device.port.writes.clear()
+    with device.batch():
+        device.phase1_voltage[1] = 1
+    device.import_params({"phase1_voltage": [2] * 4})
+    assert device.auto_sync is True and [w[1] for w in device.port.writes] == [92, 92]
+    try:
+        with device.batch():
+            device.phase1_voltage[1] = 3
+            raise RuntimeError("stop here")
+    except RuntimeError:
+        pass
+    assert device.auto_sync is True and device.phase1_voltage[1] == 2
+
+    # A block of auto_sync off: what was unsent before it stays so, if the block fails
+    device.auto_sync = False
+    device.phase1_duration[1] = 0.002
+    expect_error(device.import_params, {"phase1_voltage": [11] * 4})
+    expect_error(setattr, device, "auto_sync", True)
+
+    # close() warns of changes never sent
+    device._closed = False
+    device.port = ClosablePort()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.close()
+    assert "never sent" in str(caught[0].message) and "phase1_duration" in str(caught[0].message), caught
+
+
+def test_import_params_takes_program_files_and_matlab_names():
+    """import_params() takes a whole program file as json.load() reads it (its params), and the MATLAB class's
+    names; and raises, sending nothing, when no name is a parameter. It only warned, and then sent the
+    device its program unchanged."""
+    device = make_device()
+    program = {"format_version": 1, "params": {"phase1_voltage": [2, 2, 2, 2]},
+               "custom_train_timestamps": ["", "", "", ""], "custom_train_voltages": ["", "", "", ""],
+               "device_info": {}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.import_params(program)
+    assert caught == [] and device.phase1_voltage[1:5] == [2] * 4
+    program["custom_train_timestamps"][1] = "0, 0.1"
+    program["custom_train_voltages"][1] = "5, 5"
+    program["trigger_mode"] = ["Toggle", "Normal"]  # Outside params, as files from before format_version held it
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.import_params(program)
+    assert "custom trains" in str(caught[0].message) and device.trigger_mode[1] == "Toggle", caught
+
+    # The MATLAB class's names, as its exportParams() returns them, saved with jsonencode
+    device.import_params({"phase1Voltage": [3, 3, 3, 3], "customTrainID": [0, 1, 0, 0], "triggerMode": ["Gated"] * 2,
+                          "linkTriggerChannel1": [True, False, False, False]})
+    assert device.phase1_voltage[1] == 3 and device.custom_train_id[2] == 1 and device.trigger_mode[2] == "Gated"
+    assert device.link_trigger_channel1[1] is True
+
+    device.port.writes.clear()
+    for params in ({}, {"format_version": 1, "device_info": {}}, {"phase1_votlage": [2] * 4}, {"auto_sync": True}):
+        error = expect_error(device.import_params, params)
+        assert "no parameter" in str(error), error
+    expect_error(device.import_params, [("phase1_voltage", [2] * 4)])
+    error = expect_error(device.import_params, {"phase1_voltage": [1] * 4, "phase1Voltage": [2] * 4})
+    assert "same parameter" in str(error), error
+    assert device.port.writes == [] and device.phase1_voltage[1] == 3
 
 
 def test_the_package_exports_one_error_class():

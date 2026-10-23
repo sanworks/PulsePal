@@ -39,7 +39,8 @@ tests = {@testConnectionAndDefaults, @testSamplesPerCycle, @testPlayDurationsAre
     @testWaveformChangesFindAnAcceptedOrder, @testConfigureSetsLevelsTogether, ...
     @testRampsLengthenPlayback, @testInfiniteDurationAndStop, ...
     @testSettingsChangeDuringPlayback, @testSyncToDevice, @testSyncFromDeviceReadsWhatTheDevicePlays, ...
-    @testScreenSaverSettings, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused, @testImportParams};
+    @testScreenSaverSettings, @testParamSyncStoresTheSet, @testInvalidArgumentsAreRefused, @testImportParams, ...
+    @testAutoSyncCannotTurnOnWithChangesUnsent};
 S = SynthPalDevice(portString);
 nFailed = 0;
 for i = 1:numel(tests)
@@ -316,7 +317,7 @@ function testSyncToDevice(S)
 % channel in param sync mode, the device applies them at once
 S.frequency = 1000;
 S.autoSync = false;
-cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
+cleanup = onCleanup(@() autoSyncOn(S)); %#ok<NASGU> Also if the test fails
 S.frequency = 2000;
 S.waveform{1} = 'Fixed Voltage';
 S.fixedVoltage(1) = 2;
@@ -349,15 +350,15 @@ S.linkTriggerChannel2(3) = true;
 S.triggerMode{2} = 'Toggle';
 expected = S.exportParams();
 S.autoSync = false;
-cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); % Also if the test fails
+cleanup = onCleanup(@() autoSyncOn(S)); % Also if the test fails
 S.frequency = 1000;
 S.configure(1, 'waveform', 'Sine', 'peakToPeak', 2, 'meanVoltage', 0);
 S.restingVoltage(3) = 0;
 S.playDuration(4) = 1;
 S.linkTriggerChannel2(3) = false;
 S.triggerMode{2} = 'Normal';
+S.syncFromDevice(); % Discards the changes: autoSync refuses to turn on while they are unsent
 S.autoSync = true;
-S.syncFromDevice();
 assert(isequal(S.exportParams(), expected), 'the settings read back differ from those programmed');
 % From a fixed voltage of -2.5 V with a mean of 6 V, straight to a sine wave of 20 V peak to peak
 S.configure(2, 'waveform', 'Sine', 'peakToPeak', 20, 'meanVoltage', 0);
@@ -409,7 +410,7 @@ setChannel(S, 1, 'Fixed Voltage', 1, 0);
 S.playDuration(1) = 0.005;
 S.triggerMode{2} = 'Param Sync';
 S.autoSync = false;
-cleanup = onCleanup(@() setProperty(S, 'autoSync', true)); %#ok<NASGU> Also if the test fails
+cleanup = onCleanup(@() autoSyncOn(S)); %#ok<NASGU> Also if the test fails
 S.fixedVoltage(1) = 3;
 S.frequency = 2000;
 S.syncToDevice();
@@ -462,6 +463,35 @@ S.autoSync = true;
 assert(S.peakToPeak(1) == 2 && S.meanVoltage(1) == 9 && S.restingVoltage(1) == 9, 'a refused level was changed');
 assert(isequal(S.triggerMode, {'Normal', 'Normal'}), 'a refused trigger mode was changed');
 setLevels(S, 1, 5, 0);
+end
+
+function testAutoSyncCannotTurnOnWithChangesUnsent(S)
+% Turning autoSync back on did not send the changes made with it off, so the device went on playing its old settings.
+% Now it raises an error while there are any, naming them. syncToDevice() sends them, and syncFromDevice() discards
+% them, as the device holds what it plays.
+S.setDefaultParams();
+S.autoSync = false;
+S.frequency = 300;
+S.peakToPeak(2) = 3;
+message = '';
+try
+    S.autoSync = true;
+catch err
+    message = err.message;
+end
+assert(contains(message, 'frequency, peakToPeak'), 'autoSync turned on with changes unsent: "%s"', message);
+assert(~S.autoSync, 'autoSync is on');
+S.syncToDevice();
+S.autoSync = true;
+S.syncFromDevice();
+assert(S.frequency == 300 && S.peakToPeak(2) == 3, 'syncToDevice() did not send the changes');
+S.autoSync = false;
+S.configure(1, 'waveform', 'Square');
+expectError(@() setProperty(S, 'autoSync', true));
+S.syncFromDevice();
+S.autoSync = true;
+assert(strcmp(S.waveform{1}, 'Sine'), 'syncFromDevice() kept a change made with autoSync off');
+S.setDefaultParams();
 end
 
 function testOtherClassesNameTheFirmware(portString)
@@ -562,4 +592,13 @@ end
 
 function setProperty(S, name, value)
 S.(name) = value;
+end
+
+function autoSyncOn(S)
+% Turns autoSync back on after a test, also one that failed with changes unsent: autoSync refuses to turn on while
+% there are any, so reading the settings back discards them first
+if ~S.autoSync
+    S.syncFromDevice();
+    S.autoSync = true;
+end
 end

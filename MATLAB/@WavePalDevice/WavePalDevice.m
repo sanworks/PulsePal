@@ -124,6 +124,7 @@ classdef WavePalDevice < handle
 
     properties (Access = private)
         initialized = false % Assigning a setting programs the device only once the constructor has connected
+        replyPending = 0 % The op code of a command whose reply has not been read in full yet, or 0 (see writeCommand())
     end
 
     properties (Constant, Access = private)
@@ -224,6 +225,7 @@ classdef WavePalDevice < handle
                 % Op 81 puts the device's own name back on its screen. It means something else to other devices,
                 % so it is sent only once the device has identified itself as a Wave Pal.
                 if isstruct(obj.info)
+                    obj.replyPending = 0; % Nothing more is read, so a reply still to come needs no discarding
                     try
                         obj.writeCommand(obj.OpDisconnect, []);
                     catch
@@ -587,6 +589,7 @@ classdef WavePalDevice < handle
             % Pulse Pal, and puts the device's own name back on its screen in place of "MATLAB Connected", and releases
             % the serial port. The device keeps its settings and waveforms, so TTL triggers still play them.
             if obj.initialized
+                obj.replyPending = 0; % Nothing more is read, so a reply still to come needs no discarding
                 try
                     obj.writeCommand(obj.OpDisconnect, []);
                 catch
@@ -889,17 +892,109 @@ classdef WavePalDevice < handle
         end
 
         function writeCommand(obj, opCode, data)
-            % Sends one command, with its framing byte, in a single write
+            % Sends one command, with its framing byte, in a single write. A command whose reply was not read in full,
+            % because the read timed out or Ctrl-C stopped it, leaves that reply, or the rest of it, to arrive later.
+            % Read as the reply to the next command, it would put every reply after it out of step. So it is
+            % discarded first (discardLostReply()), and this command's reply, if it has one, is pending until
+            % readBytes() or confirmWrite() has read it, as in PulsePalDevice. Ops 'P', 'X', 81 and 89 have no reply,
+            % and the handshake's (op 72) is read until the device is quiet (readHandshakeReply()).
+            if obj.replyPending
+                obj.discardLostReply();
+            end
+            if ~any(double(opCode) == [72 81 89 double('PX')])
+                obj.replyPending = double(opCode); % Before the write: Ctrl-C can come as soon as it returns
+            end
             write(obj.port, [uint8([obj.OpMenuByte double(opCode)]) uint8(data)], 'uint8');
         end
 
+        function discardLostReply(obj)
+            % Discards what arrives of a reply that was not read in full (see writeCommand()), and brings the device
+            % back in step with the properties. The command may have changed a setting, unknown to this object: an
+            % assignment stopped by Ctrl-C after its write, for one, which the device took and the property did not.
+            % Wave Pal cannot report its settings, so the setting such a command carried is sent again as the
+            % properties hold it. A change of output range unloads the device's waveforms, so after one they are
+            % loaded again too. A waveform whose load was lost is already left out of waveforms.
+            op = obj.replyPending;
+            obj.replyPending = 0;
+            nLate = numel(obj.readUntilQuiet());
+            sendAgain = any(op == double('SRCODTI'));
+            message = ['The reply to an earlier command (op ''' char(op) ''') was not read in full: its call was ' ...
+                       'stopped, or the reply came too late. ' num2str(nLate) ' byte(s) of it arrived since, and ' ...
+                       'were discarded'];
+            if sendAgain
+                message = [message ', and the setting it carried was sent again as this object holds it'];
+            end
+            warning('WavePalDevice:lostReply', '%s.', message)
+            if sendAgain
+                try
+                    obj.sendSettingAgain(char(op));
+                catch err
+                    error('WavePalDevice:noReply', 'After the reply to an earlier command was lost: %s', err.message)
+                end
+            end
+        end
+
+        function sendSettingAgain(obj, op)
+            % Sends the setting that op carries, as the properties hold it (see discardLostReply())
+            switch op
+                case 'S'
+                    obj.writeCommand(op, typecast(uint32(obj.samplingRate), 'uint8'));
+                    obj.confirmWrite('setting samplingRate');
+                case 'R'
+                    [~, rangeIndex] = obj.findRange(obj.outputRange);
+                    obj.writeCommand(op, uint8(rangeIndex-1));
+                    obj.confirmWrite('setting outputRange');
+                    oldWaveforms = obj.waveforms;
+                    obj.waveforms = cell(size(oldWaveforms));
+                    for i = 1:numel(oldWaveforms)
+                        if ~isempty(oldWaveforms{i})
+                            obj.loadWaveform(i, oldWaveforms{i});
+                        end
+                    end
+                case 'C'
+                    obj.writeCommand(op, uint8(obj.currentWaveform));
+                    obj.confirmWrite('setting currentWaveform');
+                case 'O'
+                    obj.writeCommand(op, uint8(obj.loopMode));
+                    obj.confirmWrite('setting loopMode');
+                case 'D'
+                    loopSamples = obj.durations2Samples(obj.loopDuration, obj.samplingRate);
+                    obj.writeCommand(op, typecast(uint32(loopSamples), 'uint8'));
+                    obj.confirmWrite('setting loopDuration');
+                case 'T'
+                    obj.writeCommand(op, uint8(obj.TriggerModeCodes(obj.matchTriggerModes(obj.triggerMode))));
+                    obj.confirmWrite('setting triggerMode');
+                otherwise % 'I', the trigger links
+                    obj.sendTriggerLinks(obj.linkTriggerChannel1, obj.linkTriggerChannel2);
+            end
+        end
+
+        function bytes = readUntilQuiet(obj)
+            % Reads the bytes the device sends until none has arrived for 50 ms, for at most 1 s, as
+            % readHandshakeReply() does, and returns them
+            bytes = [];
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    bytes = [bytes obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+        end
+
         function data = readBytes(obj, nBytes, context)
-            % Reads exactly nBytes from the device, as a row of doubles
+            % Reads exactly nBytes from the device, as a row of doubles: the whole reply to the command last sent,
+            % which is then no longer pending (see writeCommand()). Only connecting reads a reply in more than one call.
             data = read(obj.port, nBytes, 'uint8');
             if numel(data) < nBytes
                 error(['Wave Pal did not reply in time to ' context '. ' num2str(numel(data)) ' of '...
                        num2str(nBytes) ' byte(s) arrived. ' obj.NoReplyHint])
             end
+            obj.replyPending = 0;
         end
 
         function confirmWrite(obj, context)
@@ -909,6 +1004,7 @@ classdef WavePalDevice < handle
                 error(['Wave Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
                        ' s. ' obj.NoReplyHint])
             end
+            obj.replyPending = 0; % The whole reply is read (see writeCommand())
             if reply ~= 1
                 error(['Wave Pal rejected ' context '. A value was out of range, or a waveform could not be '...
                        'written to the microSD card.'])

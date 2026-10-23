@@ -17,10 +17,14 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
 import contextlib
+import difflib
 import numbers
+import os
 import re
 import struct
+import sys
 import time
+import warnings
 import weakref
 
 import numpy as np
@@ -96,6 +100,15 @@ def read_handshake_reply(port, timeout=None):
             port.timeout = port_timeout
     if len(received) < HANDSHAKE_REPLY_BYTES:
         return None
+    received += read_until_quiet(port)
+    reply = bytes(received[-HANDSHAKE_REPLY_BYTES:])
+    return reply[0], struct.unpack("<I", reply[1:])[0]
+
+
+def read_until_quiet(port):
+    """Read the bytes the device sends until none has arrived for HANDSHAKE_QUIET_TIME, for at most
+    HANDSHAKE_MAX_TIME, and return them. Used to skip replies that arrive after their reader gave up."""
+    received = bytearray()
     started = last_arrival = time.monotonic()
     while True:
         now = time.monotonic()
@@ -107,8 +120,59 @@ def read_handshake_reply(port, timeout=None):
             last_arrival = time.monotonic()
         else:
             time.sleep(0.001)
-    reply = bytes(received[-HANDSHAKE_REPLY_BYTES:])
-    return reply[0], struct.unpack("<I", reply[1:])[0]
+    return bytes(received)
+
+
+def warn_lost_reply(op_text, n_late, recovery):
+    """The warning of the three classes' _discard_lost_reply(), for a reply that was not read in full: op_text names
+    the command ("op 74"), n_late is the number of its bytes discarded, and recovery says what was done ("" for
+    nothing)."""
+    warn(f"The reply to an earlier command ({op_text}) was not read in full: its call was interrupted, or the reply "
+         f"came too late. {n_late} byte(s) of it arrived since, and were discarded{recovery}.")
+
+
+PUBLIC_ATTRIBUTES = frozenset({"port", "info"})  # The three device classes' public instance attributes
+
+
+def snake_case(name):
+    """A MATLAB class name as the Python classes spell it: 'phase1Voltage' is 'phase1_voltage', 'customTrainID'
+    'custom_train_id' (as snakeCase() in the MATLAB class)."""
+    return re.sub(r"([A-Z]+)", r"_\1", name).lower()
+
+
+def refuse_unknown_attribute(device, name, setting_names):
+    """Raise AttributeError before a device class's __setattr__() assigns a public attribute the class does not have.
+
+    Assigning a misspelled setting (`P.phase1_votlage = ...`), a MATLAB name (`P.phase1Voltage = ...`) or
+    `S.autosync = False` made an attribute of its own, and programmed nothing. `setting_names` are the names a script
+    assigns, for the hint. A subclass that adds public attributes declares them in its class body.
+    """
+    if name in PUBLIC_ATTRIBUTES or hasattr(type(device), name):
+        return
+    candidate = snake_case(name)
+    if candidate in setting_names:
+        hint = f" Did you mean {candidate!r}? The Python classes' names are snake_case."
+    else:
+        close = difflib.get_close_matches(candidate, setting_names, n=1)
+        hint = f" Did you mean {close[0]!r}?" if close else ""
+    raise AttributeError(
+        f"{type(device).__name__} has no setting {name!r}, so assigning it would program nothing.{hint} Printing "
+        "the object lists its settings."
+    )
+
+
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+
+def warn(message):
+    """Issue a UserWarning that points at the first caller outside this package, so that Python shows it for each
+    place in a script where it happens, not once for the line in the package that issues it."""
+    frame = sys._getframe(1)
+    level = 2  # The caller of warn()
+    while frame is not None and os.path.dirname(os.path.abspath(frame.f_code.co_filename)) == _PACKAGE_DIRECTORY:
+        frame = frame.f_back
+        level += 1
+    warnings.warn(message, stacklevel=level)
 
 
 def other_firmware_error(handshake_reply, version, port_name, expected):
@@ -383,6 +447,10 @@ def batch(device):
     what they were, so that they still describe the device. The device
     class provides _snapshot(), _restore(snapshot), _check_sync() and
     _send_sync().
+
+    auto_sync is put back by its private attribute: PulsePalDevice refuses
+    to turn auto_sync on while changes made with it off are unsent, as the
+    block's are until _send_sync() has sent them, or if it fails.
     """
     previous = device.auto_sync
     snapshot = device._snapshot()
@@ -392,7 +460,9 @@ def batch(device):
         device._check_sync()
     except BaseException:
         device._restore(snapshot)
-        device.auto_sync = previous
+        device._auto_sync = previous
         raise
-    device.auto_sync = previous
-    device._send_sync()
+    try:
+        device._send_sync()
+    finally:
+        device._auto_sync = previous

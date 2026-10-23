@@ -700,9 +700,9 @@ def test_sync_from_device_reads_what_the_device_plays(S):
         S.play_duration[4] = 1
         S.link_trigger_channel2[3] = False
         S.trigger_mode[2] = "Normal"
+        S.sync_from_device()  # Discards the changes: auto_sync refuses to turn on while they are unsent
     finally:
         S.auto_sync = True
-    S.sync_from_device()
     assert S.export_params() == expected, (S.export_params(), expected)
     # From a fixed voltage of -2.5 V with a mean of 6 V, straight to a sine wave of 20 V peak to peak
     S.configure(2, waveform="Sine", peak_to_peak=20, mean_voltage=0)
@@ -926,6 +926,7 @@ def main():
                 failures += 1
                 result = f"FAILED: {error}"
                 if not S._closed:
+                    S.sync_from_device()  # Discards what the test left unsent, so that auto_sync can turn on
                     S.auto_sync = True
                     S.stop()
             print(f"{name:<75} {time.perf_counter() - start:6.1f} s  {result}")

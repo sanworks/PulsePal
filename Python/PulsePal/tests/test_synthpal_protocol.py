@@ -897,6 +897,115 @@ def test_a_failed_connection_sends_the_disconnect_op_only_to_a_synth_pal():
     assert not fake.is_open
 
 
+def interrupt_next_read(fake):
+    """Make the fake's next read raise KeyboardInterrupt, as Ctrl-C between a command's write and its reply does.
+    The reply stays waiting, as the device sent it."""
+    read = fake.read
+
+    def interrupted(n):
+        fake.read = read
+        raise KeyboardInterrupt
+
+    fake.read = interrupted
+
+
+def test_a_reply_left_unread_is_discarded_and_the_settings_read_back():
+    """A setting interrupted after its write (Ctrl-C) leaves its confirm byte to arrive later. Read as the next
+    command's reply, it would put every reply after it a byte late. The next command discards it first, with a
+    warning, and as the device may have taken the setting, reads the settings back (op 'R')."""
+    device, fake = connect()
+    interrupt_next_read(fake)
+    expect_error(device.resting_voltage.__setitem__, 1, 1.5, error=KeyboardInterrupt)
+    assert device.resting_voltage[1] == 0 and fake.resting[0] == 1_500_000 and fake.in_waiting == 1
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.status()
+    assert "op 'V'" in str(caught[0].message) and "read back" in str(caught[0].message), caught[0].message
+    assert caught[0].filename == __file__  # Points at the script's line, so that it shows each time
+    assert fake.ops() == ["V", "R", "G"] and fake.in_waiting == 0, fake.ops()
+    assert device.resting_voltage[1] == 1.5  # As the device took it
+
+    # In param sync mode, op 'R' returns the settings playing, not a set stored for the edge: nothing is read back
+    device.trigger_mode[1] = "Param Sync"
+    interrupt_next_read(fake)
+    device.auto_sync = False
+    device.frequency = 200
+    expect_error(device.sync_to_device, error=KeyboardInterrupt)
+    device.auto_sync = True
+    fake.writes.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.trigger(1)
+    assert "op 'U'" in str(caught[0].message) and "read back" not in str(caught[0].message)
+    assert fake.ops() == ["P"] and device.frequency == 200
+
+
+def test_misspelled_and_matlab_names_are_refused():
+    """Assigning an attribute SynthPalDevice does not have made one of its own, and programmed nothing:
+    S.autosync = False left auto_sync on."""
+    device, fake = connect()
+    for name, meant in (("autosync", "auto_sync"), ("peakToPeak", "peak_to_peak"), ("frequncy", "frequency"),
+                        ("my_flag", None)):
+        error = expect_error(setattr, device, name, [1, 1, 1, 1], error=AttributeError)
+        assert f"SynthPalDevice has no setting {name!r}" in str(error), error
+        assert (f"Did you mean {meant!r}" in str(error)) == (meant is not None), error
+        assert name not in vars(device)
+    assert fake.writes == [] and device.auto_sync is True
+    device.frequency = 200  # The settings, and private attributes, are assigned as before
+    device._scratch = 1
+    assert fake.ops() == ["F"]
+
+
+def test_auto_sync_cannot_be_turned_on_with_changes_unsent():
+    """Turning auto_sync back on did not send the changes made with it off, so the device went on playing its old
+    settings. Now it raises while there are any, naming them, and close() warns of them."""
+    device, fake = connect()
+    device.auto_sync = False
+    device.frequency = 300
+    device.peak_to_peak[2] = 3
+    device.link_trigger_channel2[4] = True
+    error = expect_error(setattr, device, "auto_sync", True)
+    assert "frequency, peak_to_peak, link_trigger_channel2" in str(error), error
+    assert device.auto_sync is False and fake.writes == []
+    device.sync_to_device()
+    device.auto_sync = True
+
+    # configure() with auto_sync off holds its changes too; sync_from_device() discards them
+    device.auto_sync = False
+    device.configure(1, waveform="Square", play_duration=0.5)
+    error = expect_error(setattr, device, "auto_sync", True)
+    assert "waveform, play_duration" in str(error), error
+    device.sync_from_device()
+    device.auto_sync = True
+    assert device.waveform[1] == "Sine" and device.play_duration[1] == 1
+
+    # set_default_params() sends everything; batch() and import_params() turn auto_sync off and on again around
+    # their changes, and send them
+    device.auto_sync = False
+    device.mean_voltage[1] = 1
+    device.set_default_params()
+    device.auto_sync = True
+    with device.batch():
+        device.frequency = 400
+    device.import_params({"resting_voltage": [1, 0, 0, 0]})
+    assert device.auto_sync is True and fake.ops()[-2:] == ["U", "U"], fake.ops()
+    try:
+        with device.batch():
+            device.frequency = 500
+            raise RuntimeError("stop here")
+    except RuntimeError:
+        pass
+    assert device.auto_sync is True and device.frequency == 400
+
+    # close() warns of changes never sent
+    device.auto_sync = False
+    device.mean_voltage[1] = 1
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.close()
+    assert "never sent" in str(caught[0].message) and "mean_voltage" in str(caught[0].message), caught
+
+
 def main():
     tests = [
         value for name, value in sorted(globals().items())

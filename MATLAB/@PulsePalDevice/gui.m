@@ -774,7 +774,9 @@ try
     enteringParamSync = (deviceModes ~= paramSyncMode) & (newModes == paramSyncMode);
     if any(leavingParamSync)
         deviceModes(leavingParamSync) = newModes(leavingParamSync);
-        obj.autoSync = true; % Assigning a parameter reaches the device at once only while autoSync is on
+        % Assigning a parameter reaches the device at once only while autoSync is on. Set directly: autoSync refuses
+        % to turn on while the object holds changes made with it off and unsent, which importParams() replaces below
+        obj.autoSyncEnabled = true;
         obj.triggerMode = deviceModes;
     end
     programBuffered = any(deviceModes == paramSyncMode);
@@ -789,7 +791,7 @@ try
         end
     end
     if any(enteringParamSync)
-        obj.autoSync = true;
+        obj.autoSyncEnabled = true;
         obj.triggerMode = newModes;
     end
 catch err

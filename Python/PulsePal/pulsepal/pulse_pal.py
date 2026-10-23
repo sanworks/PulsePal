@@ -51,9 +51,13 @@ with P.batch():
 ```
 
 `PulsePalDevice.auto_sync` set to `False` does the same for as long as
-it stays off, until `PulsePalDevice.sync_to_device` is called. That is
-how the next trial's parameters wait for a TTL in param sync mode (see
+it stays off, until `PulsePalDevice.sync_to_device` is called; turning
+it back on before then raises an error. That is how the next trial's
+parameters wait for a TTL in param sync mode (see
 `PulsePalDevice.trigger_mode`).
+
+Assigning an attribute that is not a setting, such as a misspelled one
+or the MATLAB class's `phase1Voltage`, raises `AttributeError`.
 
 ## Units and values
 
@@ -115,6 +119,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
+import collections.abc
 from dataclasses import dataclass
 import math
 import numbers
@@ -173,6 +178,13 @@ _CONTINUOUS_LOOP_CODE = 18  # Not in ops 73 and 93, or settings files
 _BURST_DURATION_CODE = 8  # These two are checked together: see PulsePalDevice._check_custom_bursts()
 _CUSTOM_TRAIN_TARGET_CODE = 15
 _FORMAT_KEY = b"WIPE"  # Follows op 97, so that two stray bytes cannot format the card (FORMAT_SD_CARD_KEY in the firmware)
+# The ops whose reply _write_raw() does not track: those with no reply, and the handshakes (72 and 103), whose reply
+# read_handshake_reply() reads until the device is quiet
+_OPS_WITHOUT_TRACKED_REPLY = frozenset({72, 77, 80, 81, 89, 98, 103})
+# The ops that can change the parameters: if the reply to one is lost, they are read back (_discard_lost_reply())
+_PARAMETER_OPS = frozenset({73, 74, 90, 91, 92, 97})
+# The names a script assigns: the output parameters, in parameter code order, then these
+_SETTING_NAMES = (*(name for name, _ in _OUTPUT_PARAMETERS.values()), "trigger_mode", "auto_sync")
 
 # The parameters that ops 73, 92 and 93 carry in each block, in order
 _TIME_PARAMETERS = ("phase1_duration", "inter_phase_interval", "phase2_duration", "inter_pulse_interval",
@@ -325,6 +337,50 @@ class DeviceStatus:
     comm_failures: int
     """Commands that reached the device only in part, after which it
     showed COMM. FAILURE! and waited for its joystick to be clicked."""
+
+
+def _params_to_import(params):
+    """The parameters import_params() programs, as {name: values} by this class's names.
+
+    `params` is what export_params() returns, or a whole program file as json.load() reads it, whose "params" are
+    taken; the MATLAB class's names are accepted too ("phase1Voltage"), so that its exportParams() can be imported.
+    Names that are not parameters are skipped with a warning, and if none is, PulsePalError is raised: the device
+    would otherwise be sent its program unchanged, with only a warning to say why.
+    """
+    if not isinstance(params, collections.abc.Mapping):
+        raise PulsePalError(
+            f"import_params() takes a dict of parameters, as export_params() returns. Received {type(params).__name__}."
+        )
+    if isinstance(params.get("params"), collections.abc.Mapping):
+        # A program file, as the GUIs and the MATLAB class's saveProgramToFile() save it: format_version, params, the
+        # text of each custom train, device_info (see "Program files" in /USING.md)
+        program = params
+        params = dict(program["params"])
+        if "trigger_mode" not in params and "trigger_mode" in program:
+            params["trigger_mode"] = program["trigger_mode"]  # Files from before format_version held it here
+        if any(program.get("custom_train_timestamps") or []) or any(program.get("custom_train_voltages") or []):
+            _common.warn("import_params() imports a program file's parameters only: open it with gui() to load its "
+                         "custom trains too.")
+    keys = {}  # This class's name: the key in params
+    unknown = []
+    for key in params:
+        name = _common.snake_case(key) if isinstance(key, str) else None
+        if name not in _SETTING_NAMES or name == "auto_sync":
+            unknown.append(key)
+        elif name in keys:
+            raise PulsePalError(f"import_params(): {keys[name]!r} and {key!r} are the same parameter.")
+        else:
+            keys[name] = key
+    if not keys:
+        listed = ", ".join(map(repr, unknown)) or "nothing"
+        raise PulsePalError(
+            f"import_params() found no parameter in {listed}, so it programs nothing. It takes what export_params() "
+            "returns, e.g. {'phase1_voltage': [5, 5, 5, 5]}, or a whole program file (json.load() of one)."
+        )
+    if unknown:
+        _common.warn(f"import_params(): skipped {', '.join(map(repr, unknown))}, which this version of PulsePalDevice "
+                     "does not have.")
+    return {name: params[key] for name, key in keys.items()}
 
 
 def _channel_setting(name, doc):
@@ -609,6 +665,9 @@ class PulsePalDevice:
         "int32": (-(2**31), 2**31 - 1),
     }
 
+    _reply_pending = None  # The op code of a command whose reply has not been read in full yet (see _write_raw())
+    _unsent = frozenset()  # The settings assigned with auto_sync off since the parameters were last sent or read
+
     def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Pulse Pal device.
 
@@ -741,6 +800,7 @@ class PulsePalDevice:
                 raise PulsePalError(
                     f"The Pulse Pal on {port_name} did not report its circuit board revision."
                 )
+            self._reply_pending = None  # Read without _read_raw() (see _write_raw())
             self.info.circuit_board_revision = revision[0]
             self._write_serial((self._OP_MENU_BYTE, _common.OP_SERIAL_NUMBER), "uint8")
             self.info.serial_number = _common.read_serial_number(self._read_raw)
@@ -814,15 +874,28 @@ class PulsePalDevice:
         `False`: assignments change only this object's copy of the
         parameters, checking each value, and
         `PulsePalDevice.sync_to_device` sends all of them in one command.
-        Turning it back on does not send changes made meanwhile: call
-        `PulsePalDevice.sync_to_device` first. A `PulsePalDevice.batch`
-        block does both for you.
+        Turning it back on does not send changes made meanwhile, so it
+        raises `pulsepal.PulsePalError` while there are any: call
+        `PulsePalDevice.sync_to_device` first to send them, or
+        `PulsePalDevice.sync_from_device` to discard them. A
+        `PulsePalDevice.batch` block does it all for you. `close()` warns of
+        changes never sent.
         """
         return self._auto_sync
 
     @auto_sync.setter
     def auto_sync(self, value):
-        self._auto_sync = to_bool(value, "auto_sync")
+        value = to_bool(value, "auto_sync")
+        if value and self._unsent:
+            # Turned on, auto_sync would leave them unsent, and the device playing its old parameters
+            discard = "sync_from_device() to discard them"
+            if "continuous_loop" in self._unsent:
+                discard += " (all but continuous_loop, which the device does not report)"
+            raise PulsePalError(
+                f"Changes made with auto_sync off have not been sent to the device: {self._unsent_names()}. Call "
+                f"sync_to_device() to send them, or {discard}, before turning auto_sync on."
+            )
+        self._auto_sync = value
 
     def batch(self):
         """Change several parameters, and send them in one command.
@@ -880,7 +953,9 @@ class PulsePalDevice:
         Overwrites the parameter lists with the program currently on the
         device, e.g. after it has been reprogrammed from its thumb
         joystick. `PulsePalDevice.continuous_loop` is left as it is: the
-        device does not report it.
+        device does not report it. Changes made with
+        `PulsePalDevice.auto_sync` off and not yet sent are discarded, but
+        for `PulsePalDevice.continuous_loop`.
 
         Requires firmware v22 or newer.
 
@@ -891,6 +966,7 @@ class PulsePalDevice:
         self._require_firmware(22, "sync_from_device()")
         for name, values in self._read_device_params().items():
             getattr(self, name)._store(values)
+        self._unsent = self._unsent & {"continuous_loop"}  # Not read: a change to it is still unsent
 
     def set_default_params(self):
         """Program the device with the default parameters.
@@ -944,25 +1020,34 @@ class PulsePalDevice:
         from `params` keep their values. A name that is not a parameter
         is skipped with a warning, so that parameters exported by a newer
         version of this package, which may have more, can still be
-        imported.
+        imported; if none is, an error is raised.
+
+        A whole program file, as the GUIs save it, is imported too: its
+        parameters, not its custom trains (a warning says so, if it has
+        any).
+
+        ```python
+        with open("MyProgram.json") as f:
+            P.import_params(json.load(f))
+        ```
 
         Args:
             params: A dict of parameter name to one value per channel (a
-                list, tuple or NumPy array), as `export_params` returns.
+                list, tuple or NumPy array), as `export_params` returns,
+                or a program file's contents. The MATLAB class's names
+                (`phase1Voltage`) are accepted too, so that the parameters
+                its `exportParams()` returns, saved with `jsonencode`, can
+                be imported.
 
         Raises:
-            PulsePalError: If a value is invalid. Nothing is sent, and the
-                parameters keep the values they had.
+            PulsePalError: If a value is invalid, or no name in `params` is
+                a parameter. Nothing is sent, and the parameters keep the
+                values they had.
         """
-        names = {*self.info.output_parameter_names, "trigger_mode"}
-        unknown = [name for name in params if name not in names]
-        if unknown:
-            warnings.warn(f"import_params(): skipped {', '.join(map(repr, unknown))}, which this version of "
-                          "PulsePalDevice does not have.", stacklevel=2)
+        params = _params_to_import(params)
         with self.batch():
             for name, values in params.items():
-                if name in names:
-                    setattr(self, name, values)
+                setattr(self, name, values)
 
     def set_fixed_voltage(self, channels, voltage):
         """Set output channels to a fixed voltage.
@@ -1146,13 +1231,14 @@ class PulsePalDevice:
                 start of the train, increasing. Each is a multiple of
                 `DeviceInfo.min_pulse_width_us` (10 us on Pulse Pal 3,
                 100 us on Pulse Pal 2), from 0 to
-                `MAX_TIME`. Accepts a list, tuple or NumPy array.
+                `MAX_TIME`. Accepts a list, tuple or 1-D NumPy array.
             voltages: Voltage of each pulse, in volts [-10, 10]. Must be
                 the same length as `pulse_times`.
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range,
-                `pulse_times` and `voltages` differ in length,
+                `pulse_times` or `voltages` is not one-dimensional (a 2-D
+                array is refused, not flattened), they differ in length,
                 there are no pulses, or more than
                 `DeviceInfo.max_custom_pulses`, a pulse time is not a
                 multiple of `DeviceInfo.min_pulse_width_us`, is out of
@@ -1209,7 +1295,7 @@ class PulsePalDevice:
                 100 us on Pulse Pal 2). Each voltage is
                 held for this long.
             voltages: Waveform samples, in volts [-10, 10].
-                Accepts a list, tuple or NumPy array.
+                Accepts a list, tuple or 1-D NumPy array.
 
         Raises:
             PulsePalError: If `custom_train_id` is out of range, there
@@ -1416,8 +1502,10 @@ class PulsePalDevice:
             if op_byte == 2:
                 busy += " The device keeps its parameters."
             self._read_ack(context, refusal_message=refusal, refusal_messages={2: busy})
-        elif op_byte == 2:
-            time.sleep(0.1)  # Firmware v21 does not acknowledge, so allow time for the load
+        else:
+            self._reply_pending = None  # Firmware v21 does not acknowledge op 90 (see _write_raw())
+            if op_byte == 2:
+                time.sleep(0.1)  # So allow time for the load
         if op_byte == 2:
             self.sync_from_device()
 
@@ -1490,6 +1578,7 @@ class PulsePalDevice:
                 "Pulse Pal did not report the result of formatting "
                 f"its microSD card within {timeout} s. {_common.NO_REPLY_HINT}"
             )
+        self._reply_pending = None  # The whole reply is read (see _write_raw())
         confirm_byte = message[line_end + 1]
 
         text = bytes(message[:flag_index]).decode(
@@ -1580,6 +1669,10 @@ class PulsePalDevice:
         if getattr(self, "_closed", True):
             return
         self._closed = True
+        if send_disconnect and self._unsent:
+            _common.warn(f"PulsePalDevice closed with changes made with auto_sync off that were never sent to the "
+                         f"device: {self._unsent_names()}.")
+        self._reply_pending = None  # Nothing more is read, so a reply still to come needs no discarding
         try:
             if send_disconnect and self.port and self.port.is_open:
                 self._write_serial((self._OP_MENU_BYTE, 81), "uint8")
@@ -1610,6 +1703,13 @@ class PulsePalDevice:
             # Destructors should not raise; the serial object may already be
             # gone during interpreter shutdown.
             pass
+
+    def __setattr__(self, name, value):
+        """Refuse a public attribute that is not a setting, such as a misspelled one: it would program nothing (see
+        _common.refuse_unknown_attribute())."""
+        if name[0] != "_":
+            _common.refuse_unknown_attribute(self, name, _SETTING_NAMES)
+        super().__setattr__(name, value)
 
     def __repr__(self):
         """Describe the device and its parameters, e.g. with `print(P)`."""
@@ -1691,8 +1791,10 @@ class PulsePalDevice:
         """Check new values for all four channels of an output parameter, and with auto_sync on,
         program the channels whose value changes. Returns them as the parameter's list holds them."""
         values = [self._normalize_output_value(code, v, ch) for ch, v in enumerate(values, start=1)]
-        if self._auto_sync:
-            name = _OUTPUT_PARAMETERS[code][0]
+        name = _OUTPUT_PARAMETERS[code][0]
+        if not self._auto_sync:
+            self._unsent = self._unsent | {name}  # Until sync_to_device() sends it (see auto_sync)
+        else:
             if code in (_BURST_DURATION_CODE, _CUSTOM_TRAIN_TARGET_CODE):
                 # Sent alone, so it must suit the other parameter as the device holds it. In a batch() block, or
                 # with auto_sync off, both are checked together by sync_to_device().
@@ -1734,7 +1836,9 @@ class PulsePalDevice:
     def _apply_trigger_mode(self, values):
         """Check new trigger modes, and with auto_sync on, program the trigger channels whose mode changes."""
         modes = [self._normalize_trigger_mode(v) for v in values]
-        if self._auto_sync:
+        if not self._auto_sync:
+            self._unsent = self._unsent | {"trigger_mode"}
+        else:
             channels = [ch for ch in (1, 2) if modes[ch - 1] != self._trigger_mode[ch]]
             if len(channels) == 2:
                 self._send_trigger_modes(modes, "setting trigger_mode")
@@ -1757,13 +1861,18 @@ class PulsePalDevice:
                 self._read_ack(context)
 
     def _snapshot(self):
-        """All parameters, for batch() to restore if its block fails."""
+        """All parameters, and which are unsent, for batch() to restore if its block fails."""
         names = [*self.info.output_parameter_names, "trigger_mode"]
-        return {name: list(getattr(self, name))[1:] for name in names}
+        return {name: list(getattr(self, name))[1:] for name in names}, self._unsent
 
     def _restore(self, snapshot):
-        for name, values in snapshot.items():
+        params, self._unsent = snapshot
+        for name, values in params.items():
             getattr(self, name)._store(values)
+
+    def _unsent_names(self):
+        """The settings assigned with auto_sync off and not yet sent, for messages, in parameter code order."""
+        return ", ".join(name for name in _SETTING_NAMES if name in self._unsent)
 
     def _check_sync(self):
         """Check the whole local copy before sync_to_device() sends it."""
@@ -1793,6 +1902,7 @@ class PulsePalDevice:
 
     def _send_sync(self):
         """Send every parameter in one command: op 92 on firmware v22 or newer, op 73 on v21."""
+        self._unsent = frozenset()  # All are sent below
         if self.info.firmware_version > 21:
             self._sync_all_params()
         else:
@@ -2036,10 +2146,17 @@ class PulsePalDevice:
         self._read_ack(context)
 
     def _number_array(self, values, name, description):
-        """Return values (a scalar, a list, a tuple or a NumPy array) as a flat float64 array, refusing booleans,
-        strings and anything else that is not a number, as the scalar conversions do."""
-        if isinstance(values, np.ndarray) and values.dtype.kind in "iuf":
-            return values.ravel().astype(float)
+        """Return values (a scalar, a list, a tuple or a 1-D NumPy array) as a float64 array, refusing booleans,
+        strings and anything else that is not a number, as the scalar conversions do.
+
+        An array of two or more dimensions, or a list of lists, is refused rather than flattened: one value per
+        pulse is a list, and a 2-D one is a mistake, such as both rows of a stereo waveform. (The MATLAB class, which
+        took a matrix's longest side as its pulse count and sent all of it, sent the rest to the device as commands.)
+        """
+        if isinstance(values, np.ndarray):
+            self._check_one_dimensional(values, name)
+            if values.dtype.kind in "iuf":
+                return values.ravel().astype(float)
         items = self._as_list(values)
         refused_types = tuple(kind for kind in {type(item) for item in items}  # Each type once: fast for long lists
                               if issubclass(kind, (bool, np.bool_, str, bytes)))
@@ -2047,7 +2164,7 @@ class PulsePalDevice:
             item = next(item for item in items if isinstance(item, refused_types))
             raise PulsePalError(f"{name} must be {description}. Received {item!r}.")
         try:
-            return np.asarray(items, dtype=float).ravel()
+            array = np.asarray(items, dtype=float)
         except (TypeError, ValueError):
             for item in items:
                 try:
@@ -2055,6 +2172,16 @@ class PulsePalDevice:
                 except (TypeError, ValueError):
                     raise PulsePalError(f"{name} must be {description}. Received {item!r}.") from None
             raise
+        self._check_one_dimensional(array, name)  # A list of lists
+        return array
+
+    @staticmethod
+    def _check_one_dimensional(array, name):
+        if array.ndim > 1:
+            raise PulsePalError(
+                f"{name} must be one-dimensional, one value per pulse: a list, a tuple or a 1-D NumPy array. "
+                f"Received an array of shape {array.shape}."
+            )
 
     @staticmethod
     def _first(values, refused):
@@ -2116,7 +2243,19 @@ class PulsePalDevice:
         self._write_raw(bytes(payload))
 
     def _write_raw(self, payload):
-        """Write bytes to the serial port, in one write."""
+        """Write a command to the serial port, in one write.
+
+        A command whose reply was not read in full, because the read timed out or was interrupted (Ctrl-C), leaves
+        that reply, or the rest of it, to arrive later. Read as the reply to the next command, it put every reply
+        after it out of step: status() reported channels playing that were not, and assignments the device took
+        raised refusals. So it is discarded first (_discard_lost_reply()). Then this command's reply, if it has one,
+        is pending until it has been read: _read_raw() marks it read, and a method that reads a reply otherwise
+        (format_microsd()) sets _reply_pending back to None itself.
+        """
+        if self._reply_pending is not None:
+            self._discard_lost_reply()
+        if payload[1] not in _OPS_WITHOUT_TRACKED_REPLY:
+            self._reply_pending = payload[1]  # Before the write: a Ctrl-C can come as soon as it returns
         bytes_written = self.port.write(payload)
         if bytes_written != len(payload):
             raise PulsePalError(
@@ -2124,14 +2263,41 @@ class PulsePalDevice:
                 f"{len(payload)} byte(s)."
             )
 
+    def _discard_lost_reply(self):
+        """Discard what arrives of a reply that was not read in full (see _write_raw()), and bring this object back
+        in step with the device.
+
+        The command may have changed the parameters, unknown to this object: an assignment interrupted after its
+        write, for one, which the device took and this object did not. So after one of _PARAMETER_OPS, they are read
+        back (op 93), on firmware v22 or newer and outside param sync mode, where op 93 returns the parameters playing
+        rather than a set stored for the next sync edge.
+        """
+        op = self._reply_pending
+        self._reply_pending = None
+        n_late = len(_common.read_until_quiet(self.port))
+        read_back = (op in _PARAMETER_OPS and self.info.firmware_version > 21
+                     and "Param Sync" not in list(self._trigger_mode)[1:])
+        _common.warn_lost_reply(f"op {op}", n_late,
+                                ", and the parameters were read back from the device" if read_back else "")
+        if read_back:
+            try:
+                self.sync_from_device()
+            except PulsePalError as exc:
+                raise PulsePalError(
+                    f"Pulse Pal did not send its parameters, read back after the reply to an earlier command was "
+                    f"lost. {_common.NO_REPLY_HINT}"
+                ) from exc
+
     def _read_raw(self, n_bytes):
-        """Read exactly n_bytes from the serial port."""
+        """Read exactly n_bytes from the serial port: the whole reply to the command last sent, which is then no
+        longer pending (see _write_raw()). Only connecting reads a reply in more than one call."""
         message_bytes = self.port.read(n_bytes)
         if len(message_bytes) < n_bytes:
             raise PulsePalError(
                 f"Pulse Pal sent {len(message_bytes)} of the {n_bytes} byte(s) of its reply within "
                 f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
+        self._reply_pending = None
         return message_bytes
 
     def _read_serial(self, n_values, datatype):

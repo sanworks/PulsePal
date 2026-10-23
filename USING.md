@@ -74,13 +74,23 @@ Python and camelCase in MATLAB.
   The other channels keep what the device holds, even if it was set with the joystick, and
   assigning a value a channel already holds sends nothing. To send several changes in one
   command, use a `batch()` block in Python, or turn `autoSync` off in MATLAB and call
-  `syncToDevice()`.
+  `syncToDevice()`. Turning `auto_sync` / `autoSync` back on before that raises an error rather
+  than leave the changes unsent (Pulse Pal and Synth Pal), and closing the object warns of
+  changes never sent.
 - **Modes are names** (`"Gated"`, `"Sine"`; not case sensitive), and on/off settings are
   `True`/`False` (`true`/`false`).
 - **Values are checked before anything is sent.** A value the device cannot play raises an
-  error (`pulsepal.PulsePalError` in Python), and the device keeps its previous settings.
+  error (`pulsepal.PulsePalError` in Python), and the device keeps its previous settings. So does
+  a setting's name that does not exist, such as `P.phase1_votlage` or, in Python, the MATLAB name
+  `P.phase1Voltage` (`AttributeError`).
 - **`trigger(channels)` and `stop(channels)`** take one channel number, or several as a list,
   tuple or NumPy array in Python, or an array in MATLAB. `stop()` with no argument stops all.
+- **A call stopped with Ctrl-C, or a reply that came too late,** leaves that reply to arrive
+  after its call gave up. The next call discards it and warns. If the stopped call could have
+  changed a setting, Pulse Pal and Synth Pal read their settings back from the device, and Wave
+  Pal, which cannot report its settings, sends that setting again as the object holds it (and
+  loads its waveforms again after an output range), so that the object describes what the device
+  plays.
 - **`print(P)`** in Python, or `P` at the MATLAB prompt, shows every setting.
 
 ```python
@@ -342,13 +352,16 @@ To program a device from one in Python:
 ```python
 import json
 with open("MyProgram.json") as f:
-    P.import_params(json.load(f)["params"])
+    P.import_params(json.load(f))   # the whole file, or json.load(f)["params"]
 ```
 
-In MATLAB, `P.loadProgramFromFile('MyProgram.json')`. A GUI's custom trains are loaded only by
-opening the file in a GUI. `import_params()`, `importParams()` and `loadProgramFromFile()` skip
-names they do not know, with a warning, and the GUIs ignore them, so a file saved by a newer
-version still loads.
+In MATLAB, `P.loadProgramFromFile('MyProgram.json')`, or `P.importParams(jsondecode(fileread(...)))`.
+A GUI's custom trains are loaded only by opening the file in a GUI. `import_params()` and
+`importParams()` also take the other language's names, so a struct from MATLAB's `exportParams()`
+or a dict from Python's `export_params()`, saved as JSON, imports in either. They and
+`loadProgramFromFile()` skip names they do not know, with a warning, and the GUIs ignore them, so
+a file saved by a newer version still loads; a file or dict with no parameter at all raises an
+error.
 
 **Run without a computer.** Save a program to the device's microSD card, then load it with the
 joystick menu's Load Program item (or with `load_program_from_microsd()`):
@@ -384,7 +397,8 @@ P.save_program_to_microsd("OPTO20HZ.pps")  # at most 11 characters, then .pps
   pass before ends: the first pulse's time is not repeated as a gap. Custom pulse times must be
   multiples of the shortest pulse (10 µs on Pulse Pal 3, 100 µs on Pulse Pal 2): a time in between
   raises an error rather than being rounded. A train
-  needs at least one pulse. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
+  needs at least one pulse, and its times and voltages are vectors (in Python, one-dimensional),
+  one value per pulse: a 2-D array raises an error. A train targeting bursts (`custom_train_target` `"Bursts"`) needs a
   burst duration above 0: set `burst_duration` first, or both in a `batch()` block.
 - **Loading a custom train stops the channels playing it** (outside param sync mode), and their
   next trigger plays the new train. To change a train between trials without stopping the one

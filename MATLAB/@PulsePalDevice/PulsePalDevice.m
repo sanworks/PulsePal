@@ -25,6 +25,8 @@
 %   P.phase1Duration = [0.001 0.001 0.002 0.002];
 %   P.syncToDevice();
 %   P.autoSync = true;
+% Turning autoSync back on before syncToDevice() raises an error, rather than leave the changes unsent
+% (syncFromDevice() discards them instead), and clear P warns of changes never sent.
 %
 % Units and values. Voltages are in volts, -10 to 10. Times are in seconds, from 0 to 9999.9999 (info.maxTime, the
 % longest time the device's screen shows), rounded to the nearest cycle of the device's timer (info.cyclePeriod_us:
@@ -153,8 +155,11 @@ classdef PulsePalDevice < handle
         info % Properties of the connected device: hardware and firmware versions, and its limits
     end
 
+    properties (Dependent)
+        autoSync % true: assigning a parameter programs the device at once. false: syncToDevice() sends them all
+    end
+
     properties
-        autoSync = true; % true: assigning a parameter programs the device at once. false: syncToDevice() sends them all
         isBiphasic % 1x4 logical. false for monophasic pulses, true for biphasic. See "Output channel parameters" above
         phase1Voltage % 1x4, volts
         phase2Voltage % 1x4, volts. Biphasic pulses only
@@ -185,6 +190,11 @@ classdef PulsePalDevice < handle
         maxCustomPulses % Maximum number of custom pulses per pulse train supported
         ui % Struct with user interface handles
         storing = false % True while values are stored unchecked: read from the device, or restored by importParams()
+        % autoSync's value. Set directly where autoSync is turned on for a step and back (importParams(), gui()):
+        % set.autoSync refuses to turn it on while changes made with it off are unsent
+        autoSyncEnabled = true
+        unsentParams = {} % The parameters assigned with autoSync off since the parameters were last sent or read
+        replyPending = 0 % The op code of a command whose reply has not been read in full yet, or 0 (see send())
     end
 
     properties (Constant, Access = private)
@@ -280,13 +290,13 @@ classdef PulsePalDevice < handle
             % A device that answers op 103 too late counts the session's times in 50 us cycles too, after the op 72
             % that follows: either way op 94 reports the session's unit, which the class then uses. Polled, not read,
             % so that no read warns of a timeout.
-            obj.port.write([obj.OpMenuByte 103], 'uint8');
+            obj.send([obj.OpMenuByte 103]);
             waitStart = tic;
             while obj.port.NumBytesAvailable < 5 && toc(waitStart) < 0.3
                 pause(0.001);
             end
             if obj.port.NumBytesAvailable < 5
-                obj.port.write([obj.OpMenuByte 72], 'uint8');
+                obj.send([obj.OpMenuByte 72]);
             end
             reply = obj.readHandshakeReply(); % 'K' (75), then the firmware version (uint32)
             HandShakeOkByte = [];
@@ -323,7 +333,7 @@ classdef PulsePalDevice < handle
                 end
                 % Get hardware info if supported
                 if obj.firmwareVersion > 21
-                    obj.port.write([obj.OpMenuByte 94], 'uint8'); % Request hardware info
+                    obj.send([obj.OpMenuByte 94]); % Request hardware info
                     obj.hardwareVersion = obj.port.read(1, 'uint8');
                     obj.cyclePeriod = obj.port.read(1, 'uint32'); % The session's time unit (see op 103 above)
                     % Not 1/(cyclePeriod/1e6): at 10 us that is 99999.99999999999, and times read back from the device
@@ -331,13 +341,15 @@ classdef PulsePalDevice < handle
                     obj.cycleFrequency = 1000000/obj.cyclePeriod;
                     obj.nCustomPulseTrains = obj.port.read(1, 'uint8');
                     obj.maxCustomPulses = obj.port.read(1, 'uint32');
-                    obj.port.write([obj.OpMenuByte 100], 'uint8'); % Request the circuit board revision
+                    obj.replyPending = 0; % The whole reply is read (see send())
+                    obj.send([obj.OpMenuByte 100]); % Request the circuit board revision
                     circuitBoardRevision = obj.port.read(1, 'uint8');
                     if isempty(circuitBoardRevision)
                         obj.port = [];
                         error(['The Pulse Pal at port ' portString ' did not report its circuit board revision.'])
                     end
-                    obj.port.write([obj.OpMenuByte 102], 'uint8'); % Request the USB serial number
+                    obj.replyPending = 0;
+                    obj.send([obj.OpMenuByte 102]); % Request the USB serial number
                     serialNumberLength = obj.port.read(1, 'uint8'); % Then that many characters
                     serialNumber = '';
                     if ~isempty(serialNumberLength) && serialNumberLength > 0
@@ -347,6 +359,7 @@ classdef PulsePalDevice < handle
                         obj.port = [];
                         error(['The Pulse Pal at port ' portString ' did not report its USB serial number.'])
                     end
+                    obj.replyPending = 0;
                 else
                     obj.hardwareVersion = 2;
                     circuitBoardRevision = 0; % v21 has no op 100. It runs on Pulse Pal 2, which encodes no revision
@@ -404,7 +417,7 @@ classdef PulsePalDevice < handle
             end
 
             % Set name of connected software
-            obj.port.write([obj.OpMenuByte 89 'MATLAB'], 'uint8');
+            obj.send([obj.OpMenuByte 89 'MATLAB']);
 
             % Set default parameters
             obj.setDefaultParams;
@@ -414,7 +427,7 @@ classdef PulsePalDevice < handle
             % Starts the pulse trains of output channels: one channel number, e.g. P.trigger(1), or several as an
             % array, e.g. P.trigger([1 3 4]). The channels start in the same timer cycle. A channel that is already
             % playing a pulse train ignores the trigger.
-            obj.port.write([obj.OpMenuByte 77 obj.channelBits(channels)], 'uint8');
+            obj.send([obj.OpMenuByte 77 obj.channelBits(channels)]);
         end
 
         function stop(obj, channels)
@@ -430,9 +443,9 @@ classdef PulsePalDevice < handle
                 end
             end
             if obj.firmwareVersion < 22
-                obj.port.write([obj.OpMenuByte 80], 'uint8');
+                obj.send([obj.OpMenuByte 80]);
             else
-                obj.port.write([obj.OpMenuByte 98 bitCode], 'uint8');
+                obj.send([obj.OpMenuByte 98 bitCode]);
             end
         end
 
@@ -474,12 +487,13 @@ classdef PulsePalDevice < handle
             if obj.firmwareVersion < 22
                 error('status() requires firmware v22 or newer.')
             end
-            obj.port.write([obj.OpMenuByte 101], 'uint8');
+            obj.send([obj.OpMenuByte 101]);
             reply = obj.port.read(29, 'uint8'); % Channels playing, then 7 uint32 counters
             if numel(reply) < 29
                 error(['Pulse Pal sent ' num2str(numel(reply)) ' of the 29 bytes of its status within ' ...
                        num2str(obj.port.Timeout) ' s. ' obj.NoReplyHint]);
             end
+            obj.replyPending = 0; % The whole reply is read (see send())
             counts = double(typecast(uint8(reply(2:29)), 'uint32'));
             deviceStatus = struct;
             deviceStatus.playing = find(bitget(reply(1), 1:4));
@@ -498,7 +512,7 @@ classdef PulsePalDevice < handle
             end
             voltageBits = obj.volts2Bits(voltage);
             for channel = channelList
-                obj.port.write([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')], 'uint8');
+                obj.send([obj.OpMenuByte 79 channel typecast(uint16(voltageBits), 'uint8')]);
                 obj.confirmWrite;
             end
         end
@@ -518,7 +532,7 @@ classdef PulsePalDevice < handle
                 error('voltageOffset for zero code calibration must be in range [-0.1, 0.1]')
             end
             voltageBits = obj.roundHalfEven(voltageOffset*(1/(20/65536)));
-            obj.port.write([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')], 'uint8');
+            obj.send([obj.OpMenuByte 96 channel-1 typecast(int16(voltageBits), 'uint8')]);
             obj.confirmWrite;
             disp(['Zero code calibration set to ' num2str(voltageOffset) ' on channel ' num2str(channel) '.'])
         end
@@ -552,16 +566,17 @@ classdef PulsePalDevice < handle
             if enabled == 1 && obj.hardwareVersion < 3
                 error('The screen saver requires hardware v3 or newer: Pulse Pal 2 accepts enabled = false only.')
             end
-            obj.port.write([obj.OpMenuByte 99 double(enabled) typecast(uint16(timeout), 'uint8')], 'uint8');
+            obj.send([obj.OpMenuByte 99 double(enabled) typecast(uint16(timeout), 'uint8')]);
             obj.confirmWrite;
         end
 
         function sendCustomPulseTrain(obj, customTrainID, pulseTimes, voltages)
             % Loads a custom pulse train onto the device: a list of pulse onset times and a voltage for each pulse.
             % customTrainID: the train's number, 1-4 on Pulse Pal 3, 1-2 on Pulse Pal 2.
-            % pulseTimes: in seconds from the start of the train, increasing, in multiples of info.minPulseWidth_us
-            %             (10 us on Pulse Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s (info.maxTime).
-            % voltages: one per pulse, in volts, -10 to 10.
+            % pulseTimes: a vector, in seconds from the start of the train, increasing, in multiples of
+            %             info.minPulseWidth_us (10 us on Pulse Pal 3, 100 us on Pulse Pal 2), up to 9999.9999 s
+            %             (info.maxTime).
+            % voltages: a vector, one per pulse, in volts, -10 to 10. A matrix raises an error.
             % An output channel plays the train when its customTrainID property is set to the train's number. Each
             % pulse takes the channel's own phase durations; a biphasic pulse's second phase is its voltage with the
             % sign reversed. A biphasic pulse always plays whole, and a pulse whose time comes while it plays is
@@ -582,9 +597,13 @@ classdef PulsePalDevice < handle
             % samplingPeriod seconds apart (a multiple of info.minPulseWidth_us: 10 us on Pulse Pal 3, 100 us on Pulse
             % Pal 2). Set phase1Duration to samplingPeriod on the output
             % channel that plays it, so that each sample lasts until the next. customTrainID: the train's number, 1-4
-            % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: in volts, -10 to 10. It is loaded as a custom train is:
-            % see sendCustomPulseTrain() for what happens to channels playing it, and in param sync mode.
-            nVoltages = length(voltages);
+            % on Pulse Pal 3, 1-2 on Pulse Pal 2. voltages: a vector, in volts, -10 to 10. It is loaded as a custom
+            % train is: see sendCustomPulseTrain() for what happens to channels playing it, and in param sync mode.
+            if ~isempty(voltages) && ~isvector(voltages) % See sendCustomTrain()
+                error(['The waveform''s voltages must be a vector, one per sample. Received a ' obj.sizeText(voltages) ...
+                       ' array.'])
+            end
+            nVoltages = numel(voltages);
             if ~isnumeric(samplingPeriod) || ~isscalar(samplingPeriod) || ~isfinite(samplingPeriod) || samplingPeriod <= 0
                 error('Error: the sampling period must be a positive number of seconds.');
             end
@@ -608,7 +627,7 @@ classdef PulsePalDevice < handle
                 % that way, so both trigger channels leave param sync mode first. Sent whatever triggerMode holds: an
                 % assignment sends only what it changes, and the joystick menu may have changed the device's modes.
                 % See "Trigger modes" in help PulsePalDevice.
-                obj.port.write([obj.OpMenuByte 91 obj.TriggerModeCode 0 0], 'uint8'); % 0 = 'Normal'
+                obj.send([obj.OpMenuByte 91 obj.TriggerModeCode 0 0]); % 0 = 'Normal'
                 obj.confirmWrite;
             end
             obj.importParams(obj.defaultParams);
@@ -633,11 +652,23 @@ classdef PulsePalDevice < handle
             % each holding one value per channel. All of them are checked first, and then sent in one command, as
             % syncToDevice() sends them: in param sync mode, the device stores them for the next sync edge. Parameters
             % missing from params keep their values, and autoSync is left as it is. Fields that are not parameters of
-            % this class, e.g. from a newer version's exportParams(), are skipped with a warning. Raises an error, and
-            % changes and sends nothing, if a value is invalid.
+            % this class, e.g. from a newer version's exportParams(), are skipped with a warning; if none is, an error
+            % is raised. The Python class's names (phase1_voltage) are accepted too, so that the parameters its
+            % export_params() returns, saved with json, can be imported, and so is a whole program file read with
+            % jsondecode (see saveProgramToFile()): its parameters, not its custom trains. Raises an error, and changes
+            % and sends nothing, if a value is invalid.
             if ~isstruct(params) || ~isscalar(params)
                 error('importParams() takes a struct of parameters, as exportParams() returns.')
             end
+            if isfield(params, 'params') && isstruct(params.params) && isscalar(params.params)
+                % A whole program file, jsondecode(fileread(fileName))
+                [params, timestamps, voltages] = obj.programContents(params, 'importParams()');
+                if any(~cellfun(@isempty, [timestamps voltages]))
+                    warning('PulsePalDevice:customTrainsNotLoaded', ['importParams() imports a program file''s ' ...
+                            'parameters only: open the file with gui() to load its custom trains too.'])
+                end
+            end
+            params = obj.matlabParamNames(params);
             if isfield(params, 'playbackMode') && ~isfield(params, 'continuousLoop')
                 params.continuousLoop = params.playbackMode; % The parameter's name before continuousLoop
             end
@@ -645,15 +676,26 @@ classdef PulsePalDevice < handle
             % which is not a parameter
             names = setdiff(fieldnames(params), {'playbackMode', 'autoSync'}, 'stable');
             unknown = setdiff(names, [obj.ParamNames {'triggerMode'}], 'stable');
+            names = setdiff(names, unknown, 'stable');
+            if isempty(names)
+                % Sent unchanged, the device's program would stay as it was, with only a warning to say why
+                listed = 'nothing';
+                if ~isempty(unknown)
+                    listed = strjoin(unknown, ', ');
+                end
+                error('PulsePalDevice:noParams', ['importParams() found no parameter in %s, so it programs ' ...
+                      'nothing. It takes what exportParams() returns, e.g. struct(''phase1Voltage'', [5 5 5 5]), or ' ...
+                      'a whole program file, jsondecode(fileread(fileName)).'], listed)
+            end
             if ~isempty(unknown)
                 warning('PulsePalDevice:unknownParams', ['importParams(): skipped ' strjoin(unknown, ', ') ...
                         ', which this version of PulsePalDevice does not have.'])
-                names = setdiff(names, unknown, 'stable');
             end
             snapshot = obj.exportParams();
-            autoSyncState = obj.autoSync;
+            unsentSnapshot = obj.unsentParams;
+            autoSyncState = obj.autoSyncEnabled;
             cleanup = onCleanup(@() obj.restoreAutoSync(autoSyncState));
-            obj.autoSync = false;
+            obj.autoSyncEnabled = false;
             try
                 for i = 1:numel(names)
                     obj.(names{i}) = params.(names{i});
@@ -668,6 +710,7 @@ classdef PulsePalDevice < handle
                 for i = 1:numel(snapshotNames)
                     obj.(snapshotNames{i}) = snapshot.(snapshotNames{i});
                 end
+                obj.unsentParams = unsentSnapshot;
                 clear restoring
                 rethrow(err)
             end
@@ -771,7 +814,7 @@ classdef PulsePalDevice < handle
                     return
                 end
             end
-            obj.port.write([obj.OpMenuByte 97 double(obj.FormatKey)], 'uint8');
+            obj.send([obj.OpMenuByte 97 double(obj.FormatKey)]);
             % The device replies with lines of status text, the last of which contains '!', and then a confirm byte (1
             % if the card was formatted, 0 if not). The confirm byte is sent after the device has reloaded its default
             % parameters, so it can arrive well after the text. It must be read here: left in the buffer, it would be
@@ -796,6 +839,7 @@ classdef PulsePalDevice < handle
                 error(['Pulse Pal did not report the result of formatting its microSD card within 30 seconds. ' ...
                        obj.NoReplyHint])
             end
+            obj.replyPending = 0; % The whole reply is read (see send())
             disp(strtrim(char(msg(1:lineEnd))));
             success = (msg(lineEnd+1) == 1);
             obj.setDefaultParams();
@@ -881,17 +925,36 @@ classdef PulsePalDevice < handle
             obj.triggerMode = obj.setOutputParam(128, val); % 128: TriggerModeCode
         end
 
+        function value = get.autoSync(obj)
+            value = obj.autoSyncEnabled;
+        end
+
         function set.autoSync(obj, val)
             if ~(islogical(val) || isnumeric(val)) || ~isscalar(val) || ~(val == 0 || val == 1)
                 error('autoSync must be true or false, e.g. P.autoSync = true;')
             end
-            obj.autoSync = logical(val);
+            if val && ~isempty(obj.unsentParams)
+                % Turned on, autoSync would leave them unsent, and the device playing its old parameters
+                discard = 'syncFromDevice() to discard them';
+                if any(strcmp(obj.unsentParams, 'continuousLoop'))
+                    discard = [discard ' (all but continuousLoop, which the device does not report)'];
+                end
+                error('PulsePalDevice:unsentChanges', ['Changes made with autoSync off have not been sent to the ' ...
+                      'device: ' obj.unsentNames() '. Call syncToDevice() to send them, or ' discard ', before ' ...
+                      'turning autoSync on.'])
+            end
+            obj.autoSyncEnabled = logical(val);
         end
 
         function delete(obj)
             % Runs on clear P or delete(P). Tells the device that MATLAB is disconnecting, which stops all output
             % channels and puts the device's own name back on its screen, closes the GUI, and releases the serial
-            % port. Errors are ignored: the device may already be unplugged.
+            % port. Errors are ignored: the device may already be unplugged. Warns of changes made with autoSync off
+            % and never sent.
+            if ~isempty(obj.unsentParams)
+                warning('PulsePalDevice:unsentChanges', ['PulsePalDevice closed with changes made with autoSync ' ...
+                        'off that were never sent to the device: ' obj.unsentNames() '.'])
+            end
             try
                 obj.port.write([obj.OpMenuByte 81], 'uint8');
             catch
@@ -959,8 +1022,78 @@ classdef PulsePalDevice < handle
         end
 
         function restoreAutoSync(obj, state)
-            % For setDefaultParams(): puts autoSync back, also if programming the defaults failed
-            obj.autoSync = state;
+            % For importParams() and gui(): puts autoSync back, also if a step failed. Directly: set.autoSync refuses
+            % to turn it on while changes made with it off are unsent, and a step that failed can leave some
+            obj.autoSyncEnabled = state;
+        end
+
+        function send(obj, bytes)
+            % Writes a command. A command whose reply was not read in full, because the read timed out or Ctrl-C
+            % stopped it, leaves that reply, or the rest of it, to arrive later. Read as the reply to the next
+            % command, it put every reply after it out of step: status() reported channels playing that were not, and
+            % assignments the device took raised refusals. So it is discarded first (discardLostReply()). Then this
+            % command's reply, if it has one, is pending until the method that sent the command has read all of it,
+            % and set replyPending back to 0. Ops 77, 80, 81, 89 and 98 have no reply, and the handshakes' (ops 72 and
+            % 103) are read until the device is quiet (readHandshakeReply()).
+            if obj.replyPending
+                obj.discardLostReply();
+            end
+            if ~any(bytes(2) == [72 77 80 81 89 98 103])
+                obj.replyPending = double(bytes(2)); % Before the write: Ctrl-C can come as soon as it returns
+            end
+            obj.port.write(bytes, 'uint8');
+        end
+
+        function discardLostReply(obj)
+            % Discards what arrives of a reply that was not read in full (see send()), and brings the properties back
+            % in step with the device. The command may have changed the parameters, unknown to this object: an
+            % assignment stopped by Ctrl-C after its write, for one, which the device took and the property did not.
+            % So after one that can (ops 73, 74, 90, 91, 92 and 97), they are read back (op 93), on firmware v22 or
+            % newer and outside param sync mode, where op 93 returns the parameters playing rather than a set stored
+            % for the next sync edge.
+            op = obj.replyPending;
+            obj.replyPending = 0;
+            nLate = numel(obj.readUntilQuiet());
+            readBack = any(op == [73 74 90 91 92 97]) && obj.firmwareVersion > 21 && ...
+                       ~any(strcmp(obj.triggerMode, 'Param Sync'));
+            message = ['The reply to an earlier command (op ' num2str(op) ') was not read in full: its call was ' ...
+                       'stopped, or the reply came too late. ' num2str(nLate) ' byte(s) of it arrived since, and ' ...
+                       'were discarded'];
+            if readBack
+                message = [message ', and the parameters were read back from the device'];
+            end
+            warning('PulsePalDevice:lostReply', '%s.', message)
+            if readBack
+                try
+                    obj.importCurrentParamsFromPulsePal();
+                catch err
+                    error('PulsePalDevice:noReply', ['Pulse Pal did not send its parameters, read back after the ' ...
+                          'reply to an earlier command was lost (%s). %s'], err.message, obj.NoReplyHint)
+                end
+            end
+        end
+
+        function bytes = readUntilQuiet(obj)
+            % Reads the bytes the device sends until none has arrived for 50 ms, for at most 1 s, as
+            % readHandshakeReply() does, and returns them
+            bytes = [];
+            started = tic;
+            lastArrival = tic;
+            while toc(lastArrival) < 0.05 && toc(started) < 1
+                nWaiting = obj.port.NumBytesAvailable;
+                if nWaiting > 0
+                    bytes = [bytes obj.port.read(nWaiting, 'uint8')]; %#ok<AGROW>
+                    lastArrival = tic;
+                else
+                    pause(0.001);
+                end
+            end
+        end
+
+        function names = unsentNames(obj)
+            % The parameters assigned with autoSync off and not yet sent, for messages, in parameter code order
+            allNames = [obj.ParamNames {'triggerMode'}];
+            names = strjoin(allNames(ismember(allNames, obj.unsentParams)), ', ');
         end
 
         function [value, deviceValues] = checkOutputParam(obj, paramCode, val)
@@ -1039,7 +1172,14 @@ classdef PulsePalDevice < handle
                 return
             end
             [value, deviceValues] = obj.checkOutputParam(paramCode, val);
-            if ~obj.autoSync
+            if ~obj.autoSyncEnabled
+                name = 'triggerMode';
+                if paramCode < obj.TriggerModeCode
+                    name = obj.ParamNames{paramCode};
+                end
+                if ~any(strcmp(obj.unsentParams, name))
+                    obj.unsentParams{end+1} = name; % Until syncToDevice() sends it (see set.autoSync)
+                end
                 return
             end
             if paramCode == obj.TriggerModeCode
@@ -1078,12 +1218,12 @@ classdef PulsePalDevice < handle
                     bytes = @(v) uint8(v);
             end
             if obj.firmwareVersion > 21 && numel(changed) == numel(deviceValues)
-                obj.port.write([obj.OpMenuByte 91 paramCode bytes(deviceValues)], 'uint8'); % All channels at once
+                obj.send([obj.OpMenuByte 91 paramCode bytes(deviceValues)]); % All channels at once
                 obj.confirmWrite;
             elseif paramCode ~= 18 || obj.firmwareVersion > 21 % Firmware v21 has no parameter 18, and checkOutputParam()
                                                                 % lets only false through
                 for i = changed
-                    obj.port.write([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))], 'uint8');
+                    obj.send([obj.OpMenuByte 74 paramCode i bytes(deviceValues(i))]);
                     obj.confirmWrite;
                 end
             end
@@ -1201,10 +1341,13 @@ classdef PulsePalDevice < handle
             confirmed = obj.port.read(1, 'uint8');
             % read() returns nothing (with a warning) if the byte does not arrive, and "if [] ~= 1" is false, so a
             % missing confirm byte has to be checked for: left unchecked, it arrives late and is read as the next reply
+            % (the next command discards it: see send())
             if isempty(confirmed)
                 error(['Pulse Pal did not confirm the operation: no reply arrived within ' ...
                        num2str(obj.port.Timeout) ' s. ' obj.NoReplyHint]);
-            elseif confirmed ~= 1
+            end
+            obj.replyPending = 0; % The whole reply is read
+            if confirmed ~= 1
                 error(['Pulse Pal rejected the operation. This usually means that a channel number, parameter code '...
                        'or value was out of range for the connected device.']);
             end
@@ -1233,6 +1376,7 @@ classdef PulsePalDevice < handle
             %   Encode and transmit the complete parameter set in one command: op 92, or op 73 on firmware v21. This is
             %   more efficient than item-wise data transfers. See "Op codes" in /Firmware/PROTOCOL.md.
             obj.checkSyncParams();
+            obj.unsentParams = {}; % All are sent below
             [~, targets] = ismember(obj.customTrainTarget, obj.CustomTrainTargetNames);
             [~, modes] = ismember(obj.triggerMode, obj.TriggerModeNames);
             TimeData = obj.roundHalfEven([obj.phase1Duration; obj.interPhaseInterval; obj.phase2Duration;...
@@ -1257,25 +1401,32 @@ classdef PulsePalDevice < handle
             end
             SingleByteParams = [SingleByteOutputParams(1:end) double(obj.linkTriggerChannel1)...
                 double(obj.linkTriggerChannel2) modes - 1];
-            obj.port.write([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
-                typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams], 'uint8');
+            obj.send([obj.OpMenuByte opCode typecast(uint32(TimeData(1:end)), 'uint8') ...
+                typecast(uint16(VoltageData(1:end)), 'uint8') SingleByteParams]);
             obj.confirmWrite;
         end
 
         function sendCustomTrain(obj, trainID, pulseTimes, voltages)
             %   Validate and transmit a custom train of pulses to Pulse Pal.
-            if length(pulseTimes) ~= length(voltages)
+            if ~isnumeric(pulseTimes) || ~isnumeric(voltages) || ~isreal(pulseTimes) || ~isreal(voltages) || ...
+                    ~all(isfinite(double(pulseTimes(:)))) || ~all(isfinite(double(voltages(:))))
+                error('Error: custom pulse times and voltages must be real numbers (NaN and Inf are not allowed).');
+            end
+            % One value per pulse, in a vector. The device reads as many times and voltages as the pulse count sent
+            % first, and takes the bytes after them as commands. length() of a matrix is its longest side, so a 2xN
+            % matrix of voltages passed as N pulses, and the N voltages left over reached the device as commands.
+            if (~isempty(pulseTimes) && ~isvector(pulseTimes)) || (~isempty(voltages) && ~isvector(voltages))
+                error(['Custom pulse times and voltages must each be a vector, one value per pulse. Received ' ...
+                       obj.sizeText(pulseTimes) ' pulse times and ' obj.sizeText(voltages) ' voltages.'])
+            end
+            if numel(pulseTimes) ~= numel(voltages)
                 error('There must be one voltage value for every timestamp');
             end
-            nPulses = length(pulseTimes);
+            nPulses = numel(pulseTimes);
             if nPulses == 0
                 % The device refuses an empty train too: it would hold no pulse times to play
                 error(['A custom train needs at least one pulse. To play nothing on a channel, set its customTrainID ' ...
                        'to a train that holds what it should play, or do not trigger it.'])
-            end
-            if ~isnumeric(pulseTimes) || ~isnumeric(voltages) || ~all(isfinite(double(pulseTimes(:)))) || ...
-                    ~all(isfinite(double(voltages(:))))
-                error('Error: custom pulse times and voltages must be numbers (NaN and Inf are not allowed).');
             end
             if nPulses > obj.maxCustomPulses
                 error(['Error: Attempted to send ' num2str(nPulses) ' pulses. Pulse Pal '...
@@ -1318,8 +1469,8 @@ classdef PulsePalDevice < handle
                 end
                 trainCode = [];
             end
-            obj.port.write([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses CandidateTimes]), 'uint8') ...
-                typecast(uint16(VoltageOutput), 'uint8')], 'uint8');
+            obj.send([obj.OpMenuByte opCode trainCode typecast(uint32([nPulses CandidateTimes]), 'uint8') ...
+                typecast(uint16(VoltageOutput), 'uint8')]);
             obj.confirmWrite;
         end
 
@@ -1334,7 +1485,7 @@ classdef PulsePalDevice < handle
                 error([context ': the file name must be 1 to 11 ASCII characters followed by .pps, e.g. '...
                        '''Protocol1.pps''.'])
             end
-            obj.port.write([obj.OpMenuByte 90 opByte numel(fileName) double(fileName)], 'uint8');
+            obj.send([obj.OpMenuByte 90 opByte numel(fileName) double(fileName)]);
             confirmed = 1;
             if obj.firmwareVersion > 21
                 confirmed = obj.port.read(1, 'uint8'); % Sent after the file operation has finished
@@ -1344,7 +1495,9 @@ classdef PulsePalDevice < handle
             if isempty(confirmed)
                 error(['Pulse Pal did not confirm ' context ': no reply arrived within ' num2str(obj.port.Timeout) ...
                        ' s. ' obj.NoReplyHint]);
-            elseif confirmed == 2
+            end
+            obj.replyPending = 0; % The whole reply is read (see send()), or on firmware v21 there is none
+            if confirmed == 2
                 % Pulse Pal 2 refuses while a channel plays: its microSD card shares the SPI bus with the DAC
                 verbs = {'saved', 'loaded', 'deleted'};
                 message = ['Pulse Pal 2 does not use its microSD card while a channel is playing, because the card ' ...
@@ -1380,11 +1533,12 @@ classdef PulsePalDevice < handle
                 error(['syncFromDevice() requires firmware v22 or newer.'...
                       newline 'Detected firmware is v' num2str(obj.firmwareVersion)])
             end
-            obj.port.write([obj.OpMenuByte 93], 'uint8');
+            obj.send([obj.OpMenuByte 93]);
             Msg = obj.port.read(178, 'uint8');
             if length(Msg) ~= 178
                 error(['Pulse Pal sent ' num2str(length(Msg)) ' of the 178 bytes of its parameters. ' obj.NoReplyHint])
             end
+            obj.replyPending = 0; % The whole reply is read (see send())
             obj.storing = true;
             cleanup = onCleanup(@() obj.endStoring());
             Pos = 1;
@@ -1407,6 +1561,9 @@ classdef PulsePalDevice < handle
             obj.linkTriggerChannel2 = Msg(Pos:Pos+3) > 0; Pos = Pos + 4;
             obj.triggerMode = obj.TriggerModeNames(min(Msg(Pos:Pos+1), 3) + 1);
             clear cleanup
+            % Changes made with autoSync off are discarded, but for continuousLoop: not read, a change to it is still
+            % unsent
+            obj.unsentParams = obj.unsentParams(strcmp(obj.unsentParams, 'continuousLoop'));
         end
 
         function endStoring(obj)
@@ -1482,9 +1639,15 @@ classdef PulsePalDevice < handle
             if ~isstruct(program) || ~isscalar(program) || ~isfield(program, 'params') || ~isstruct(program.params)
                 error([fileName ' is not a Pulse Pal program file: it has no params.'])
             end
+            [params, timestamps, voltages] = obj.programContents(program, fileName);
+        end
+
+        function [params, timestamps, voltages] = programContents(obj, program, source)
+            % The contents of a program file, decoded by jsondecode (see readProgramFile()). source names it in
+            % warnings: its file name, or the method given it.
             if isfield(program, 'format_version') && isnumeric(program.format_version) && ...
                     any(program.format_version > obj.ProgramFormatVersion)
-                warning('PulsePalDevice:newerProgramFile', [fileName ' was saved in a newer format (format_version ' ...
+                warning('PulsePalDevice:newerProgramFile', [source ': saved in a newer format (format_version ' ...
                         num2str(program.format_version) '): what this version does not know is skipped.'])
             end
             fileParams = program.params;
@@ -1495,7 +1658,7 @@ classdef PulsePalDevice < handle
             keys = cellfun(@PulsePalDevice.snakeCase, names, 'UniformOutput', false);
             unknown = setdiff(fieldnames(fileParams), keys, 'stable');
             if ~isempty(unknown)
-                warning('PulsePalDevice:unknownParams', [fileName ': skipped ' strjoin(unknown, ', ') ...
+                warning('PulsePalDevice:unknownParams', [source ': skipped ' strjoin(unknown, ', ') ...
                         ', which this version of PulsePalDevice does not have.'])
             end
             params = struct;
@@ -1506,6 +1669,26 @@ classdef PulsePalDevice < handle
             end
             timestamps = obj.customTrainTexts(program, 'custom_train_timestamps');
             voltages = obj.customTrainTexts(program, 'custom_train_voltages');
+        end
+
+        function params = matlabParamNames(obj, params)
+            % params with the Python class's names (phase1_voltage) renamed to this class's (phase1Voltage), for
+            % importParams(). Other fields are left as they are.
+            names = [obj.ParamNames {'triggerMode'}];
+            keys = cellfun(@PulsePalDevice.snakeCase, names, 'UniformOutput', false);
+            fields = fieldnames(params);
+            for i = 1:numel(fields)
+                match = find(strcmp(keys, fields{i}), 1);
+                if isempty(match)
+                    continue
+                end
+                if isfield(params, names{match})
+                    error('PulsePalDevice:sameParam', 'importParams(): %s and %s are the same parameter.', ...
+                          names{match}, fields{i})
+                end
+                params.(names{match}) = params.(fields{i});
+                params = rmfield(params, fields{i});
+            end
         end
 
         function texts = customTrainTexts(obj, program, key)
@@ -1553,6 +1736,11 @@ classdef PulsePalDevice < handle
             % A name as the Python class spells it: 'phase1Voltage' is 'phase1_voltage', 'customTrainID' is
             % 'custom_train_id'
             name = lower(regexprep(name, '([A-Z]+)', '_$1'));
+        end
+
+        function text = sizeText(value)
+            % An array's size, for messages: '2x100'
+            text = strjoin(arrayfun(@num2str, size(value), 'UniformOutput', false), 'x');
         end
 
         function params = defaultParams

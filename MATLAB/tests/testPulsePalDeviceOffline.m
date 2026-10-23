@@ -34,7 +34,9 @@ tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testA
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
     @testCustomBurstsNeedABurstDuration, @testAnEmptyCustomTrainIsRefused, @testANoReplyMentionsACommFailure, ...
     @testExportAndImportParams, @testProgramFiles, @testSyncFromDeviceStoresWhatTheDeviceHolds, ...
-    @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testStatus, @testPulsePal2AndFirmwareV21};
+    @testPortAndInfoAreReadOnly, @testMethodsReturnNothing, @testStatus, @testPulsePal2AndFirmwareV21, ...
+    @testCustomTrainArraysMustBeVectors, @testALostReplyIsDiscarded, @testAutoSyncCannotTurnOnWithChangesUnsent, ...
+    @testImportParamsTakesProgramFilesAndPythonNames};
 nFailed = 0;
 for i = 1:numel(tests)
     try
@@ -370,8 +372,13 @@ function testANoReplyMentionsACommFailure()
 port.silent = true;
 message = expectError(@() quietly(@() setProperty(P, 'phase1Voltage', [1 1 1 1])));
 assert(contains(message, 'COMM. FAILURE!') && contains(message, 'click its joystick'), message);
+% The next command first discards what arrives of the reply the first did not get, with a warning, and reads the
+% parameters back, which does not arrive either (see send())
+state = warning('off', 'PulsePalDevice:lostReply');
+restore = onCleanup(@() warning(state));
 message = expectError(@() quietly(@() P.syncFromDevice()));
 assert(contains(message, 'COMM. FAILURE!'), message);
+clear restore
 message = expectError(@() quietly(@() PulsePalDevice(port)));
 assert(contains(message, 'No reply to the handshake') && contains(message, 'COMM. FAILURE!'), message);
 end
@@ -495,6 +502,109 @@ assert(isequal(s, struct('playing', [1 3], 'triggerEdges', [3 0], 'channelStarts
     'status fields');
 end
 
+function testCustomTrainArraysMustBeVectors()
+% One value per pulse, in a vector. The pulse count was length(), a matrix's longest side, and the values sent were all
+% of it, so a 2xN matrix of voltages sent N more, which the device read as commands. Nothing is sent now.
+[P, port] = connect();
+volts = [sin((0:99)/10)*5; cos((0:99)/10)*5];
+message = expectError(@() P.sendCustomPulseTrain(1, (0:99)*0.001, volts));
+assert(contains(message, 'vector') && contains(message, '2x100'), message);
+message = expectError(@() P.sendCustomWaveform(1, 0.001, volts));
+assert(contains(message, 'vector') && contains(message, '2x100'), message);
+expectError(@() P.sendCustomPulseTrain(1, [0 0.2 0.4; 0.1 0.3 0.5], [1 2 3]));
+expectError(@() P.sendCustomPulseTrain(1, [0 0.1], [1 2 3]));
+assert(isempty(port.writes), 'a refused train was sent');
+P.sendCustomPulseTrain(1, [0; 0.1; 0.2], [1 2 3]); % Rows and columns, and one pulse as a number
+P.sendCustomPulseTrain(2, 0, 5);
+P.sendCustomWaveform(3, 0.001, [1; 2; 3]);
+assert(numel(port.writes) == 3 && all(cellfun(@numel, port.writes) == [3+4+3*6, 3+4+6, 3+4+3*6]), 'train sizes');
+end
+
+function testALostReplyIsDiscarded()
+% A reply that arrives after its read gave up (a timeout, or Ctrl-C) was read as the next command's reply, and put
+% every reply after it out of step. The next command now discards it first, with a warning, and as the device may have
+% taken the command, reads the parameters back (op 93).
+[P, port] = connect();
+port.silent = true;
+expectError(@() quietly(@() setProperty(P, 'phase1Voltage', [1 2 3 4])));
+port.silent = false;
+port.leaveUnread(1); % The confirm byte, late
+[id, ~, s] = expectWarning(@() P.status());
+assert(strcmp(id, 'PulsePalDevice:lostReply'), id);
+assert(isequal(cellfun(@(w) double(w(2)), port.writes), [91 93 101]), 'writes');
+assert(isequal(s.playing, [1 3]) && isequal(s.triggerEdges, [3 0]), 'status read out of step');
+P.phase1Voltage(2) = 4;
+assert(port.writes{end}(2) == 74 && port.NumBytesAvailable == 0, 'in step again');
+% A complete reply leaves nothing to discard
+lastwarn('', '');
+P.trigger(1); P.stop(); P.syncToDevice(); P.phase1Voltage(1) = 2;
+[~, id] = lastwarn();
+assert(isempty(id), 'warned of a lost reply that was not lost');
+end
+
+function testAutoSyncCannotTurnOnWithChangesUnsent()
+% Turning autoSync back on did not send the changes made with it off, so the device went on playing its old
+% parameters. Now it raises an error while there are any, naming them, and deleting the object warns of them.
+[P, port] = connect();
+P.autoSync = false;
+P.phase1Voltage(1) = 2;
+P.triggerMode{2} = 'Toggle';
+err = expectErrorStruct(@() setProperty(P, 'autoSync', true));
+assert(strcmp(err.identifier, 'PulsePalDevice:unsentChanges') && contains(err.message, 'phase1Voltage, triggerMode'), ...
+       err.message);
+assert(~P.autoSync && isempty(port.writes), 'autoSync');
+P.syncToDevice();
+P.autoSync = true;
+% syncFromDevice() discards them, but for continuousLoop, which the device does not report
+P.autoSync = false;
+P.phase1Voltage(1) = 3;
+P.continuousLoop(1) = true;
+P.syncFromDevice();
+message = expectError(@() setProperty(P, 'autoSync', true));
+assert(contains(message, 'continuousLoop') && ~contains(message, 'phase1Voltage'), message);
+P.setDefaultParams();
+P.autoSync = true;
+% importParams() turns autoSync off and on again around its changes, and sends them; if it fails, what was unsent before
+% it stays so
+P.importParams(struct('phase1Voltage', [2 2 2 2]));
+assert(P.autoSync, 'importParams() left autoSync off');
+P.autoSync = false;
+P.phase1Duration(1) = 0.002;
+expectError(@() P.importParams(struct('phase1Voltage', [11 0 0 0])));
+expectError(@() setProperty(P, 'autoSync', true));
+id = expectWarning(@() delete(P));
+assert(strcmp(id, 'PulsePalDevice:unsentChanges'), id);
+end
+
+function testImportParamsTakesProgramFilesAndPythonNames()
+% importParams() takes a whole program file read with jsondecode (its parameters), and the Python class's names; and
+% raises an error, sending nothing, when no field is a parameter. It only warned, and then sent the device its program
+% unchanged.
+[P, port] = connect();
+program = jsondecode(['{"format_version": 1, "params": {"phase1_voltage": [2, 2, 2, 2], "trigger_mode": ' ...
+                      '["Toggle", "Normal"]}, "custom_train_timestamps": ["", "", "", ""], "device_info": {}}']);
+P.importParams(program);
+assert(isequal(P.phase1Voltage, [2 2 2 2]) && strcmp(P.triggerMode{1}, 'Toggle'), 'program file');
+program.custom_train_timestamps{2} = '0, 0.1';
+id = expectWarning(@() P.importParams(program));
+assert(strcmp(id, 'PulsePalDevice:customTrainsNotLoaded'), id);
+% The Python class's names, as its export_params() returns them, saved with json
+params = jsondecode(['{"phase1_voltage": [3, 3, 3, 3], "custom_train_id": [0, 1, 0, 0], "trigger_mode": ["Gated", ' ...
+                     '"Gated"], "link_trigger_channel1": [true, false, false, false]}']);
+P.importParams(params);
+assert(P.phase1Voltage(1) == 3 && P.customTrainID(2) == 1 && strcmp(P.triggerMode{2}, 'Gated') && ...
+       P.linkTriggerChannel1(1), 'Python names');
+port.clearWrites();
+for params = {struct(), struct('format_version', 1, 'device_info', struct()), ...
+              struct('phase1Volatge', [2 2 2 2]), struct('autoSync', true)}
+    err = expectErrorStruct(@() P.importParams(params{1}));
+    assert(strcmp(err.identifier, 'PulsePalDevice:noParams'), err.message);
+end
+message = expectError(@() P.importParams(struct('phase1Voltage', [1 1 1 1], 'phase1_voltage', [2 2 2 2])));
+assert(contains(message, 'same parameter'), message);
+assert(isempty(port.writes) && P.phase1Voltage(1) == 3, 'a refused import was sent');
+end
+
 function testPulsePal2AndFirmwareV21()
 port = SimulatedPulsePalPort(2, 22);
 P = PulsePalDevice(port);
@@ -526,10 +636,15 @@ P = PulsePalDevice(port);
 port.clearWrites();
 end
 
-function [id, message] = expectWarning(func)
-% Runs func, and returns the identifier and message of the last warning it raised, without showing it
+function [id, message, result] = expectWarning(func)
+% Runs func, and returns the identifier and message of the last warning it raised, without showing it, and func's
+% result if asked for
 lastwarn('', '');
-evalc('func();');
+if nargout > 2
+    evalc('result = func();');
+else
+    evalc('func();');
+end
 [message, id] = lastwarn();
 if isempty(id)
     error('no warning was raised by %s', func2str(func));
@@ -537,10 +652,14 @@ end
 end
 
 function message = expectError(func)
+err = expectErrorStruct(func);
+message = err.message;
+end
+
+function err = expectErrorStruct(func)
 try
     func();
 catch err
-    message = err.message;
     return
 end
 error('no error was raised by %s', func2str(func));

@@ -757,6 +757,73 @@ def test_a_failed_connection_sends_the_disconnect_op_only_to_a_wave_pal():
     assert command(81) not in fake.writes
 
 
+def interrupt_next_read(fake):
+    """Make the fake's next read raise KeyboardInterrupt, as Ctrl-C between a command's write and its reply does.
+    The reply stays waiting, as the device sent it."""
+    read = fake.read
+
+    def interrupted(n):
+        fake.read = read
+        raise KeyboardInterrupt
+
+    fake.read = interrupted
+
+
+def test_a_reply_left_unread_is_discarded_and_its_setting_sent_again():
+    """A setting interrupted after its write (Ctrl-C) leaves its confirm byte to arrive later. Read as the next
+    command's reply, it would put every reply after it a byte late. The next command discards it first, with a
+    warning, and as the device may have taken the setting, sends it again as this object holds it: Wave Pal cannot
+    report its settings."""
+    device, fake = connect()
+    interrupt_next_read(fake)
+    expect_error(device.loop_mode.__setitem__, 1, True, error=KeyboardInterrupt)
+    assert device.loop_mode[1] is False and fake.in_waiting == 1
+    fake.writes.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.status()
+    assert "op 'O'" in str(caught[0].message) and "sent again" in str(caught[0].message), caught[0].message
+    assert caught[0].filename == __file__  # Points at the script's line, so that it shows each time
+    assert fake.ops() == ["O", "G"] and fake.writes[0] == command("O", bytes(4)) and fake.in_waiting == 0
+
+    # A lost change of output range: sent again, and the waveforms loaded again, since a range change unloads them
+    device.load_waveform(1, [0, 5], 1)
+    interrupt_next_read(fake)
+    expect_error(setattr, device, "output_range", "-5V:5V", error=KeyboardInterrupt)
+    assert fake.range_index == 2 and 1 not in fake.loaded and device.output_range == "-10V:10V"
+    fake.writes.clear()
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        device.stop()
+    assert fake.ops() == ["R", "L", "X"] and fake.range_index == 3, fake.ops()
+    assert fake.loaded[1].tolist() == [32768, round(15 / 20 * 65535)]
+
+    # A lost reply to a command that carries no setting is discarded, and nothing is sent again
+    interrupt_next_read(fake)
+    expect_error(device.status, error=KeyboardInterrupt)
+    fake.writes.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.trigger(1)
+    assert "op 'G'" in str(caught[0].message) and "sent again" not in str(caught[0].message)
+    assert fake.ops() == ["P"] and fake.in_waiting == 0
+
+
+def test_misspelled_and_matlab_names_are_refused():
+    """Assigning an attribute WavePalDevice does not have made one of its own, and programmed nothing."""
+    device, fake = connect()
+    for name, meant in (("samplingRate", "sampling_rate"), ("loopmode", "loop_mode"),
+                        ("currentWaveform", "current_waveform"), ("my_flag", None)):
+        error = expect_error(setattr, device, name, [1, 1, 1, 1], error=AttributeError)
+        assert f"WavePalDevice has no setting {name!r}" in str(error), error
+        assert (f"Did you mean {meant!r}" in str(error)) == (meant is not None), error
+        assert name not in vars(device)
+    assert fake.writes == []
+    device.sampling_rate = 20000  # The settings, and private attributes, are assigned as before
+    device._scratch = 1
+    assert fake.ops() == ["S", "D"]
+
+
 def main():
     tests = [
         value for name, value in sorted(globals().items())

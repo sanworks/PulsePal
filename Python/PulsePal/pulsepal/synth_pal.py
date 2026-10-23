@@ -157,6 +157,10 @@ _MAX_VOLTAGE_UV = 10_000_000  # Every output voltage stays within +/-10 V
 _CHANNEL_SETTINGS = ("waveform", "peak_to_peak", "fixed_voltage", "mean_voltage", "resting_voltage",
                      "play_duration", "on_ramp_duration", "off_ramp_duration", "trigger_mode",
                      "link_trigger_channel1", "link_trigger_channel2")
+_SETTING_NAMES = ("frequency", *_CHANNEL_SETTINGS, "auto_sync")  # The names a script assigns
+# The ops whose reply _write_command() does not track: those with no reply ('P', 'X', 81 and 89), and the handshake
+# (72), whose reply read_handshake_reply() reads until the device is quiet
+_OPS_WITHOUT_TRACKED_REPLY = frozenset({72, 81, 89, ord("P"), ord("X")})
 
 
 def _samples_per_cycle(centihz):
@@ -348,6 +352,11 @@ class SynthPalDevice:
     _HARDWARE_INFO_FORMAT = "<BBIIIII"
     _STATUS_FORMAT = "<BI4BII"
     _ALL_CHANNELS = 0x0F
+    # The ops that change settings: if the reply to one is lost, they are read back (_discard_lost_reply())
+    _SETTING_OPS = frozenset(map(ord, "FWAVMDBEITU"))
+
+    _reply_pending = None  # The op code of a command whose reply has not been read in full yet (see _write_command())
+    _unsent = frozenset()  # The settings assigned with auto_sync off since the settings were last sent or read
 
     def __init__(self, port_name=None, *, serial_number=None, timeout=10):
         """Open a connection to a Synth Pal.
@@ -486,6 +495,7 @@ class SynthPalDevice:
             self.off_ramp_duration = [0] * 4
             self.trigger_mode = ["Normal"] * 2
             self._set_trigger_links([False] * 4, [False] * 4)
+            self._unsent = frozenset()  # Every setting has been sent
         finally:
             self._auto_sync = auto_sync
 
@@ -526,6 +536,7 @@ class SynthPalDevice:
                     f"Synth Pal rejected the frequency {value!r} Hz.")
         else:
             samples_per_cycle = _samples_per_cycle(centihz)
+            self._unsent = self._unsent | {"frequency"}  # Until sync_to_device() sends it (see auto_sync)
         self._frequency = centihz / 100
         self._samples_per_cycle = samples_per_cycle
 
@@ -543,15 +554,25 @@ class SynthPalDevice:
         of them at once. Use it to store the next trial's settings for a
         param sync edge (see `SynthPalDevice.trigger_mode`), or to change
         several settings in one command. Turning it back on does not send
-        changes made meanwhile: call `SynthPalDevice.sync_to_device` first.
-        A `SynthPalDevice.batch` block does both for you. `trigger`,
-        `stop`, `status` and `set_default_params` act at once either way.
+        changes made meanwhile, so it raises `pulsepal.PulsePalError` while
+        there are any: call `SynthPalDevice.sync_to_device` first to send
+        them, or `SynthPalDevice.sync_from_device` to discard them. A
+        `SynthPalDevice.batch` block does it all for you. `close()` warns of
+        changes never sent. `trigger`, `stop`, `status` and
+        `set_default_params` act at once either way.
         """
         return self._auto_sync
 
     @auto_sync.setter
     def auto_sync(self, value):
-        self._auto_sync = to_bool(value, "auto_sync")
+        value = to_bool(value, "auto_sync")
+        if value and self._unsent:
+            # Turned on, auto_sync would leave them unsent, and the device playing its old settings
+            raise PulsePalError(
+                f"Changes made with auto_sync off have not been sent to the device: {self._unsent_names()}. Call "
+                "sync_to_device() to send them, or sync_from_device() to discard them, before turning auto_sync on."
+            )
+        self._auto_sync = value
 
     def batch(self):
         """Change several settings, and send them in one command.
@@ -585,7 +606,8 @@ class SynthPalDevice:
         other channel's to `SynthPalDevice.peak_to_peak`. This object keeps
         the other one, reduced if need be to suit the mean voltage read
         back. In param sync mode, it reads the settings the device plays
-        now, not a set waiting for the next edge.
+        now, not a set waiting for the next edge. Changes made with
+        `SynthPalDevice.auto_sync` off and not yet sent are discarded.
 
         Raises:
             PulsePalError: If the device does not reply.
@@ -617,6 +639,7 @@ class SynthPalDevice:
         self._link_trigger_channel2._store([bool(link) for link in values[33:37]])
         self._trigger_mode._store([TRIGGER_MODES[code] for code in values[37:39]])
         self._device_waveform, self._device_amplitude_uv, self._device_mean_uv = waveforms, amplitudes, means
+        self._unsent = frozenset()  # Every setting is read
 
     def export_params(self):
         """Return every setting, as a dict of plain values and lists.
@@ -761,6 +784,8 @@ class SynthPalDevice:
         self._check_levels(levels["peak_to_peak"], levels["mean_voltage"], "configure")
         if self._auto_sync:
             self._send_levels(*self._device_levels(**levels))
+        else:
+            self._unsent = self._unsent | set(new_values)  # Until sync_to_device() sends them (see auto_sync)
         for name in levels:
             if name in new_values:
                 getattr(self, name)._store(new_values[name])
@@ -1168,6 +1193,10 @@ class SynthPalDevice:
         if getattr(self, "_closed", True):
             return
         self._closed = True
+        if send_disconnect and self._unsent:
+            _common.warn(f"SynthPalDevice closed with changes made with auto_sync off that were never sent to the "
+                         f"device: {self._unsent_names()}.")
+        self._reply_pending = None  # Nothing more is read, so a reply still to come needs no discarding
         try:
             if send_disconnect and self.port and self.port.is_open:
                 self._write_command(self._OP_DISCONNECT)
@@ -1198,6 +1227,13 @@ class SynthPalDevice:
             # Destructors should not raise; the serial object may already be
             # gone during interpreter shutdown.
             pass
+
+    def __setattr__(self, name, value):
+        """Refuse a public attribute that is not a setting, such as a misspelled one: it would program nothing (see
+        _common.refuse_unknown_attribute())."""
+        if name[0] != "_":
+            _common.refuse_unknown_attribute(self, name, _SETTING_NAMES)
+        super().__setattr__(name, value)
 
     def __repr__(self):
         """Describe the device and its settings, e.g. with `print(S)`."""
@@ -1310,6 +1346,8 @@ class SynthPalDevice:
         self._check_levels(levels["peak_to_peak"], levels["mean_voltage"], name)
         if self._auto_sync:
             self._send_levels(*self._device_levels(**levels))
+        else:
+            self._unsent = self._unsent | {name}  # Until sync_to_device() sends it (see auto_sync)
         return values
 
     def _apply_waveform(self, values):
@@ -1380,6 +1418,8 @@ class SynthPalDevice:
         values = self._normalize("resting_voltage", values)
         if self._auto_sync:
             self._send_setting("resting_voltage", self._OP_SET_RESTING_VOLTAGE, values)
+        else:
+            self._unsent = self._unsent | {"resting_voltage"}
         return values
 
     def _apply_play_duration(self, values):
@@ -1395,6 +1435,8 @@ class SynthPalDevice:
         values = self._normalize(name, values)
         if self._auto_sync:
             self._send_setting(name, op, values)
+        else:
+            self._unsent = self._unsent | {name}
         return values
 
     def _send_setting(self, name, op, values):
@@ -1415,6 +1457,8 @@ class SynthPalDevice:
                 bytes(TRIGGER_MODES.index(name) for name in names),
             )
             self._read_ack("setting trigger_mode")
+        else:
+            self._unsent = self._unsent | {"trigger_mode"}
         return names
 
     # One op programs both trigger channels' links, so each list is sent
@@ -1422,11 +1466,15 @@ class SynthPalDevice:
     def _apply_trigger_channel1_links(self, values):
         links1 = [to_bool(v, "link_trigger_channel1") for v in values]
         self._send_trigger_links(links1, self._link_trigger_channel2[1:])
+        if not self._auto_sync:
+            self._unsent = self._unsent | {"link_trigger_channel1"}
         return links1
 
     def _apply_trigger_channel2_links(self, values):
         links2 = [to_bool(v, "link_trigger_channel2") for v in values]
         self._send_trigger_links(self._link_trigger_channel1[1:], links2)
+        if not self._auto_sync:
+            self._unsent = self._unsent | {"link_trigger_channel2"}
         return links2
 
     def _set_trigger_links(self, links1, links2):
@@ -1442,14 +1490,18 @@ class SynthPalDevice:
             self._read_ack("setting the trigger channel links")
 
     def _snapshot(self):
-        """All settings, for batch() to restore if its block fails."""
+        """All settings, and which are unsent, for batch() to restore if its block fails."""
         settings = {name: list(getattr(self, name))[1:] for name in _CHANNEL_SETTINGS}
-        return settings, self._frequency, self._samples_per_cycle
+        return settings, self._frequency, self._samples_per_cycle, self._unsent
 
     def _restore(self, snapshot):
-        settings, self._frequency, self._samples_per_cycle = snapshot
+        settings, self._frequency, self._samples_per_cycle, self._unsent = snapshot
         for name, values in settings.items():
             getattr(self, name)._store(values)
+
+    def _unsent_names(self):
+        """The settings assigned with auto_sync off and not yet sent, for messages, in the class's order."""
+        return ", ".join(name for name in _SETTING_NAMES if name in self._unsent)
 
     def _check_sync(self):
         """Check the whole set before sync_to_device() sends it."""
@@ -1457,6 +1509,7 @@ class SynthPalDevice:
 
     def _send_sync(self):
         """Send every setting with op 85 ('U'). The device checks the whole set, so no order matters."""
+        self._unsent = frozenset()  # All are sent below
         waveforms, amplitudes, means = self._device_levels(
             self._waveform[1:], self._peak_to_peak[1:], self._fixed_voltage[1:], self._mean_voltage[1:])
         links = [int(link) for link in (*self._link_trigger_channel1[1:],
@@ -1508,7 +1561,17 @@ class SynthPalDevice:
     # ------------------------------------------------------------------
 
     def _write_command(self, op_code, data=b""):
-        """Send one command, with its framing byte, in a single write."""
+        """Send one command, with its framing byte, in a single write.
+
+        A command whose reply was not read in full, because the read timed out or was interrupted (Ctrl-C), leaves
+        that reply, or the rest of it, to arrive later. Read as the reply to the next command, it would put every
+        reply after it out of step. So it is discarded first (_discard_lost_reply()), and this command's reply, if it
+        has one, is pending until _read_raw() has read it, as in PulsePalDevice.
+        """
+        if self._reply_pending is not None:
+            self._discard_lost_reply()
+        if op_code not in _OPS_WITHOUT_TRACKED_REPLY:
+            self._reply_pending = op_code  # Before the write: a Ctrl-C can come as soon as it returns
         message = bytes([self._OP_MENU_BYTE, op_code]) + data
         bytes_written = self.port.write(message)
         if bytes_written != len(message):
@@ -1517,14 +1580,40 @@ class SynthPalDevice:
                 f"{len(message)} byte(s)."
             )
 
+    def _discard_lost_reply(self):
+        """Discard what arrives of a reply that was not read in full (see _write_command()), and bring this object
+        back in step with the device.
+
+        The command may have changed settings, unknown to this object: an assignment interrupted after its write,
+        for one, which the device took and this object did not. So after one of _SETTING_OPS, they are read back
+        (op 'R'), outside param sync mode, where op 'R' returns the settings playing rather than a set stored for the
+        next sync edge.
+        """
+        op = self._reply_pending
+        self._reply_pending = None
+        n_late = len(_common.read_until_quiet(self.port))
+        read_back = op in self._SETTING_OPS and "Param Sync" not in list(self._trigger_mode)[1:]
+        _common.warn_lost_reply(f"op {chr(op)!r}", n_late,
+                                ", and the settings were read back from the device" if read_back else "")
+        if read_back:
+            try:
+                self.sync_from_device()
+            except PulsePalError as exc:
+                raise PulsePalError(
+                    f"Synth Pal did not send its settings, read back after the reply to an earlier command was lost. "
+                    f"{_common.NO_REPLY_HINT}"
+                ) from exc
+
     def _read_raw(self, n_bytes):
-        """Read exactly n_bytes from the serial port."""
+        """Read exactly n_bytes from the serial port: the whole reply to the command last sent, which is then no
+        longer pending (see _write_command()). Only connecting reads a reply in more than one call."""
         message = self.port.read(n_bytes)
         if len(message) < n_bytes:
             raise PulsePalError(
                 f"Synth Pal sent {len(message)} of the {n_bytes} byte(s) of its reply within "
                 f"{self.port.timeout} s. {_common.NO_REPLY_HINT}"
             )
+        self._reply_pending = None
         return message
 
     def _read_ack(self, context):
