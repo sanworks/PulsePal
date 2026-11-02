@@ -47,7 +47,9 @@ bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is
 Pulse Pal also answers op 103, with which the current Pulse Pal classes connect: the session's
 times are then in the device's own timer cycles (10 µs on Pulse Pal 3), where op 72 makes them
 50 µs cycles, as every older client sends them (see "Time units" in `/Firmware/PROTOCOL.md`).
-Older firmware, Wave Pal and Synth Pal ignore op 103, and the classes fall back to op 72. A test
+Older firmware, Wave Pal and Synth Pal ignore op 103, and the classes fall back to op 72. A Pulse
+Pal 3 answers nothing for its first 5 s, then answers op 103 and op 72 together, and the classes
+then send op 103 again (see "Connecting" in `/Firmware/PROTOCOL.md`). A test
 harness that pings a Pulse Pal mid-session sends op 103: op 72 would switch the session's unit.
 All three answer op 100 with the circuit board revision, which they read from five pins at
 startup (`readHardwareRevision()`), and op 102 with the USB serial number. The Python and MATLAB
@@ -167,6 +169,12 @@ share these conventions. Keep them in new code.
 - **The Python GUI** (`pulsepal/gui.py`) sizes some parts in pixels, measured against Windows'
   9 point Segoe UI, and scales them with the desktop's font (`_scaled()`). Check a layout
   change with a larger desktop font, as on Ubuntu, and in dark mode, which uses the clam theme.
+- **The MATLAB GUI** (`@PulsePalDevice/gui.m`) places its components in pixels. On Linux,
+  MATLAB R2025b is scaled for a high resolution screen by its Zoom setting, which draws a
+  uifigure zoomed in a window sized unzoomed, so `fitWindowToZoom()` enlarges the window before
+  it is shown, allowing for the toolbar's 27 pixels. Check a change to the window's size or
+  toolbar at a zoom of 200 too (`s = settings; s.matlab.desktop.Zoom.PersonalValue = 200`,
+  which the next figure takes at once).
 
 ## Checks you can run without a device
 

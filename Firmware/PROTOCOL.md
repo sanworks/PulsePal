@@ -42,9 +42,15 @@ The Python, MATLAB and C++ classes connect in this order:
 1. Op 103 (handshake, with times in the device's own cycles). The reply is `75` ('K') and the
    firmware version. Pulse Pal firmware from before October 2026 ignores op 103, as Wave Pal and
    Synth Pal do: with no reply within 0.3 s, the classes send op 72 (handshake, with times in 50 µs
-   cycles), which every Pulse Pal firmware answers in the same way. A device running
-   Wave Pal firmware (`/Firmware/WavePal`) replies `87` ('W') instead, and one running Synth
-   Pal firmware (`/Firmware/SynthPal`) `83` ('S'). The Python, MATLAB and C++ classes then
+   cycles), which every Pulse Pal firmware answers in the same way. A Pulse Pal 3 answers nothing
+   for about 5 s after it starts, while it shows its splash screen and opens its microSD card, and
+   then answers the commands that waited: op 103 and op 72 together, op 103 first. Op 72, answered
+   last, sets the session's unit to 50 µs cycles. So when the reply to op 72 comes with more bytes
+   than one reply, from Pulse Pal firmware v22 or newer, the classes send op 103 again, which the
+   device, now listening, answers at once. They wait up to 10 s for the reply to op 72 (the
+   Python and MATLAB classes' default port timeout). A device running Wave Pal firmware
+   (`/Firmware/WavePal`) replies `87` ('W') instead, and one running Synth Pal firmware
+   (`/Firmware/SynthPal`) `83` ('S'). The Python, MATLAB and C++ classes then
    say which firmware the device runs, and that it needs Pulse Pal firmware. They refuse
    firmware older than v21, and connect to v21 with a notice that v22 is available.
    A firmware version newer than the client knows is used, with a warning: new firmware only

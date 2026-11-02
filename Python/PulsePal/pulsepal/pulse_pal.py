@@ -631,7 +631,7 @@ class PulsePalDevice:
 
     _CURRENT_FIRMWARE_VERSION = 22
     _OLDEST_FIRMWARE_SUPPORTED = 21
-    _BAUD_RATE = 12000000  # USB serial ignores the baud rate
+    _BAUD_RATE = _common.BAUD_RATE  # USB serial ignores it (see _common.BAUD_RATE)
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _HANDSHAKE_OPCODE = _common.OP_HANDSHAKE
@@ -745,14 +745,23 @@ class PulsePalDevice:
         # command it had not reached yet, is skipped by read_handshake_reply().
         self.port.reset_input_buffer()
         # Op 103: the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). Firmware from before
-        # October 2026, Wave Pal and Synth Pal ignore it, and answer op 72, whose times are in 50 us cycles. A device that
-        # answers op 103 too late counts the session's times in 50 us cycles too, after the op 72 that follows; either
-        # way op 94 reports the session's unit, which the class then uses.
+        # October 2026, Wave Pal and Synth Pal ignore it, and answer op 72, whose times are in 50 us cycles. Either way
+        # op 94 reports the session's unit, which the class then uses.
         self._write_serial((self._OP_MENU_BYTE, self._HANDSHAKE_DEVICE_CYCLES_OPCODE), "uint8")
         reply = _common.read_handshake_reply(self.port, timeout=self._HANDSHAKE_DEVICE_CYCLES_TIMEOUT)
         if reply is None:
             self._write_serial((self._OP_MENU_BYTE, self._HANDSHAKE_OPCODE), "uint8")
-            reply = _common.read_handshake_reply(self.port)
+            received = _common.read_handshake_bytes(self.port)
+            reply = None if received is None else _common.handshake_reply_from(received)
+            if reply is not None and reply[0] == self._HANDSHAKE_RESPONSE and reply[1] > 21 and len(received) > 5:
+                # More than one reply arrived: the device was busy when op 103 came, and answered it with op 72. A Pulse
+                # Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens its
+                # microSD card (measured on Pulse Pal 3: op 103 and op 72 sent 0.2 to 3.5 s after the port opened were
+                # answered together 5.0 s after it opened). Op 72, answered last, would leave the session in 50 us
+                # cycles, so op 103 is sent again, now that the device is listening. If the extra bytes were a late
+                # reply to an earlier session, and the firmware ignores op 103, this waits 0.3 s more.
+                self._write_serial((self._OP_MENU_BYTE, self._HANDSHAKE_DEVICE_CYCLES_OPCODE), "uint8")
+                reply = _common.read_handshake_reply(self.port, timeout=self._HANDSHAKE_DEVICE_CYCLES_TIMEOUT) or reply
         if reply is None:
             raise PulsePalError(
                 f"No reply to the handshake from the device on {port_name}. Is it a Pulse Pal? "

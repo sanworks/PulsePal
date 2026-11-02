@@ -523,7 +523,8 @@ obj.ui.lastProgramPath = '';
 % Push the local copy to the GUI
 setUIParams(obj);
 
-% Show the figure after all components are created
+% Show the figure after all components are created, in a window sized for the desktop zoom
+fitWindowToZoom(obj.ui.Figure);
 obj.ui.Figure.Visible = 'on';
 end
 
@@ -1013,4 +1014,31 @@ if isempty(items)
     return
 end
 values = reshape(str2double(items), 1, []);
+end
+
+function fitWindowToZoom(fig)
+% Enlarges the editor's window by the desktop zoom, before it is shown. On Linux, MATLAB R2025b is scaled for a high
+% resolution screen by its Zoom setting (s.matlab.desktop.Zoom, a percentage); DisplayScaleFactor leaves a uifigure at
+% 1x. A uifigure is then laid out and drawn zoomed, but its window opens at the size its Position names in screen
+% pixels: at 200%, the 725 x 480 editor opened 363 x 227, showing only the panels at its bottom left, and Position
+% read back as 363 x 227. Its toolbar is added to the window at the toolbar's unzoomed height, 27 pixels, and drawn
+% zoomed, so the height allows for it. AutoResizeChildren is turned off first: it would scale the components up to the
+% enlarged size, and down again when the window reports its zoomed size, and the two do not cancel. Measured on Ubuntu
+% with R2025b at zooms of 125, 150 and 200.
+if ~strcmp(computer('arch'), 'glnxa64')
+    return
+end
+try
+    s = settings;
+    zoomFactor = s.matlab.desktop.Zoom.ActiveValue / 100;
+catch
+    return % A MATLAB without the Zoom setting
+end
+if zoomFactor == 1
+    return
+end
+toolbarHeight = 27;
+fig.AutoResizeChildren = 'off';
+fig.Position(3:4) = round([fig.Position(3) * zoomFactor, ...
+                           (fig.Position(4) + toolbarHeight) * zoomFactor - toolbarHeight]);
 end

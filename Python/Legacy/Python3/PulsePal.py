@@ -22,6 +22,7 @@ from ArCOM import ArCom
 from decimal import Decimal
 import numpy as np
 import math
+import sys
 
 
 class PulsePalObject(object):
@@ -43,7 +44,10 @@ class PulsePalObject(object):
         Raises:
             PulsePalError: If there is a problem initializing the connection.
         """
-        self.Port = ArCom(port_name, 12000000)  # ArCom (Arduino Communication) wraps PySerial
+        # USB serial ignores the baud rate. Off Windows it is 4000000, as in the pulsepal package: on Ubuntu 26.04,
+        # pyserial could not open a port at 12000000 (termios.error 22, Invalid argument)
+        baud_rate = 12000000 if sys.platform == "win32" else 4000000
+        self.Port = ArCom(port_name, baud_rate)  # ArCom (Arduino Communication) wraps PySerial
         #                                         to simplify data transactions with Arduino
         self._model = 0
         self._dac_bitMax = self._toDecimal(0)

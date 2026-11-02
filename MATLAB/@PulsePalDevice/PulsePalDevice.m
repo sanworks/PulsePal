@@ -287,18 +287,34 @@ classdef PulsePalDevice < handle
             flush(obj.port);
             % Op 103: the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). Firmware from
             % before October 2026, Wave Pal and Synth Pal ignore it, and answer op 72, whose times are in 50 us cycles.
-            % A device that answers op 103 too late counts the session's times in 50 us cycles too, after the op 72
-            % that follows: either way op 94 reports the session's unit, which the class then uses. Polled, not read,
-            % so that no read warns of a timeout.
+            % Either way op 94 reports the session's unit, which the class then uses. Polled, not read, so that no read
+            % warns of a timeout.
             obj.send([obj.OpMenuByte 103]);
             waitStart = tic;
             while obj.port.NumBytesAvailable < 5 && toc(waitStart) < 0.3
                 pause(0.001);
             end
-            if obj.port.NumBytesAvailable < 5
+            sentOp72 = obj.port.NumBytesAvailable < 5;
+            if sentOp72
                 obj.send([obj.OpMenuByte 72]);
             end
-            reply = obj.readHandshakeReply(); % 'K' (75), then the firmware version (uint32)
+            [reply, nReceived] = obj.readHandshakeReply(); % 'K' (75), then the firmware version (uint32)
+            if sentOp72 && nReceived > 5 && reply(1) == 75 && typecast(uint8(reply(2:5)), 'uint32') > 21
+                % More than one reply arrived: the device was busy when op 103 came, and answered it with op 72. A
+                % Pulse Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens
+                % its microSD card (measured on Pulse Pal 3: op 103 and op 72 sent 0.2 to 3.5 s after the port opened
+                % were answered together 5.0 s after it opened). Op 72, answered last, would leave the session in 50 us
+                % cycles, so op 103 is sent again, now that the device is listening. If the extra bytes were a late
+                % reply to an earlier session, and the firmware ignores op 103, this waits 0.3 s more.
+                obj.send([obj.OpMenuByte 103]);
+                waitStart = tic;
+                while obj.port.NumBytesAvailable < 5 && toc(waitStart) < 0.3
+                    pause(0.001);
+                end
+                if obj.port.NumBytesAvailable >= 5
+                    reply = obj.readHandshakeReply();
+                end
+            end
             HandShakeOkByte = [];
             replyVersion = 0;
             if numel(reply) == 5
@@ -970,9 +986,10 @@ classdef PulsePalDevice < handle
     end
 
     methods (Access = private)
-        function reply = readHandshakeReply(obj)
+        function [reply, nReceived] = readHandshakeReply(obj)
             % The reply to op 72, the handshake, once it has been sent: the firmware's letter, then its version (5
-            % bytes), or fewer bytes if the device did not send 5 within the port's Timeout. The reply is the last 5
+            % bytes), or fewer bytes if the device did not send 5 within the port's Timeout. nReceived is the number of
+            % bytes read, more than 5 if the device answered an earlier command with it. The reply is the last 5
             % bytes the device sends before it goes quiet. A command that an earlier session sent just before it closed
             % can still be waiting on the device when this session connects, e.g. while the device redraws its screen.
             % The device answers it first: after the constructor discarded the bytes waiting, and before the handshake.
@@ -981,6 +998,7 @@ classdef PulsePalDevice < handle
             % and for at most 1 s, so that a device that never stops sending is refused rather than waited for. The
             % three classes and the Python and C++ clients read the handshake this way.
             reply = obj.port.read(5, 'uint8'); % Waits for a whole reply, up to the port's Timeout
+            nReceived = numel(reply);
             if numel(reply) < 5
                 return
             end
@@ -995,6 +1013,7 @@ classdef PulsePalDevice < handle
                     pause(0.001);
                 end
             end
+            nReceived = numel(reply);
             reply = reply(end-4:end);
         end
 

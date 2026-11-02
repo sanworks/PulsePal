@@ -36,6 +36,8 @@ classdef SimulatedPulsePalPort < handle
         circuitBoardRevision % The circuit board revision op 100 reports: 5 on Pulse Pal 3, 0 on Pulse Pal 2
         silent = false % true: reply to nothing, as a device showing COMM. FAILURE! until its joystick is clicked
         answersOp103 = true % false: ignore op 103, as firmware from before October 2026 does (and Wave Pal, Synth Pal)
+        starting = false % true: still starting, as a Pulse Pal 3 is for about 5 s: commands wait until op 72 has come
+                         % too, and are then answered together, op 103 first, and later ones at once
         cyclePeriod = 50 % The timer cycle, in us. At 10 (Pulse Pal 3), an op 72 session's times are in 50 us cycles
         status = uint8([5 typecast(uint32([3 0 2 0 1 0 1]), 'uint8')]) % The reply to op 101: channels 1 and 3 playing,
                                                                        % then the counters
@@ -45,6 +47,7 @@ classdef SimulatedPulsePalPort < handle
         hardwareVersion
         firmwareVersion
         replies = uint8([]) % Bytes waiting to be read
+        waitingCommands = {} % Commands written while starting, not yet answered
         sessionCycles = 1 % The device cycles in each time unit of the session: 50 us cycles after op 72
     end
 
@@ -74,6 +77,18 @@ classdef SimulatedPulsePalPort < handle
         function write(obj, data, ~)
             bytes = uint8(double(data(:)'));
             obj.writes{end+1} = bytes;
+            if obj.starting
+                obj.waitingCommands{end+1} = bytes;
+                if numel(bytes) < 2 || bytes(2) ~= 72
+                    return
+                end
+                obj.starting = false;
+                for i = 1:numel(obj.waitingCommands)
+                    obj.respond(obj.waitingCommands{i});
+                end
+                obj.waitingCommands = {};
+                return
+            end
             obj.reply(obj.lateReply);
             obj.lateReply = uint8([]);
             obj.respond(bytes);

@@ -318,7 +318,7 @@ class WavePalDevice:
     """Properties of the connected device. See `DeviceInfo`."""
 
     _CURRENT_FIRMWARE_VERSION = 1
-    _BAUD_RATE = 12000000  # USB serial ignores the baud rate
+    _BAUD_RATE = _common.BAUD_RATE  # USB serial ignores it (see _common.BAUD_RATE)
 
     _OP_MENU_BYTE = _common.OP_MENU_BYTE
     _OP_HANDSHAKE = _common.OP_HANDSHAKE

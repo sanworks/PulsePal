@@ -28,7 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 function testPulsePalDeviceOffline()
 tests = {@testConnectionProgramsTheDefaults, @testStaleBytesAreDiscarded, @testALateReplyIsSkipped, ...
-    @testHandshakeFallsBackToOp72, @testATenMicrosecondCycleConvertsExactly, @testOtherFirmwareVersionsWarn, ...
+    @testHandshakeFallsBackToOp72, @testADeviceStillStartingGetsOp103Again, @testATenMicrosecondCycleConvertsExactly, @testOtherFirmwareVersionsWarn, ...
     @testDefaultParametersMessage, @testSingleValuesAreRefused, @testAssignmentsSendTheChannelsTheyChange, ...
     @testTimesHoldTheValueTheDevicePlays, @testTimesAreAtMost9999s, @testMinimumPulseByHardwareVersion, @testCustomPulseTimesAreMultiplesOfTheMinimumPulse, ...
     @testSettingsFiles, @testCalibrationNeedsPulsePal3, @testFormatWithoutConfirmation, ...
@@ -117,6 +117,20 @@ for cyclePeriod = [50 10]
     assert(isequal(port.writes, {uint8([213 74 4 1 typecast(uint32(4), 'uint8')])}), '4 cycles of 50 us');
     delete(P);
 end
+end
+
+function testADeviceStillStartingGetsOp103Again()
+% A Pulse Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens its microSD
+% card, then answers op 103 and the op 72 sent after it together. Op 72, answered last, would leave the session's times
+% in 50 us cycles, so the class sends op 103 again, and the session's times are in 10 us cycles.
+port = SimulatedPulsePalPort();
+port.cyclePeriod = 10;
+port.starting = true;
+P = PulsePalDevice(port);
+assert(isequal(port.writes(1:4), {uint8([213 103]), uint8([213 72]), uint8([213 103]), uint8([213 94])}), ...
+    'op 103 again after op 72');
+assert(P.info.cyclePeriod_us == 10 && P.info.cycleFrequency == 100000, 'the session''s unit is 10 us');
+delete(P);
 end
 
 function testATenMicrosecondCycleConvertsExactly()

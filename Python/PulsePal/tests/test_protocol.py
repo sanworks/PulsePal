@@ -1103,6 +1103,60 @@ def test_a_late_reply_to_an_earlier_session_is_skipped():
         device.close()
 
 
+class StartingPort(ClosablePort):
+    """A ClosablePort whose Pulse Pal 3 is still starting: it answers nothing until op 72 has come too, then answers
+    op 103 and op 72 together, as the device answers the commands that waited while it showed its splash screen, and
+    every command at once from then on. Op 94 reports the unit of the session's last handshake: the device's 10 us
+    cycle after op 103, 50 us after op 72."""
+
+    def __init__(self):
+        super().__init__()
+        self.starting = True
+        self.sent = 0  # Bytes the device has sent and the class has not read
+        self.session_period = None
+
+    @property
+    def in_waiting(self):
+        return self.sent
+
+    def write(self, data):
+        n = super().write(data)
+        handshake_reply = bytes([75]) + struct.pack("<I", 22)
+        if bytes(data) == bytes([OP_MENU_BYTE, 103]):
+            if self.starting:
+                self.silent = True
+            else:
+                self.response += handshake_reply
+                self.sent += 5
+                self.session_period = 10
+        elif bytes(data) == bytes([OP_MENU_BYTE, 72]):
+            n_replies = 2 if self.starting else 1  # Op 103's, then op 72's
+            self.response += handshake_reply * n_replies
+            self.sent += 5 * n_replies
+            self.starting = False
+            self.session_period = 50
+        elif bytes(data) == bytes([OP_MENU_BYTE, 94]):
+            self.response += struct.pack("<BIBI", 3, self.session_period, 4, 10000) + PULSE_PAL_3_INFO[10:]
+        return n
+
+    def read(self, n):
+        self.sent = max(0, self.sent - n)
+        return super().read(n)
+
+
+def test_a_device_still_starting_gets_op_103_again():
+    """A Pulse Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens its
+    microSD card, then answers op 103 and the op 72 sent after it together. Op 72, answered last, would leave the
+    session's times in 50 us cycles, so the class sends op 103 again, and the session's times are in 10 us cycles."""
+    port = StartingPort()
+    device = connect_to(port)
+    assert port.writes[:4] == [bytes([OP_MENU_BYTE, 103]), bytes([OP_MENU_BYTE, 72]), bytes([OP_MENU_BYTE, 103]),
+                               bytes([OP_MENU_BYTE, 94])], port.writes
+    assert device.info.cycle_period_us == 10 and device.info.cycle_frequency == 100000, device.info.cycle_period_us
+    assert port.timeout == 1, "the port's timeout was not restored after op 103"
+    device.close()
+
+
 def test_connecting_to_other_firmware_says_so():
     """A device running Wave Pal firmware replies 87 ('W') to the handshake, and one running
     Synth Pal firmware 83 ('S'). The class must say so, rather than only that the handshake was

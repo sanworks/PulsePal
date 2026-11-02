@@ -4,6 +4,9 @@ Usage:
 1. Add this folder to the MATLAB path
 2. At the MATLAB command prompt, run LoadPulsePalFirmware;
 
+On Linux, Pulse Pal 2's firmware is loaded with bossac, which this folder does not include. On Ubuntu, install it
+from a terminal with: sudo apt install bossa-cli
+
 Firmware files in this folder begin with stable versions as of 1 July, 2026, and include more recent updates.
 If you need an earlier firmware version, it must be installed manually. Installation instructions are here:
 https://sites.google.com/site/pulsepalwiki/upgrading-firmware

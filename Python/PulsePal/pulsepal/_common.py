@@ -38,6 +38,12 @@ OP_HANDSHAKE = 72
 OP_HANDSHAKE_DEVICE_CYCLES = 103
 OP_SERIAL_NUMBER = 102  # The USB serial number, on all three firmwares
 
+# The baud rate the classes open their port at. USB serial ignores it. On Linux and macOS it is 4000000, as in the
+# MATLAB classes: pyserial sets a rate outside Linux's table of rates with BOTHER, and on Ubuntu 26.04 (glibc 2.43,
+# kernel 7.0) that failed with termios.error 22 (Invalid argument), on a Pulse Pal's port and on a pseudo-terminal
+# alike, so 12000000 could not open a port. 4000000 is in the table.
+BAUD_RATE = 12000000 if sys.platform == "win32" else 4000000
+
 # The firmwares that run on Pulse Pal hardware, by their reply to the handshake
 # (op 72): (name, client class). Each client names the firmware it finds when
 # it is not its own.
@@ -89,6 +95,19 @@ def read_handshake_reply(port, timeout=None):
     at most HANDSHAKE_MAX_TIME, so that a device that never stops sending is
     refused rather than waited for.
     """
+    received = read_handshake_bytes(port, timeout)
+    return None if received is None else handshake_reply_from(received)
+
+
+def handshake_reply_from(received):
+    """`(letter, version)` from the bytes that read_handshake_bytes() returns: the reply is the last 5."""
+    return received[-HANDSHAKE_REPLY_BYTES], struct.unpack("<I", received[-4:])[0]
+
+
+def read_handshake_bytes(port, timeout=None):
+    """Read the bytes of the handshake's reply as read_handshake_reply() does, and return them all, the reply
+    last, or None if fewer than 5 arrive in time. More than 5 arrive when the device answers an earlier command
+    with the handshake: PulsePalDevice looks for a late reply to op 103 this way."""
     if timeout is None:
         received = bytearray(port.read(HANDSHAKE_REPLY_BYTES))  # Waits for a whole reply, up to the port's timeout
     else:
@@ -101,8 +120,7 @@ def read_handshake_reply(port, timeout=None):
     if len(received) < HANDSHAKE_REPLY_BYTES:
         return None
     received += read_until_quiet(port)
-    reply = bytes(received[-HANDSHAKE_REPLY_BYTES:])
-    return reply[0], struct.unpack("<I", reply[1:])[0]
+    return bytes(received)
 
 
 def read_until_quiet(port):

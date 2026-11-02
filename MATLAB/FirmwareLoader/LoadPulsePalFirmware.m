@@ -97,6 +97,11 @@ classdef LoadPulsePalFirmware < handle
             % Get list of USB serial ports
 
             usbSerialPorts = sort(serialportlist('available'));
+            if isunix && ~ismac
+                % Linux also lists 32 motherboard serial ports, /dev/ttyS0 to /dev/ttyS31, whether or not they exist.
+                % Pulse Pal 2 and 3 are USB CDC devices, which Linux names /dev/ttyACM0, /dev/ttyACM1...
+                usbSerialPorts = usbSerialPorts(startsWith(usbSerialPorts, '/dev/ttyACM'));
+            end
             obj.PortType(1:length(usbSerialPorts)) = 1;
 
             % Get Teensy RawHID boards
@@ -141,8 +146,9 @@ classdef LoadPulsePalFirmware < handle
             bgPath = fullfile(firmwarePath,'FirmwareBG.bmp');
             bg = imread(bgPath);
             obj.gui.Fig  = figure('name','Pulse Pal Firmware Loading Tool', 'position',[100,100,855,200],...
-                'numbertitle','off', 'MenuBar', 'none', 'Resize', 'off',...
+                'numbertitle','off', 'MenuBar', 'none', 'Resize', 'off', 'Visible', 'off',...
                 'Color',[0.1 0.1 0.1],'CloseRequestFcn',@(h,e)obj.clear_obj());
+            LoadPulsePalFirmware.fit_window_to_zoom(obj.gui.Fig);
             bgAxes = axes('units','normalized', 'position',[0 0 1 1]);
             uistack(bgAxes,'bottom');
             image(bg); axis off;
@@ -174,6 +180,8 @@ classdef LoadPulsePalFirmware < handle
             obj.gui.status = uicontrol('Style', 'text', 'Position', [500 0 355 30], 'String', 'Status: Idle', 'FontSize', 12,...
                 'FontWeight', 'bold', 'FontName', 'Courier', 'BackgroundColor', [0.05 0.1 0.05], 'ForegroundColor', [0.1 1 0.1]);
             obj.select_target_device(allPorts{1});
+            obj.update_versions(); % The versions of the firmware selected, not of the first in the list
+            set(obj.gui.Fig, 'Visible', 'on');
         end
 
         function update_versions(obj, varargin)
@@ -200,11 +208,12 @@ classdef LoadPulsePalFirmware < handle
             portName = portNameString{portNamePos};
             fileName = [moduleName '_v' version];
             durationMsg = '10 seconds';
-            if strcmp(moduleName, 'PulsePal_HW2')
-                durationMsg = '60 seconds';
+            if strcmp(moduleName, 'PulsePal_HW2') && (ispc || ismac)
+                durationMsg = '60 seconds'; % On Linux, the packaged bossac loaded it in about 5 s (2026-11-02)
             end
 
             h = warndlg(['Firmware upload may take up to ' durationMsg ' and progress will be shown in the Command Window. Press Ok to begin!']);
+            LoadPulsePalFirmware.fit_window_to_zoom(h);
             uiwait(h);
             set(obj.gui.status, 'String', 'Status: Loading Firmware...');
             drawnow;
@@ -228,8 +237,9 @@ classdef LoadPulsePalFirmware < handle
             end
 
             obj.gui.ConfirmModal  = figure('name','Firmware Update', 'position',[335,120,280,200],...
-                'numbertitle','off', 'MenuBar', 'none', 'Resize', 'off',...
+                'numbertitle','off', 'MenuBar', 'none', 'Resize', 'off', 'Visible', 'off',...
                 'Color',bgColor);
+            LoadPulsePalFirmware.fit_window_to_zoom(obj.gui.ConfirmModal);
 
             obj.gui.Msg1 = uicontrol('Style', 'text', 'Position', [25 140 220 30], 'String', msg1, 'FontSize', fontSize,...
                 'FontWeight', 'bold', 'BackgroundColor', bgColor, 'ForegroundColor', [0,0,0]);
@@ -238,6 +248,7 @@ classdef LoadPulsePalFirmware < handle
             uicontrol('Style', 'pushbutton', 'Position', [90 20 100 40], 'String', 'Ok', 'FontSize', 14,...
                 'FontWeight', 'bold', 'BackgroundColor', [0.05 0.1 0.05], 'ForegroundColor', [0.1 1 0.1], 'Callback',...
                 @(h,e)obj.close_modal());
+            set(obj.gui.ConfirmModal, 'Visible', 'on');
             if OK
                 bgColor(2) = 0.1;
                 try
@@ -301,13 +312,34 @@ classdef LoadPulsePalFirmware < handle
 
                     elseif isunix
                         if system('command -v bossac >/dev/null 2>&1')
-                            error('Cannot find bossac. Please install bossa-cli using your system package manager.')
+                            if ismac
+                                error('Cannot find bossac. Please install bossa-cli using your system package manager.')
+                            end
+                            % Ubuntu's package is in its universe repository, which a minimal install leaves off
+                            error('LoadPulsePalFirmware:NoBossac', ['Cannot find bossac, the program that loads ' ...
+                                'Pulse Pal 2''s firmware. To install it on Ubuntu, open a terminal (Ctrl+Alt+T) and ' ...
+                                'enter these two commands, typing your password when asked:\n\n' ...
+                                '    sudo apt update\n' ...
+                                '    sudo apt install bossa-cli\n\n' ...
+                                'Then click Load again. If apt reports "Unable to locate package bossa-cli", enable ' ...
+                                'Ubuntu''s universe repository first, with:\n\n' ...
+                                '    sudo add-apt-repository universe\n'])
                         end
 
-                        uploadPort = targetPort;
-                        programPath = sprintf('bossac --port=%s -U=%s -e -w %s -b "%s" -R', ...
-                            uploadPort, lower(string(nativeUsb)), ...
-                            verifyFlag, firmwarePath);
+                        if nativeUsb
+                            uploadPort = obj.enter_due_bootloader(targetPort);
+                        else
+                            uploadPort = targetPort;
+                        end
+
+                        % The packaged bossac (1.9.1 on Ubuntu) reads -U's value as a number: -U=true read as 0,
+                        % which selects RS-232. It also resets the CPU (-R) as soon as it has sent the command that
+                        % sets the boot flag, without waiting for the flash controller: in the same call as the
+                        % write, the Due came back in its bootloader with the flag unset and the flash's first page
+                        % garbled (2 times in 2). So the reset is a second call, made once this one has finished.
+                        programPath = sprintf('bossac --port=%s --usb-port=%d -e -w %s -b "%s"', ...
+                            uploadPort, nativeUsb, verifyFlag, firmwarePath);
+                        resetPath = sprintf('bossac --port=%s --usb-port=%d -R', uploadPort, nativeUsb);
                     end
                 case 'tycmd'
                     if ~ispc && ~ismac
@@ -335,10 +367,23 @@ classdef LoadPulsePalFirmware < handle
             end
             disp('------Uploading new firmware------')
             disp([filename ' ==> ' targetPort])
-            [~, msg] = system(programPath, '-echo');
+            [status, msg] = system(programPath, '-echo');
             ok = 0;
             if ~isempty(strfind(msg, 'CPU reset')) || ~isempty(strfind(msg, 'Sending reset command'))
                 ok = 1;
+            end
+            if ~ispc && strcmp(loaderApp, 'bossac') && status == 0
+                % The packaged bossac prints nothing when it resets the CPU, and returned 0 when the Due then came
+                % back in its bootloader, so on Linux the upload has worked once the Due enumerates as itself again
+                [status, resetMsg] = system(resetPath, '-echo');
+                msg = [msg resetMsg];
+                ok = status == 0;
+                if ok && ~ismac
+                    ok = LoadPulsePalFirmware.wait_for_usb_id_linux(uploadPort, '2341:003e', 5);
+                    if ~ok
+                        msg = [msg 'The Arduino Due did not start the firmware (USB ID 2341:003e) after its reset.'];
+                    end
+                end
             end
             if ok
                 disp('----------UPDATE COMPLETE---------')
@@ -377,6 +422,19 @@ classdef LoadPulsePalFirmware < handle
                 catch
                     % Fail silently, this is a nice-to-have
                 end
+            elseif isunix && ~ismac
+                % On Linux, likewise: Pulse Pal 3's firmware for a Teensy, or a Teensy in its bootloader (listed by
+                % tycmd as SER#...), and Pulse Pal 2's for another device (an Arduino Due)
+                try
+                    isTeensy = strncmp(PortName, 'SER#', 4) || LoadPulsePalFirmware.is_teensy_port_linux(PortName);
+                    if isTeensy
+                        set(obj.gui.Devices, 'Value', 2);
+                    else
+                        set(obj.gui.Devices, 'Value', 1);
+                    end
+                catch
+                    % Fail silently, this is a nice-to-have
+                end
             end
         end
 
@@ -401,6 +459,23 @@ classdef LoadPulsePalFirmware < handle
             t0 = tic;
             while toc(t0) < 8
                 pause(0.1);
+                if isunix && ~ismac
+                    % Linux usually gives the bootloader the port's name again, so it is found by its USB ID:
+                    % SAM-BA's, 03eb:6124 (the Due itself is 2341:003e)
+                    ports = dir('/dev/ttyACM*');
+                    for i = 1:numel(ports)
+                        port = fullfile('/dev', ports(i).name);
+                        try
+                            if strcmp(LoadPulsePalFirmware.usb_id_linux(port), '03eb:6124')
+                                uploadPort = port;
+                                return
+                            end
+                        catch
+                            % The port went away between the list and the read
+                        end
+                    end
+                    continue
+                end
                 nowPorts = serialportlist("available");
                 added = setdiff(nowPorts, before);
 
@@ -414,6 +489,58 @@ classdef LoadPulsePalFirmware < handle
         function clear_obj(obj)
             delete(obj.gui.Fig);
             evalin('base', 'clear ans');
+        end
+    end
+
+    methods (Static, Access = private)
+        function tf = is_teensy_port_linux(port)
+            % True if the port belongs to a Teensy: its USB vendor ID is PJRC's, 16c0
+            tf = strncmpi(LoadPulsePalFirmware.usb_id_linux(port), '16c0:', 5);
+        end
+
+        function id = usb_id_linux(port)
+            % The USB vendor and product IDs of a port's device, as 'vvvv:pppp'. sysfs links
+            % /sys/class/tty/ttyACM0/device to the port's USB interface, whose parent folder is the USB device.
+            [~, name] = fileparts(char(port));
+            deviceFolder = fullfile('/sys/class/tty', name, 'device', '..');
+            id = [strtrim(fileread(fullfile(deviceFolder, 'idVendor'))) ':' ...
+                  strtrim(fileread(fullfile(deviceFolder, 'idProduct')))];
+        end
+
+        function found = wait_for_usb_id_linux(port, id, timeout)
+            % Waits up to timeout seconds for a port to belong to the USB device with the given ID
+            found = false;
+            t0 = tic;
+            while ~found && toc(t0) < timeout
+                pause(0.1);
+                try
+                    found = strcmp(LoadPulsePalFirmware.usb_id_linux(port), id);
+                catch
+                    % The port is not there yet
+                end
+            end
+        end
+
+        function fit_window_to_zoom(fig)
+            % Enlarges a window by the desktop zoom, before it is shown. On Linux, MATLAB R2025b is scaled for a
+            % high resolution screen by its Zoom setting (s.matlab.desktop.Zoom, a percentage). A figure is then laid
+            % out and drawn zoomed, but its window opens at the size its Position names in screen pixels: at 200%,
+            % the 855 x 200 loader opened 428 x 100, showing only the bottom of the firmware list, and it cannot be
+            % resized. These windows have no toolbar, and their controls keep their pixel positions, so the window
+            % only needs enlarging. Pulse Pal's parameter editor (@PulsePalDevice/gui.m) does the same.
+            % warndlg shows its window before it returns, and the window reports its zoomed size about 0.1 s later:
+            % called at once, this still reads the size warndlg chose (5 times in 5 at 200%), and sets it right.
+            % Called later, it would leave the dialog as small as it was.
+            if ~strcmp(computer('arch'), 'glnxa64')
+                return
+            end
+            try
+                s = settings;
+                zoomFactor = s.matlab.desktop.Zoom.ActiveValue / 100;
+            catch
+                return % A MATLAB without the Zoom setting
+            end
+            fig.Position(3:4) = round(fig.Position(3:4) * zoomFactor);
         end
     end
 end

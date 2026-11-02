@@ -48,6 +48,9 @@ static const uint32_t CurrentFirmwareVersion = 22;
 static const unsigned int ReplyTimeoutMs = 2000;
 // How long to wait for a reply to op 103 before trying op 72 (see initialize())
 static const unsigned int HandshakeDeviceCyclesTimeoutMs = 300;
+// How long to wait for the reply to op 72, as the Python and MATLAB classes do (their ports' 10 s timeout). A Pulse
+// Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens its microSD card.
+static const unsigned int HandshakeTimeoutMs = 10000;
 
 // The handshake's reply is the last 5 bytes the device sends before it has been quiet this long (see
 // readHandshakeReply()), and the device gets at most HandshakeMaxTime after the first 5 bytes to go quiet
@@ -144,7 +147,9 @@ static float outputParamValue(const PulsePal::OutputParams& params, uint8_t para
 // input, and before the handshake. Its reply is skipped. Bytes are read until none has arrived for HandshakeQuietTime,
 // longer than the device takes to redraw its screen between two replies, and for at most HandshakeMaxTime, so that a
 // device that never stops sending is refused rather than waited for. The Python and MATLAB classes do the same.
-static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5], unsigned int timeoutMs = ReplyTimeoutMs)
+// nReceived, if given, is set to the number of bytes read: more than 5 if the device answered an earlier command too.
+static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5], unsigned int timeoutMs = ReplyTimeoutMs,
+                               size_t* nReceived = nullptr)
 {
     std::vector<uint8_t> received(5);
     if (serial->read(received.data(), 5, timeoutMs) < 5) { // Waits for a whole reply
@@ -166,6 +171,9 @@ static bool readHandshakeReply(SerialPort* serial, uint8_t reply[5], unsigned in
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+    if (nReceived) {
+        *nReceived = received.size();
     }
     std::copy(received.end() - 5, received.end(), reply);
     return true;
@@ -273,15 +281,28 @@ bool PulsePal::initialize(std::string portString)
 
     // Op 103: handshake, and the session's times are in the device's own timer cycles (10 us on Pulse Pal 3). The reply
     // is 'K', then the firmware version (uint32). Firmware from before October 2026, Wave Pal and Synth Pal ignore it,
-    // and answer op 72, whose times are in 50 us cycles. A device that answers op 103 too late counts the session's
-    // times in 50 us cycles too, after the op 72 that follows: either way op 94 reports the session's unit.
+    // and answer op 72, whose times are in 50 us cycles. Either way op 94 reports the session's unit.
     const uint8_t handshakeDeviceCycles[2] = {OpMenuByte, OP_HANDSHAKE_DEVICE_CYCLES};
     const uint8_t handshake[2] = {OpMenuByte, OP_HANDSHAKE};
     uint8_t reply[5] = {0};
     bool replied = serial->write(handshakeDeviceCycles, 2) &&
                    readHandshakeReply(serial, reply, HandshakeDeviceCyclesTimeoutMs);
     if (!replied) {
-        replied = serial->write(handshake, 2) && readHandshakeReply(serial, reply);
+        size_t nReceived = 0;
+        replied = serial->write(handshake, 2) && readHandshakeReply(serial, reply, HandshakeTimeoutMs, &nReceived);
+        if (replied && (nReceived > 5) && (reply[0] == HandshakeReply) && (readUint32(reply + 1) > 21)) {
+            // More than one reply arrived: the device was busy when op 103 came, and answered it with op 72. A Pulse
+            // Pal 3 answers nothing for about 5 s after it starts, while it shows its splash screen and opens its
+            // microSD card (measured on Pulse Pal 3: op 103 and op 72 sent 0.2 to 3.5 s after the port opened were
+            // answered together 5.0 s after it opened). Op 72, answered last, would leave the session in 50 us
+            // cycles, so op 103 is sent again, now that the device is listening. If the extra bytes were a late reply
+            // to an earlier session, and the firmware ignores op 103, this waits 0.3 s more.
+            uint8_t deviceCyclesReply[5] = {0};
+            if (serial->write(handshakeDeviceCycles, 2) &&
+                readHandshakeReply(serial, deviceCyclesReply, HandshakeDeviceCyclesTimeoutMs)) {
+                std::copy(deviceCyclesReply, deviceCyclesReply + 5, reply);
+            }
+        }
     }
     if (!replied || (reply[0] != HandshakeReply)) {
         if ((reply[0] == WavePalHandshakeReply) || (reply[0] == SynthPalHandshakeReply)) {
