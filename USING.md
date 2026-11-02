@@ -442,6 +442,7 @@ output channel plays one of them: its `current_waveform`, or none.
 | Sampling rate | 1 Hz to 100 kHz, one rate for all four channels. The device divides a 24 MHz clock by a whole number, so the rate played (`actual_sampling_rate`) can differ slightly: 44100 Hz plays at 44117.6 Hz. Rates that divide 24 MHz, such as 10, 25 or 100 kHz, play exactly |
 | Output ranges | `"0V:5V"`, `"0V:10V"`, `"-5V:5V"`, `"-10V:10V"`, one for all channels. The smallest range that fits the waveforms gives the finest voltage steps |
 | Trigger modes | `"Normal"`, `"Toggle"`, `"Gated"` and `"Param Sync"`, as in Pulse Pal, and `"Master"`: a rising edge restarts channels that are playing |
+| Sync outputs | A channel in `"Sync"` output mode plays no waveform: it is at its `sync_voltage`, 3 V to 5 V, while another channel (its `sync_target`) plays, and at 0 V otherwise, on the same output updates as that channel |
 
 ### Standard calls
 
@@ -455,6 +456,7 @@ output channel plays one of them: its `current_waveform`, or none.
 | `W.loop_mode[1] = True`, `W.loop_duration[1] = 3` | `W.loopMode(1) = true; W.loopDuration(1) = 3;` | Loops the channel's waveform, for 3 s after each trigger (0: until stopped) |
 | `W.trigger([1, 2])`, `W.stop()` | `W.trigger([1 2]);`, `W.stop();` | Starts, or stops, playback |
 | `W.set_fixed_voltage(3, 1.5)` | `W.setFixedVoltage(3, 1.5);` | Holds channels at a voltage |
+| `W.output_mode[4] = "Sync"`, `W.sync_target[4] = 2`, `W.sync_voltage[4] = 3.3` | `W.outputMode{4} = 'Sync'; W.syncTarget(4) = 2; W.syncVoltage(4) = 3.3;` | Channel 4 outputs a TTL level: 3.3 V while channel 2 plays, 0 V otherwise (`"Signal"`: plays its waveform again) |
 | `W.status()` | `W.status()` | Which channels are playing, each channel's waveform, what waits for a param sync edge, and any underruns |
 | `W.export_params()` | `W.exportParams()` | Every setting, as a dict or struct, e.g. to save with your data. Not the waveforms |
 | `W.import_params(params)` | `W.importParams(params);` | Programs the settings `export_params()` returned. Load the waveforms first |
@@ -472,6 +474,25 @@ W.output_range = "-5V:5V"                                  # finer steps than -1
 t = np.arange(25000) / W.actual_sampling_rate               # 1 s
 W.load_waveform(1, 3 * np.sin(2 * np.pi * 8 * t), [1, 2])  # an 8 Hz sine, +/-3 V, on channels 1 and 2
 W.link_trigger_channel1[1:3] = [True, True]                # trigger channel 1 starts them (by default, nothing is linked)
+```
+
+### Recipe: a TTL that marks each waveform, for a recording system
+
+A channel in sync mode goes high on the same output update as its target's first sample, and low
+on the update that returns the target to 0 V, so it is high for exactly the waveform's duration.
+
+```python
+W.load_waveform(1, stimulus, 1)
+W.link_trigger_channel1[1] = True   # trigger channel 1 starts channel 1
+W.output_mode[2] = "Sync"           # channel 2 reports channel 1, its default sync_target...
+W.sync_voltage[2] = 5.0             # ...at 5 V (the default); 3.3 V for 3.3 V logic
+```
+
+```matlab
+W.loadWaveform(1, stimulus, 1);
+W.linkTriggerChannel1(1) = true;
+W.outputMode{2} = 'Sync';
+W.syncVoltage(2) = 5;
 ```
 
 ### Recipe: a new waveform for each trial, with param sync
@@ -509,6 +530,10 @@ W.triggerMode{2} = 'Normal';
   or set `current_waveform`. `trigger()` raises an error for a channel without one, but a TTL
   edge is ignored without a word.
 - **Stopped channels output 0 V.** Wave Pal has no resting voltage.
+- **A channel in sync mode plays no waveform.** `trigger()` and `set_fixed_voltage()` raise an
+  error for it, and TTL edges and `stop()` leave it alone: its level follows its `sync_target`.
+  A channel cannot report itself, or another channel in sync mode. The sync voltage is in volts,
+  the same in every output range.
 - **Changing the output range stops playback** and loads the waveforms again, encoded for the
   new range. A waveform that does not fit the new range raises an error. The range cannot change
   in param sync mode.

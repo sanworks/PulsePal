@@ -57,6 +57,16 @@
 %   W.triggerMode{2} = 'Param Sync';
 %   W.loadWaveform(1, nextTrialWave);   % Waits for trigger channel 2's next rising edge
 %
+% Sync outputs. An output channel in 'Sync' outputMode plays no waveform: it reports another channel's playback as a
+% TTL logic level, e.g. to mark a waveform's onset and offset for a recording system. It is at its syncVoltage (3-5 V)
+% while the channel in its syncTarget plays, and at 0 V otherwise. It goes high on the same output update as the
+% target's first sample, and low on the update that returns the target to 0 V, one sample period after its last
+% sample, or as soon as the target is stopped: so it is high for exactly the waveform's duration. A channel cannot
+% report itself, or another channel in 'Sync' mode. A sync channel ignores triggers, its trigger links and stop(), and
+% trigger() and setFixedVoltage() refuse it. A channel entering 'Sync' mode stops playing.
+%   W.outputMode{4} = 'Sync';   % Channel 4 reports channel 1, its default syncTarget...
+%   W.syncVoltage(4) = 3.3;     % ...at 3.3 V
+%
 % Wave Pal's USB protocol is documented in /Firmware/WavePal/PROTOCOL.md. The Python class,
 % pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py), has the same features.
 
@@ -105,6 +115,13 @@ classdef WavePalDevice < handle
                                          % By default no output channel is linked: a TTL starts nothing until a script
                                          % links it
         linkTriggerChannel2 = false(1,4) % 1x4. true if a rising edge on trigger channel 2 triggers the output channel
+        outputMode = {'Signal', 'Signal', 'Signal', 'Signal'} % 1x4 cell array: 'Signal' plays the channel's waveform,
+                                                              % 'Sync' reports its syncTarget's playback at its
+                                                              % syncVoltage. See "Sync outputs" above. Not case sensitive.
+        syncTarget = [2 1 1 1] % 1x4. The output channel each channel reports in 'Sync' mode: another channel, 1-4, that
+                               % is not in 'Sync' mode. By default channel 1 reports channel 2, and the others channel 1.
+        syncVoltage = [5 5 5 5] % 1x4, in volts, 3 to 5. A sync channel's voltage while its target plays. The same in
+                                % every outputRange.
     end
 
     properties (SetAccess = private)
@@ -125,6 +142,7 @@ classdef WavePalDevice < handle
     properties (Access = private)
         initialized = false % Assigning a setting programs the device only once the constructor has connected
         replyPending = 0 % The op code of a command whose reply has not been read in full yet, or 0 (see writeCommand())
+        storingOutputModes = false % True while setOutputModes() stores the output modes and sync targets it has sent
     end
 
     properties (Constant, Access = private)
@@ -148,17 +166,23 @@ classdef WavePalDevice < handle
         OpSetLoopDuration = 'D'
         OpSetTriggerMode = 'T'
         OpSetTriggerLinks = 'I'
+        OpSetOutputModes = 'M' % The output modes, then the sync targets: the device checks them together
+        OpSetSyncVoltages = 'V' % In microvolts: the device converts them to DAC codes for its output range
         OpGetStatus = 'G'
         OpGetPlaybackChecksums = 'Z'
         WavePalHandshakeReply = 87 % 'W'
         PulsePalHandshakeReply = 75 % 'K': the device runs Pulse Pal firmware
         SynthPalHandshakeReply = 83 % 'S': the device runs Synth Pal firmware
         OutputRangeNames = {'0V:5V', '0V:10V', '-5V:5V', '-10V:10V'} % In order of their index on the device
+        % The settings exportParams() returns, in order
         SettingNames = {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', 'triggerMode', ...
-                        'linkTriggerChannel1', 'linkTriggerChannel2'} % The settings exportParams() returns, in order
+                        'linkTriggerChannel1', 'linkTriggerChannel2', 'outputMode', 'syncTarget', 'syncVoltage'}
         OutputRangeLimits = [0 5; 0 10; -5 5; -10 10] % Volts, one row per range
         TriggerModeNames = {'Normal', 'Toggle', 'Gated', 'Param Sync', 'Master'}
         TriggerModeCodes = [0 1 2 3 4] % Their codes on the device: Pulse Pal's, and 4
+        OutputModeNames = {'Signal', 'Sync'} % In order of their code on the device, from 0
+        DefaultSyncTargets = [2 1 1 1]
+        SyncVoltageLimits = [3 5] % Volts. Within every output range
         DACBitMax = 65535
         % Added to the error for a reply that does not arrive. After a comm failure the device reads no command until its
         % joystick is clicked, and then loads its default settings. The same text as the Python classes'.
@@ -240,7 +264,8 @@ classdef WavePalDevice < handle
         function setDefaultParams(obj)
             % Programs the default settings on the device: both trigger channels in 'Normal' mode, a 10 kHz sampling
             % rate, the -10 V to 10 V output range, loop mode off with loop durations of 0, no output channel linked to
-            % a trigger channel (a TTL starts nothing until a script links it), and no currentWaveform on any channel. They match the
+            % a trigger channel (a TTL starts nothing until a script links it), every channel in 'Signal' outputMode,
+            % with syncTarget [2 1 1 1] and syncVoltage 5 V, and no currentWaveform on any channel. They match the
             % settings the device starts with. The trigger modes are sent first: a trigger channel leaving param sync
             % mode makes what was stored for its next edge current, and the settings after it then apply at once.
             % Loaded waveforms are kept, and loaded again if the output range changes. Raises an error if a loaded
@@ -252,6 +277,8 @@ classdef WavePalDevice < handle
             obj.loopDuration = zeros(1,4);
             obj.linkTriggerChannel1 = false(1,4);
             obj.linkTriggerChannel2 = false(1,4);
+            obj.setOutputModes({'Signal', 'Signal', 'Signal', 'Signal'}, obj.DefaultSyncTargets);
+            obj.syncVoltage = [5 5 5 5];
             obj.currentWaveform = zeros(1,4);
         end
 
@@ -301,9 +328,15 @@ classdef WavePalDevice < handle
             % Triggers output channels in software: one channel number, e.g. W.trigger(1), or several as an array,
             % e.g. W.trigger([2 4]). Idle channels start their current waveforms from the first sample, on the same
             % sample. Channels that are playing ignore it, as Pulse Pal's do. Raises an error, and sends nothing, if a
-            % channel has no waveform to play: its currentWaveform is 0, or a waveform this object has not loaded.
+            % channel has no waveform to play: its currentWaveform is 0, or a waveform this object has not loaded, or
+            % it is in 'Sync' outputMode.
             bits = obj.channelBits(channels);
             for channel = unique(channels(:))'
+                if strcmp(obj.outputMode{channel}, 'Sync')
+                    error(['Channel ' num2str(channel) ' is in Sync mode: it reports channel ' ...
+                           num2str(obj.syncTarget(channel)) '''s playback, and plays no waveform. Set outputMode{' ...
+                           num2str(channel) '} = ''Signal'' to play one.'])
+                end
                 waveformNumber = obj.currentWaveform(channel);
                 if waveformNumber == 0
                     error(['Channel ' num2str(channel) ' has no waveform to play. Set currentWaveform(' ...
@@ -320,6 +353,7 @@ classdef WavePalDevice < handle
 
         function stop(obj, channels)
             % Stops playback, e.g. W.stop() for all channels, or W.stop([1 3]). The stopped channels output 0 V.
+            % Channels in 'Sync' outputMode are left alone: they go low once the channels they report stop.
             if nargin < 2
                 bits = uint8(15);
             else
@@ -330,8 +364,16 @@ classdef WavePalDevice < handle
 
         function setFixedVoltage(obj, channels, voltage)
             % Sets output channels to a fixed voltage, e.g. W.setFixedVoltage([1 3], 2.5).
-            % Stops playback on those channels. The voltage holds until the channel is triggered or stopped.
+            % Stops playback on those channels. The voltage holds until the channel is triggered or stopped. Raises an
+            % error for a channel in 'Sync' outputMode, whose voltage follows its target.
             bits = obj.channelBits(channels);
+            for channel = unique(channels(:))'
+                if strcmp(obj.outputMode{channel}, 'Sync')
+                    error(['Channel ' num2str(channel) ' is in Sync mode: its voltage follows channel ' ...
+                           num2str(obj.syncTarget(channel)) '''s playback. Set outputMode{' num2str(channel) ...
+                           '} = ''Signal'' first.'])
+                end
+            end
             if ~isscalar(voltage)
                 error('setFixedVoltage() takes one voltage, which is set on every channel given.')
             end
@@ -464,6 +506,18 @@ classdef WavePalDevice < handle
                     obj.checkLogical(params.(name{1}), name{1});
                 end
             end
+            outputModes = obj.outputMode;
+            if has('outputMode')
+                outputModes = obj.OutputModeNames(obj.matchOutputModes(params.outputMode));
+            end
+            syncTargets = obj.syncTarget;
+            if has('syncTarget')
+                syncTargets = obj.checkSyncTargets(params.syncTarget);
+            end
+            obj.checkSyncReports(outputModes, syncTargets); % One op sends both, so they are checked together
+            if has('syncVoltage')
+                obj.checkSyncVoltages(params.syncVoltage);
+            end
             % Then sent, in that order
             if ~isequal(firstModes, obj.triggerMode)
                 obj.triggerMode = firstModes;
@@ -474,7 +528,15 @@ classdef WavePalDevice < handle
             if ~strcmp(rangeName, obj.outputRange)
                 obj.outputRange = rangeName;
             end
-            for name = {'loopMode', 'loopDuration', 'linkTriggerChannel1', 'linkTriggerChannel2', 'currentWaveform'}
+            for name = {'loopMode', 'loopDuration', 'linkTriggerChannel1', 'linkTriggerChannel2'}
+                if has(name{1})
+                    obj.(name{1}) = params.(name{1});
+                end
+            end
+            if has('outputMode') || has('syncTarget')
+                obj.setOutputModes(outputModes, syncTargets);
+            end
+            for name = {'syncVoltage', 'currentWaveform'}
                 if has(name{1})
                     obj.(name{1}) = params.(name{1});
                 end
@@ -582,6 +644,32 @@ classdef WavePalDevice < handle
                 obj.sendTriggerLinks(obj.linkTriggerChannel1, links); %#ok<MCSUP>
             end
             obj.linkTriggerChannel2 = links;
+        end
+
+        % One op programs the output modes and the sync targets, which the device checks together, so each is sent
+        % with the other's current values
+        function set.outputMode(obj, modes)
+            modes = obj.OutputModeNames(obj.matchOutputModes(modes));
+            if obj.initialized && ~obj.storingOutputModes %#ok<MCSUP>
+                obj.sendOutputModes(modes, obj.syncTarget); %#ok<MCSUP>
+            end
+            obj.outputMode = modes;
+        end
+
+        function set.syncTarget(obj, targets)
+            targets = obj.checkSyncTargets(targets);
+            if obj.initialized && ~obj.storingOutputModes %#ok<MCSUP>
+                obj.sendOutputModes(obj.outputMode, targets); %#ok<MCSUP>
+            end
+            obj.syncTarget = targets;
+        end
+
+        function set.syncVoltage(obj, volts)
+            volts = obj.checkSyncVoltages(volts);
+            if obj.initialized %#ok<MCSUP>
+                obj.sendSyncVoltages(volts);
+            end
+            obj.syncVoltage = volts;
         end
 
         function delete(obj)
@@ -703,12 +791,44 @@ classdef WavePalDevice < handle
             obj.info.sampleClockHz = values(4); % Clock that the sample rate is divided from
             obj.info.outputRanges = obj.OutputRangeNames;
             obj.info.triggerModes = obj.TriggerModeNames;
+            obj.info.outputModes = obj.OutputModeNames;
         end
 
         function sendTriggerLinks(obj, links1, links2)
             % One command programs the links of both trigger channels
             obj.writeCommand(obj.OpSetTriggerLinks, uint8([links1 links2]));
             obj.confirmWrite('setting the trigger channel links');
+        end
+
+        function setOutputModes(obj, modes, targets)
+            % Programs the output modes and the sync targets with one command, and stores them. Used where both
+            % change together, since the device refuses some combinations that would come between two commands.
+            modes = obj.OutputModeNames(obj.matchOutputModes(modes));
+            targets = obj.checkSyncTargets(targets);
+            obj.sendOutputModes(modes, targets);
+            obj.storingOutputModes = true; % The set methods store them without sending them again
+            cleanup = onCleanup(@() obj.endStoringOutputModes());
+            obj.outputMode = modes;
+            obj.syncTarget = targets;
+            clear cleanup
+        end
+
+        function endStoringOutputModes(obj)
+            obj.storingOutputModes = false;
+        end
+
+        function sendOutputModes(obj, modes, targets)
+            % One command (op 'M') programs every channel's output mode (0 'Signal', 1 'Sync'), then its sync target
+            obj.checkSyncReports(modes, targets);
+            [~, codes] = ismember(modes, obj.OutputModeNames);
+            obj.writeCommand(obj.OpSetOutputModes, uint8([codes-1 targets]));
+            obj.confirmWrite('setting outputMode and syncTarget');
+        end
+
+        function sendSyncVoltages(obj, volts)
+            % In microvolts: the device converts them to DAC codes for its output range
+            obj.writeCommand(obj.OpSetSyncVoltages, typecast(uint32(obj.roundHalfEven(volts*1e6)), 'uint8'));
+            obj.confirmWrite('setting syncVoltage');
         end
 
         function rate = checkSamplingRate(obj, rate)
@@ -789,6 +909,67 @@ classdef WavePalDevice < handle
                 end
                 matches(i) = match;
             end
+        end
+
+        function matches = matchOutputModes(obj, modes)
+            % Returns the indices in OutputModeNames of new output modes, one per output channel
+            if ischar(modes) || (isstring(modes) && isscalar(modes))
+                obj.oneValuePerChannel({char(modes)}, 4, 'outputMode', 'output channel'); % Raises the error
+            elseif isstring(modes)
+                modes = cellstr(modes);
+            end
+            if ~iscell(modes) || numel(modes) ~= 4
+                error(['outputMode needs a 1x4 cell array with one mode per output channel, e.g. '...
+                       '{''Signal'', ''Sync'', ''Signal'', ''Signal''}.'])
+            end
+            matches = zeros(1,4);
+            for i = 1:4
+                match = [];
+                if ischar(modes{i}) || (isstring(modes{i}) && isscalar(modes{i}))
+                    match = find(strcmpi(modes{i}, obj.OutputModeNames));
+                end
+                if isempty(match)
+                    error(['Unknown output mode for output channel ' num2str(i) '. Valid modes are: '...
+                           strjoin(obj.OutputModeNames, ', ') '.'])
+                end
+                matches(i) = match;
+            end
+        end
+
+        function targets = checkSyncTargets(obj, targets)
+            % Checks new sync targets, one per output channel, and returns them as a row of doubles
+            targets = obj.oneValuePerChannel(targets, 4, 'syncTarget', 'output channel');
+            if ~isnumeric(targets) || ~isreal(targets) || any(~ismember(targets, 1:4))
+                error('syncTarget values are output channel numbers, 1-4.')
+            end
+            channel = find(targets == 1:4, 1);
+            if ~isempty(channel)
+                error(['syncTarget(' num2str(channel) ') cannot be ' num2str(channel) ': a channel cannot report '...
+                       'itself. Choose another output channel.'])
+            end
+            targets = double(targets);
+        end
+
+        function checkSyncReports(~, modes, targets)
+            % Checks that no channel in 'Sync' mode reports a channel in 'Sync' mode, which plays nothing
+            for channel = 1:4
+                if strcmp(modes{channel}, 'Sync') && strcmp(modes{targets(channel)}, 'Sync')
+                    error(['Channel ' num2str(channel) ' would be in Sync mode, reporting channel ' ...
+                           num2str(targets(channel)) ', which would be in Sync mode too, and plays no waveform. Set '...
+                           'syncTarget(' num2str(channel) ') to a channel in Signal mode, or outputMode{' ...
+                           num2str(targets(channel)) '} to ''Signal'' first.'])
+                end
+            end
+        end
+
+        function volts = checkSyncVoltages(obj, volts)
+            % Checks new sync voltages, one per output channel, and returns them as a row of doubles
+            volts = obj.oneValuePerChannel(volts, 4, 'syncVoltage', 'output channel');
+            limits = obj.SyncVoltageLimits;
+            if ~isnumeric(volts) || ~isreal(volts) || ~all(volts >= limits(1) & volts <= limits(2)) % NaN fails both
+                error(['syncVoltage values are in volts, ' num2str(limits(1)) ' to ' num2str(limits(2)) '.'])
+            end
+            volts = double(volts);
         end
 
         function samples = durations2Samples(obj, durations, rate)
@@ -917,7 +1098,7 @@ classdef WavePalDevice < handle
             op = obj.replyPending;
             obj.replyPending = 0;
             nLate = numel(obj.readUntilQuiet());
-            sendAgain = any(op == double('SRCODTI'));
+            sendAgain = any(op == double('SRCODTIMV'));
             message = ['The reply to an earlier command (op ''' char(op) ''') was not read in full: its call was ' ...
                        'stopped, or the reply came too late. ' num2str(nLate) ' byte(s) of it arrived since, and ' ...
                        'were discarded'];
@@ -964,6 +1145,10 @@ classdef WavePalDevice < handle
                 case 'T'
                     obj.writeCommand(op, uint8(obj.TriggerModeCodes(obj.matchTriggerModes(obj.triggerMode))));
                     obj.confirmWrite('setting triggerMode');
+                case 'M'
+                    obj.sendOutputModes(obj.outputMode, obj.syncTarget);
+                case 'V'
+                    obj.sendSyncVoltages(obj.syncVoltage);
                 otherwise % 'I', the trigger links
                     obj.sendTriggerLinks(obj.linkTriggerChannel1, obj.linkTriggerChannel2);
             end

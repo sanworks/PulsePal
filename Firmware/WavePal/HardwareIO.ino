@@ -115,6 +115,7 @@ void setOutputRange(byte newRange) {
   for (byte i = 0; i < N_CHANNELS; i++) {
     activeCalibration[i] = (newRange == RANGE_PLUS_MINUS_10V) ? ZeroCodeCalibration[i] : 0;
   }
+  updateSyncCodes(); // The sync voltages keep their values in volts, as new DAC codes
 }
 
 // Reads the circuit board revision into hardwareRevision (op 100), as Pulse Pal firmware does. The board encodes it in

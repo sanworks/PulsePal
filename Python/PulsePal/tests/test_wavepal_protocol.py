@@ -46,7 +46,9 @@ class FakeWavePal:
     of its current version), `current_waveform` (per channel, 0 = none), and
     in param sync mode, `stored` loads and `stored_current_waveform` for the
     next edge, which become current when no trigger channel is left in the
-    mode.
+    mode. It checks the output modes, sync targets (`output_modes`,
+    `sync_targets`, numbered 1-4) and sync voltages (`sync_microvolts`) as
+    the firmware does.
     """
 
     def __init__(self, handshake_reply=87, firmware_version=1, ack=1):
@@ -65,6 +67,9 @@ class FakeWavePal:
         self.stored = {}  # waveform number -> DAC codes, for the next param sync edge
         self.current_waveform = [0] * 4
         self.stored_current_waveform = None
+        self.output_modes = [0] * 4  # 0 = signal, 1 = sync
+        self.sync_targets = [2, 1, 1, 1]
+        self.sync_microvolts = [5000000] * 4
         self.status_reply = bytes(47)
 
     def write(self, data):
@@ -91,7 +96,7 @@ class FakeWavePal:
         payload = data[2:]
         expected_lengths = {72: 0, 81: 0, 89: 6, 99: 3, 100: 0, 102: 0, ord("N"): 0, ord("S"): 4, ord("R"): 1,
                             ord("P"): 1, ord("X"): 1, ord("!"): 3, ord("O"): 4, ord("C"): 4,
-                            ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0}
+                            ord("D"): 16, ord("T"): 2, ord("I"): 8, ord("G"): 0, ord("M"): 8, ord("V"): 16}
         if op == ord("L"):
             number, n_samples = struct.unpack("<BI", payload[:5])
             assert len(payload) == 5 + 2 * n_samples, "load waveform length"
@@ -140,6 +145,19 @@ class FakeWavePal:
                 return bytes([0])  # The reloads would wait for a param sync edge
             self.range_index = payload[0]
             self.loaded.clear()  # The firmware unloads waveforms when the range changes
+        if op == ord("!") and any(payload[0] & (1 << i) for i in range(4) if self.output_modes[i]):
+            return bytes([0])  # A sync channel's level follows its target
+        if op == ord("M"):
+            modes, targets = list(payload[:4]), list(payload[4:])
+            if (any(mode > 1 for mode in modes) or any(not 1 <= t <= 4 or t == i + 1 for i, t in enumerate(targets))
+                    or any(modes[i] and modes[targets[i] - 1] for i in range(4))):
+                return bytes([0])
+            self.output_modes, self.sync_targets = modes, targets
+        if op == ord("V"):
+            microvolts = list(struct.unpack("<4I", payload))
+            if not all(3000000 <= uv <= 5000000 for uv in microvolts):
+                return bytes([0])
+            self.sync_microvolts = microvolts
         return bytes([1])
 
     def read(self, n):
@@ -213,6 +231,8 @@ def test_connection_sequence_programs_the_defaults():
         command("O", bytes(4)),
         command("D", bytes(16)),
         command("I", bytes([0, 0, 0, 0, 0, 0, 0, 0])),  # No output channel linked to a trigger channel
+        command("M", bytes([0, 0, 0, 0, 2, 1, 1, 1])),  # Signal mode; channel 1 would report 2, the others 1
+        command("V", struct.pack("<4I", *[5000000] * 4)),  # 5 V, in microvolts
         command("C", bytes(4)),
     ], fake.ops()
     assert device.info.firmware_version == 1
@@ -228,6 +248,9 @@ def test_connection_sequence_programs_the_defaults():
     assert device.trigger_mode == [None, "Normal", "Normal"]
     assert device.link_trigger_channel1 == [None, False, False, False, False]
     assert device.link_trigger_channel2 == [None, False, False, False, False]
+    assert device.output_mode == [None, "Signal", "Signal", "Signal", "Signal"]
+    assert device.sync_target == [None, 2, 1, 1, 1] and device.sync_voltage == [None, 5.0, 5.0, 5.0, 5.0]
+    assert device.info.output_modes == ("Signal", "Sync")
     assert device.waveforms == [None] * 5
 
 
@@ -290,7 +313,8 @@ def test_export_params_holds_every_setting():
     device.trigger_mode[1] = "Master"
     params = json.loads(json.dumps(device.export_params()))
     assert list(params) == ["sampling_rate", "output_range", "current_waveform", "loop_mode", "loop_duration",
-                            "trigger_mode", "link_trigger_channel1", "link_trigger_channel2"]
+                            "trigger_mode", "link_trigger_channel1", "link_trigger_channel2", "output_mode",
+                            "sync_target", "sync_voltage"]
     assert params["sampling_rate"] == 25000 and params["output_range"] == "-10V:10V"
     assert params["current_waveform"] == [0, 3, 0, 3]
     assert params["loop_mode"] == [False, True, False, False] and params["trigger_mode"] == ["Master", "Normal"]
@@ -306,6 +330,8 @@ def test_import_params_programs_exported_settings():
     device.loop_mode[2] = True
     device.loop_duration[2] = 1.5
     device.link_trigger_channel2[1] = True
+    device.output_mode[3] = "Sync"
+    device.sync_voltage[3] = 3.3
     device.trigger_mode = ["Master", "Param Sync"]
     params = json.loads(json.dumps(device.export_params()))
 
@@ -314,8 +340,9 @@ def test_import_params_programs_exported_settings():
     other_fake.writes.clear()
     other.import_params(params)
     assert other.export_params() == params
+    assert other_fake.output_modes == [0, 0, 1, 0] and other_fake.sync_microvolts == [5000000, 5000000, 3300000, 5000000]
     # No trigger channel leaves param sync mode, so the trigger modes are sent last, entering it
-    assert other_fake.ops() == ["S", "D", "O", "D", "I", "C", "T"], other_fake.ops()
+    assert other_fake.ops() == ["S", "D", "O", "D", "I", "M", "V", "C", "T"], other_fake.ops()
     assert other_fake.writes[-1] == command("T", bytes([4, 3]))
     assert other_fake.current_waveform == [0, 3, 0, 3]                 # Current at once, not stored for an edge
 
@@ -344,7 +371,10 @@ def test_import_params_checks_every_setting_before_sending():
                    {"output_range": "0V:5V", "trigger_mode": ["Toggle", "Normal"]},   # Waveform 1 reaches 8 V
                    {"trigger_mode": ["Normal", "Clock"]},
                    {"link_trigger_channel1": True},                   # A single value for a whole setting
-                   {"sampling_rate": 1000, "loop_duration": [0, 5e6, 0, 0]}):   # Over 2^32 samples at 1 kHz
+                   {"sampling_rate": 1000, "loop_duration": [0, 5e6, 0, 0]},    # Over 2^32 samples at 1 kHz
+                   {"loop_mode": [True] * 4, "output_mode": ["Sync", "Sync", "Signal", "Signal"]},  # 1 reports 2
+                   {"output_mode": ["Signal", "Sync", "Signal", "Signal"], "sync_target": [2, 2, 1, 1]},  # Itself
+                   {"sync_voltage": [5, 5, 5, 5.5]}):
         expect_error(device.import_params, params)
     assert fake.writes == [], fake.ops()
     device.trigger_mode[2] = "Param Sync"
@@ -667,7 +697,7 @@ def test_set_default_params_leaves_param_sync_mode_first():
     device.trigger_mode[1] = "Param Sync"
     fake.writes.clear()
     device.set_default_params()
-    assert fake.ops() == ["T", "S", "D", "R", "O", "D", "I", "C"]  # A new rate resends the loop durations
+    assert fake.ops() == ["T", "S", "D", "R", "O", "D", "I", "M", "V", "C"]  # A new rate resends the loop durations
     assert fake.writes[0] == command("T", bytes(2))
     assert fake.current_waveform == [0, 0, 0, 0] and fake.stored_current_waveform is None
     assert device.current_waveform == [None, 0, 0, 0, 0]
@@ -798,6 +828,18 @@ def test_a_reply_left_unread_is_discarded_and_its_setting_sent_again():
     assert fake.ops() == ["R", "L", "X"] and fake.range_index == 3, fake.ops()
     assert fake.loaded[1].tolist() == [32768, round(15 / 20 * 65535)]
 
+    # A lost output mode change: sent again, with the sync targets that share its op
+    device.sync_target[3] = 4
+    interrupt_next_read(fake)
+    expect_error(device.output_mode.__setitem__, 3, "Sync", error=KeyboardInterrupt)
+    assert fake.output_modes == [0, 0, 1, 0] and device.output_mode[3] == "Signal"
+    fake.writes.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        device.status()
+    assert "op 'M'" in str(caught[0].message), caught[0].message
+    assert fake.writes[0] == command("M", bytes([0, 0, 0, 0, 2, 1, 4, 1])) and fake.output_modes == [0] * 4
+
     # A lost reply to a command that carries no setting is discarded, and nothing is sent again
     interrupt_next_read(fake)
     expect_error(device.status, error=KeyboardInterrupt)
@@ -822,6 +864,75 @@ def test_misspelled_and_matlab_names_are_refused():
     device.sampling_rate = 20000  # The settings, and private attributes, are assigned as before
     device._scratch = 1
     assert fake.ops() == ["S", "D"]
+
+
+def test_output_modes_and_sync_targets_share_op_77():
+    """One op carries the output modes and the sync targets, which the device checks together, so assigning either
+    sends both."""
+    device, fake = connect()
+    device.output_mode[2] = "sync"                       # Not case sensitive. Channel 2 reports channel 1, the default
+    device.sync_target[2] = 3
+    device.output_mode[3:5] = ["Signal", "Sync"]
+    assert fake.writes == [command("M", bytes([0, 1, 0, 0, 2, 1, 1, 1])),
+                           command("M", bytes([0, 1, 0, 0, 2, 3, 1, 1])),
+                           command("M", bytes([0, 1, 0, 1, 2, 3, 1, 1]))], fake.ops()
+    assert device.output_mode == [None, "Signal", "Sync", "Signal", "Sync"]
+    assert device.sync_target == [None, 2, 3, 1, 1]
+    assert fake.output_modes == [0, 1, 0, 1] and fake.sync_targets == [2, 3, 1, 1]
+
+
+def test_sync_voltages_are_sent_in_microvolts():
+    device, fake = connect()
+    device.sync_voltage[1:5] = [3, 3.3, 4.75, np.float32(5)]
+    assert fake.writes == [command("V", struct.pack("<4I", 3000000, 3300000, 4750000, 5000000))], fake.ops()
+    assert device.sync_voltage == [None, 3.0, 3.3, 4.75, 5.0]
+    # The same in every output range: the device converts them, so a range change sends nothing for them
+    fake.writes.clear()
+    device.output_range = "0V:5V"
+    assert fake.ops() == ["R"] and fake.sync_microvolts == [3000000, 3300000, 4750000, 5000000]
+
+
+def test_sync_settings_are_checked_before_sending():
+    device, fake = connect()
+    device.output_mode[2] = "Sync"                        # Reports channel 1
+    fake.writes.clear()
+    for name, index, value in (("sync_target", 3, 3),     # Itself
+                               ("sync_target", 1, 0), ("sync_target", 1, 5), ("sync_target", 1, 1.5),
+                               ("sync_target", 1, True), ("sync_target", 3, "1"),
+                               ("output_mode", 1, "Sync"),     # Channel 2 reports channel 1, which would be a sync channel
+                               ("output_mode", 1, "TTL"), ("output_mode", 1, 1),
+                               ("sync_target", 2, 4),          # ...nor can a sync channel report one
+                               ("sync_voltage", 1, 2.99), ("sync_voltage", 1, 5.01), ("sync_voltage", 1, float("nan")),
+                               ("sync_voltage", 1, True), ("sync_voltage", 1, "5")):
+        if name == "sync_target" and index == 2:
+            device.output_mode[4] = "Sync"
+            fake.writes.clear()
+        expect_error(getattr(device, name).__setitem__, index, value)
+    for name, value in (("output_mode", "Sync"), ("sync_target", 1), ("sync_voltage", 5)):
+        error = expect_error(setattr, device, name, value)   # A single value does not say which channels
+        assert "single value" in str(error), error
+    assert fake.writes == [], fake.ops()
+    assert device.sync_target == [None, 2, 1, 1, 1] and device.output_mode == [None, "Signal", "Sync", "Signal", "Sync"]
+
+
+def test_a_sync_channel_cannot_be_triggered_or_held():
+    """A sync channel plays no waveform: trigger() and set_fixed_voltage() refuse it, and stop() sends as before
+    (the device leaves sync channels alone)."""
+    device, fake = connect()
+    device.load_waveform(1, [0, 1, 2], [1, 2])
+    device.output_mode[2] = "Sync"
+    fake.writes.clear()
+    error = expect_error(device.trigger, [1, 2])
+    assert "Channel 2 is in Sync mode" in str(error) and "channel 1" in str(error), error
+    error = expect_error(device.set_fixed_voltage, 2, 1.0)
+    assert "Channel 2 is in Sync mode" in str(error), error
+    assert fake.writes == []
+    device.trigger(1)
+    device.stop([1, 2])
+    assert fake.writes == [command("P", bytes([0x01])), command("X", bytes([0x03]))]
+    device.output_mode[2] = "Signal"                      # Plays its current waveform again
+    device.trigger(2)
+    assert fake.writes[-1] == command("P", bytes([0x02]))
 
 
 def main():

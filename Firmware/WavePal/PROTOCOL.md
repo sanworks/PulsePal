@@ -50,7 +50,7 @@ The Python and MATLAB classes connect in this order:
 3. Op 100: the circuit board revision. Then op 102: the USB serial number.
 4. Op 89: the client's name, "PYTHON" or "MATLAB", shown as "PYTHON Connected".
 5. Op 88 ('X') with all four channel bits, then the default settings: ops 84, 83, 82, 79, 68,
-   73 and 67. Op 84 comes first: a device left in [param sync mode](#param-sync-trigger-mode-3)
+   73, 77, 86 and 67. Op 84 comes first: a device left in [param sync mode](#param-sync-trigger-mode-3)
    by an earlier session would store op 67 for a TTL edge, and refuse a range change.
 
 When they close, they send op 81, which stops playback and puts "Wave Pal v3.0" back on the
@@ -83,6 +83,8 @@ left then).
 | 68 | `D` | Set loop duration | 4 uint32, one per output channel: samples, 0 = loop until stopped | 1 / 0 |
 | 84 | `T` | Set trigger modes | 2 bytes, one per trigger channel, see [Triggers](#triggers) | 1 / 0 |
 | 73 | `I` | Set trigger links | 8 bytes: trigger channel 1's links to output channels 1-4, then trigger channel 2's. Each is 1 (linked) or 0 | 1 / 0 |
+| 77 | `M` | Set output modes | 8 bytes: the output modes of output channels 1-4 (0 signal, 1 sync), then their sync targets (1-4). See [Sync outputs](#sync-outputs) | 1 / 0 |
+| 86 | `V` | Set sync voltages | 4 uint32, one per output channel: its sync voltage in µV, 3000000 to 5000000. See [Sync outputs](#sync-outputs) | 1 / 0 |
 | 71 | `G` | Get status | none | Playing channel bits (uint8); samples in waveforms 1-4 (4 uint32, 0 = empty; a load stored for a param sync edge counts from the edge); underruns on channels 1-4 (4 uint32, counted since startup); longest playback interrupt since the previous op 71, in nanoseconds (uint32); current waveforms of channels 1-4 (4 bytes, as op 67); then what waits for a param sync edge: waveforms with a load stored (uint8, one bit per waveform, bit 0 = waveform 1), 1 if current waveforms are stored or 0 (uint8), and those current waveforms (4 bytes). 47 bytes in all |
 | 89 | `Y` | Set the client name | 6 characters, shown on the top screen as "NAME Connected" | none |
 | 81 | `Q` | Disconnect: stop all channels, and show the device's own name on the top screen again | none | none |
@@ -107,7 +109,8 @@ Op 90 is for testing, like Pulse Pal's debugging ops 86 and 87: `/Python/PulsePa
 and `/MATLAB/tests/testWavePalDevice.m` use it to check every sample a device played against the waveform
 they loaded.
 
-Op 33 stops playback on its channels. The voltage holds until the channel plays or is stopped.
+Op 33 stops playback on its channels. The voltage holds until the channel plays or is stopped. It
+refuses (0) a channel in [sync mode](#sync-outputs), whose voltage follows the channel it reports.
 
 Op 83 takes effect at once, also during playback. Loop durations are counted in samples, so a
 client that keeps them in seconds sends op 68 again after op 83, as the Python and MATLAB
@@ -158,7 +161,8 @@ the range, the device stops all playback, sets every output to 0 V and **unloads
 waveform** (both memory blocks of each, so a load stored for a param sync edge too), so that
 nothing plays at a voltage it was not made for. The channels keep their current waveforms. The
 client sends the waveforms again, encoded for the new range. Op 82 with the range already in use
-changes nothing. In param sync mode op 82 refuses a new range, since the client's loads would wait
+changes nothing. The [sync voltages](#sync-outputs) are kept in µV, so they stay the same in the new
+range. In param sync mode op 82 refuses a new range, since the client's loads would wait
 for an edge instead of replacing the waveforms.
 
 The zero code calibration that Pulse Pal firmware stores in EEPROM (Pulse Pal op 96) is applied
@@ -182,15 +186,16 @@ With loop mode on and a loop duration of 0, a channel in gated mode plays for ex
 the TTL is high.
 
 A soft trigger (op 80) starts idle channels, and channels that are playing ignore it, as in Pulse
-Pal firmware, whatever the trigger modes. A channel with no waveform ignores triggers. Op 88 stops
-channels.
+Pal firmware, whatever the trigger modes. A channel with no waveform, or in
+[sync mode](#sync-outputs), ignores triggers. Op 88 stops channels.
 
 A channel stops when:
 
 - its last sample has played and loop mode is off;
 - in loop mode, when the loop duration has elapsed (a duration of 0 loops until stopped);
-- op 88, op 33, op 82 (range change), op 76 (see [Waveforms](#waveforms)), a toggle or gated
-  trigger, a master trigger with no current waveform, or the joystick menu stops it.
+- op 88, op 33, op 82 (range change), op 76 (see [Waveforms](#waveforms)), op 77 putting it in
+  sync mode, a toggle or gated trigger, a master trigger with no current waveform, or the joystick
+  menu stops it.
 
 A stopped channel outputs 0 V. After the last sample, the output returns to 0 V one sample
 period later.
@@ -241,6 +246,41 @@ All channels share one sample clock, which runs only while a channel is playing.
 - **Trigger pulses** must be longer than a few microseconds. Edges are caught by interrupts,
   not by polling, so the pulse only has to outlast the interrupt latency.
 
+## Sync outputs
+
+Each output channel has an output mode (op 77). In signal mode (0), the default, it plays its
+current waveform when it is triggered. In sync mode (1) it plays no waveform: it reports the
+playback of another output channel, its sync target, as a TTL logic level, for example to mark a
+waveform's onset and offset for a recording system. It is at its sync voltage (op 86) while the
+target plays, and at 0 V otherwise.
+
+- **High** on the same DAC update as the target's first sample: from idle, a few microseconds
+  after the trigger; while the sample clock runs, on its next tick.
+- **Low** on the update that returns the target to 0 V: one sample period after its last sample,
+  so the sync output is high for exactly the waveform's duration, or its loop duration. A target
+  stopped by op 88, op 33, a toggle or gated trigger or the menu takes its sync outputs low at
+  once, with its own output. A master trigger that restarts the target leaves them high.
+- **Several** sync channels can report the same target. Each one written adds about 1 µs to that
+  update, as for any channel (the DAC latches once every channel has been written).
+
+Op 77 sends every channel's output mode and sync target together, so that the device can check
+them as a set. It refuses (0) a mode other than 0 or 1, a target outside 1-4, a channel that
+targets itself, and a channel in sync mode whose target is in sync mode too, which plays nothing.
+A channel's target is checked in signal mode too, and applies once it enters sync mode. A channel
+entering sync mode stops playing, and takes its target's level at once, as does a sync channel
+given a new target. A channel leaving sync mode goes to 0 V, and plays its waveform from its next
+trigger. Like every op but 76 and 67, op 77 applies at once in param sync mode.
+
+A channel in sync mode ignores soft triggers (op 80), TTL edges, its trigger links and the menu,
+and op 88 leaves it alone: its level always follows its target. Op 33 refuses it. Its current
+waveform, loop settings and links are kept, and apply again in signal mode. Op 71 never reports it
+as playing.
+
+The sync voltage (op 86) is sent in µV, 3 V to 5 V: within every output range. The device converts
+it to the DAC code of that voltage in the current range, as the clients convert a sample (code 0 at
+the bottom of the range, 65535 at the top, rounded to the nearest code, halfway to even), so a range
+change keeps it in volts. A sync output that is high changes to a new voltage at once.
+
 ## Storage and buffering
 
 - Each memory block's first 16384 samples (op 78 reports the number) are kept in RAM from the
@@ -273,7 +313,8 @@ At startup and after a comm failure: both trigger channels in normal mode (so an
 a param sync edge becomes current first), 10 kHz sampling rate, -10 V to 10 V range, loop mode
 off, loop durations 0, no output channel linked to a trigger channel (so a TTL starts nothing
 until a client links one; until October 2026, output channels 1-4 were linked to trigger channel
-1), and no current waveform on any channel. The Python and MATLAB classes program the same
+1), every output channel in signal mode with sync targets 2, 1, 1, 1 (channel 1 reports channel 2,
+the others channel 1) and sync voltages of 5 V, and no current waveform on any channel. The Python and MATLAB classes program the same
 defaults when they connect.
 
 ## Differences from WavePlayer
@@ -289,3 +330,4 @@ defaults when they connect.
 | `S` sends the sample period (float32) | Op 83 sends the rate in Hz (uint32) |
 | `X` stops every channel | Op 88 takes channel bits |
 | Six output ranges, including 0-12 V and ±12 V | Four output ranges, without the 12 V ones, indexed 0-3 |
+| Every channel plays waveforms | Op 77: a channel in sync mode reports another channel's playback as a TTL level |

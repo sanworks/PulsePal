@@ -39,7 +39,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // MENU_TOP          "Wave Pal v3.0" / "Click for menu". Click -> MENU_LIST, at channel 1
 // MENU_LIST         menuItem  1-4  Output channels 1-4. A click plays the channel's current waveform, or stops it while
 //                                  it plays; the second line says which, with the waveform's number ("Play waveform
-//                                  2"), or "No waveform". The trigger mode does not apply here.
+//                                  2"), or "No waveform". The trigger mode does not apply here. A channel in sync mode
+//                                  shows the channel it reports ("Sync: channel 1"), and a click does nothing.
 //                             5    Screen saver on/off: a click switches it (MENU_ITEM_SCREEN_SAVER). Its timeout
 //                                  is set over USB only (op 99).
 //                             6    Device info -> MENU_DEVICE_INFO (MENU_ITEM_DEVICE_INFO)
@@ -97,7 +98,7 @@ void onMenuClick() {
         if (playing[channel] && !stopAfterWrite[channel]) {
           stopChannels(bit(channel));
         } else {
-          startChannels(bit(channel)); // Does nothing if the channel has no waveform
+          startChannels(bit(channel)); // Does nothing if the channel has no waveform, or is in sync mode
         }
         interrupts();
         RefreshMenuList();
@@ -143,8 +144,12 @@ void scrollMenu(int8_t direction) {
 }
 
 // What a channel's menu item shows: 0 = no waveform; or the number (1-4) of the waveform a click plays; or, while the
-// channel plays, 8 + the number of the waveform it plays, which a click stops
+// channel plays, 8 + the number of the waveform it plays, which a click stops; or, in sync mode, 16 + the number (1-4)
+// of the channel it reports
 int32_t channelMenuState(byte channel) {
+  if (outputMode[channel] == OUTPUT_MODE_SYNC) {
+    return 16 + syncTarget[channel] + 1;
+  }
   if (playing[channel] && !stopAfterWrite[channel]) {
     return 8 + (playBlock[channel] / 2) + 1;
   }
@@ -164,7 +169,10 @@ void RefreshMenuList() {
     default: { // Output channels 1-4
       shownChannelState = channelMenuState(menuItem - 1);
       char action[17] = "No waveform"; // 16 characters, the screen's width, and the terminator
-      if (shownChannelState > 0) { // Not snprintf(), which would add 20kB of printf code to the RAM the code runs from
+      if (shownChannelState > 16) {
+        strcpy(action, "Sync: channel 0");
+        action[14] = '0' + (shownChannelState - 16);
+      } else if (shownChannelState > 0) { // Not snprintf(), which would add 20kB of printf code to the RAM the code runs from
         strcpy(action, (shownChannelState > 8) ? "Stop waveform 0" : "Play waveform 0");
         action[14] = '0' + (shownChannelState & 7);
       }

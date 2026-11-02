@@ -79,6 +79,19 @@ W.load_waveform(1, next_trial_wave)   # stored: waveform 1 plays on, unchanged
 # The next rising edge on trigger channel 2 makes it current
 ```
 
+## Sync outputs
+
+An output channel in `"Sync"` mode (`WavePalDevice.output_mode`) plays no
+waveform: it reports another channel's playback as a TTL logic level, for
+example to mark a waveform's onset and offset for a recording system. It
+is at its `WavePalDevice.sync_voltage` while the channel in
+`WavePalDevice.sync_target` plays, and at 0 V otherwise.
+
+```python
+W.output_mode[4] = "Sync"   # channel 4 reports channel 1, its default sync_target...
+W.sync_voltage[4] = 3.3     # ...at 3.3 V
+```
+
 ## Units
 
 Voltages are in volts, within `WavePalDevice.output_range`. Times are in
@@ -113,7 +126,7 @@ import serial
 from . import _common
 from ._common import ChannelSettings, PulsePalError, to_bool, to_name
 
-__all__ = ["WavePalDevice", "DeviceInfo", "DeviceStatus", "OUTPUT_RANGES", "TRIGGER_MODES"]
+__all__ = ["WavePalDevice", "DeviceInfo", "DeviceStatus", "OUTPUT_RANGES", "TRIGGER_MODES", "OUTPUT_MODES"]
 __docformat__ = "google"
 
 OUTPUT_RANGES = {
@@ -131,10 +144,17 @@ TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync", "Master")
 # Each trigger mode's code on the device. The first four are Pulse Pal's codes.
 _TRIGGER_MODE_CODES = {"Normal": 0, "Toggle": 1, "Gated": 2, "Param Sync": 3, "Master": 4}
 
+OUTPUT_MODES = ("Signal", "Sync")
+"""Names of the output modes, in order of their code on the device. See
+`WavePalDevice.output_mode`."""
+
+_DEFAULT_SYNC_TARGETS = [2, 1, 1, 1]  # Channel 1 reports channel 2, and the others report channel 1
+_SYNC_VOLTAGE_LIMITS = (3.0, 5.0)  # Volts. Within every output range
+
 
 # The channel settings export_params() returns, after the sampling rate and the output range
 _CHANNEL_SETTINGS = ("current_waveform", "loop_mode", "loop_duration", "trigger_mode", "link_trigger_channel1",
-                     "link_trigger_channel2")
+                     "link_trigger_channel2", "output_mode", "sync_target", "sync_voltage")
 _SETTING_NAMES = ("sampling_rate", "output_range", *_CHANNEL_SETTINGS)  # The names a script assigns
 # The ops whose reply _write_command() does not track: those with no reply ('P', 'X', 81 and 89), and the handshake
 # (72), whose reply read_handshake_reply() reads until the device is quiet
@@ -206,6 +226,10 @@ class DeviceInfo:
     trigger_modes: tuple = TRIGGER_MODES
     """Names of the trigger modes, accepted by
     `WavePalDevice.trigger_mode`."""
+
+    output_modes: tuple = OUTPUT_MODES
+    """Names of the output modes, accepted by
+    `WavePalDevice.output_mode`."""
 
 
 @dataclass
@@ -314,6 +338,8 @@ class WavePalDevice:
     _OP_SET_LOOP_DURATION = ord("D")
     _OP_SET_TRIGGER_MODE = ord("T")
     _OP_SET_TRIGGER_LINKS = ord("I")
+    _OP_SET_OUTPUT_MODES = ord("M")
+    _OP_SET_SYNC_VOLTAGES = ord("V")
     _OP_GET_STATUS = ord("G")
     _OP_GET_PLAYBACK_CHECKSUMS = ord("Z")
 
@@ -324,7 +350,7 @@ class WavePalDevice:
     _UINT32_MAX = 2**32 - 1
     _ALL_CHANNELS = 0x0F
     # The ops that carry a setting, which _discard_lost_reply() sends again if the reply to one is lost
-    _SETTING_OPS = frozenset(map(ord, "SRCODTI"))
+    _SETTING_OPS = frozenset(map(ord, "SRCODTIMV"))
 
     _reply_pending = None  # The op code of a command whose reply has not been read in full yet (see _write_command())
 
@@ -369,6 +395,12 @@ class WavePalDevice:
         self._link_trigger_channel2 = ChannelSettings(
             "link_trigger_channel2", [False] * 4, self,
             "_apply_trigger_channel2_links")
+        self._output_mode = ChannelSettings(
+            "output_mode", ["Signal"] * 4, self, "_apply_output_mode")
+        self._sync_target = ChannelSettings(
+            "sync_target", list(_DEFAULT_SYNC_TARGETS), self, "_apply_sync_target")
+        self._sync_voltage = ChannelSettings(
+            "sync_voltage", [5.0] * 4, self, "_apply_sync_voltage")
 
         port_name = _common.port_name_from(port_name, serial_number, "WavePalDevice")
         self.port = serial.Serial(
@@ -428,8 +460,10 @@ class WavePalDevice:
         The defaults are both trigger channels in normal mode, a 10 kHz
         sampling rate, the -10 V to 10 V output range, loop mode off with
         loop durations of 0, no output channel linked to a trigger channel
-        (so a TTL starts nothing until a script links it), and no current
-        waveform on any channel. They match the settings the device starts with. The
+        (so a TTL starts nothing until a script links it), every channel in
+        `"Signal"` output mode, with sync targets `[2, 1, 1, 1]` and sync
+        voltages of 5 V, and no current waveform on any channel. They match
+        the settings the device starts with. The
         trigger modes are sent first: a trigger channel leaving param sync
         mode makes what was stored for its next edge current, and the
         settings after it then apply at once.
@@ -447,6 +481,8 @@ class WavePalDevice:
         self.loop_mode = [False] * 4
         self.loop_duration = [0] * 4
         self._set_trigger_links([False] * 4, [False] * 4)
+        self._set_output_modes(["Signal"] * 4, _DEFAULT_SYNC_TARGETS)
+        self.sync_voltage = [5.0] * 4
         self.current_waveform = [0] * 4
 
     @property
@@ -668,6 +704,80 @@ class WavePalDevice:
     def link_trigger_channel2(self, values):
         self._link_trigger_channel2._assign(values)
 
+    @property
+    def output_mode(self):
+        """What each output channel outputs: `"Signal"` or `"Sync"`.
+
+        Indexed by channel number (see "Channel settings" above).
+
+        - `"Signal"`, the default: the channel plays its
+          `WavePalDevice.current_waveform` when it is triggered.
+        - `"Sync"`: the channel plays no waveform. It reports the playback
+          of another output channel, its `WavePalDevice.sync_target`, as a
+          TTL logic level: `WavePalDevice.sync_voltage` while the target
+          plays, and 0 V otherwise. It goes high on the same output update
+          as the target's first sample, and low on the update that returns
+          the target to 0 V, one sample period after its last sample, or as
+          soon as the target is stopped. So it is high for exactly the
+          waveform's duration (or loop duration). A restart in master mode
+          leaves it high.
+
+        A channel in Sync mode ignores triggers, its trigger links and
+        `WavePalDevice.stop`, and `WavePalDevice.trigger` and
+        `WavePalDevice.set_fixed_voltage` raise an error for it. A channel
+        entering Sync mode stops playing, and takes its target's level at
+        once. A channel cannot report another channel in Sync mode, which
+        plays nothing. Names are not case sensitive. In param sync mode, a
+        change applies at once.
+
+        ```python
+        W.output_mode[2] = "Sync"   # channel 2 reports channel 1, its default sync_target
+        ```
+        """
+        return self._output_mode
+
+    @output_mode.setter
+    def output_mode(self, values):
+        self._output_mode._assign(values)
+
+    @property
+    def sync_target(self):
+        """The output channel each channel reports in Sync mode.
+
+        Indexed by channel number (see "Channel settings" above). Each
+        value is another output channel's number, 1-4: a channel cannot
+        report itself, and a channel in Sync mode cannot report one that is
+        in Sync mode too. Only channels in Sync mode use it (see
+        `WavePalDevice.output_mode`). The default is `[2, 1, 1, 1]`:
+        channel 1 reports channel 2, and the others report channel 1.
+
+        ```python
+        W.sync_target[4] = 3
+        W.output_mode[4] = "Sync"   # channel 4 reports channel 3
+        ```
+        """
+        return self._sync_target
+
+    @sync_target.setter
+    def sync_target(self, values):
+        self._sync_target._assign(values)
+
+    @property
+    def sync_voltage(self):
+        """Each channel's voltage in Sync mode while its target plays, in volts.
+
+        Indexed by channel number (see "Channel settings" above). 3 V to
+        5 V, and 5 V by default. Only channels in Sync mode use it (see
+        `WavePalDevice.output_mode`). It is the same in every
+        `WavePalDevice.output_range`, so changing the range does not change
+        it. A sync output that is high goes to a new voltage at once.
+        """
+        return self._sync_voltage
+
+    @sync_voltage.setter
+    def sync_voltage(self, values):
+        self._sync_voltage._assign(values)
+
     def set_screen_saver(self, enabled, timeout=1800):
         """Switch the device's screen saver on or off, and set its timeout.
 
@@ -776,6 +886,15 @@ class WavePalDevice:
         for name in ("link_trigger_channel1", "link_trigger_channel2"):
             if name in new:
                 new[name] = [to_bool(value, name) for value in new[name]]
+        if "output_mode" in new:
+            new["output_mode"] = [to_name(value, OUTPUT_MODES, "output mode") for value in new["output_mode"]]
+        if "sync_target" in new:
+            new["sync_target"] = self._normalize_sync_targets(new["sync_target"])
+        if "sync_voltage" in new:
+            new["sync_voltage"] = self._normalize_sync_voltages(new["sync_voltage"])
+        output_modes = new.get("output_mode", list(self._output_mode)[1:])
+        sync_targets = new.get("sync_target", list(self._sync_target)[1:])
+        self._check_output_modes(output_modes, sync_targets)
         modes = list(self._trigger_mode)[1:]
         if "trigger_mode" in new:
             modes = [to_name(value, TRIGGER_MODES, "trigger mode") for value in new["trigger_mode"]]
@@ -803,6 +922,10 @@ class WavePalDevice:
         if "link_trigger_channel1" in new or "link_trigger_channel2" in new:
             self._set_trigger_links(new.get("link_trigger_channel1", self._link_trigger_channel1[1:]),
                                     new.get("link_trigger_channel2", self._link_trigger_channel2[1:]))
+        if "output_mode" in new or "sync_target" in new:
+            self._set_output_modes(output_modes, sync_targets)
+        if "sync_voltage" in new:
+            self.sync_voltage = new["sync_voltage"]
         if "current_waveform" in new:
             self.current_waveform = new["current_waveform"]
         if modes != first_modes:
@@ -905,10 +1028,16 @@ class WavePalDevice:
         Raises:
             PulsePalError: If a channel has no waveform to play: its
                 `WavePalDevice.current_waveform` is 0, or a waveform this
-                object has not loaded. Nothing is sent.
+                object has not loaded, or it is in Sync mode (see
+                `WavePalDevice.output_mode`). Nothing is sent.
         """
         channel_list = _common.channel_numbers(channels)
         for channel in channel_list:
+            if self._output_mode[channel] == "Sync":
+                raise PulsePalError(
+                    f"Channel {channel} is in Sync mode: it reports channel {self._sync_target[channel]}'s playback, "
+                    f"and plays no waveform. Set output_mode[{channel}] = 'Signal' to play one."
+                )
             number = self._current_waveform[channel]
             if number == 0:
                 raise PulsePalError(
@@ -924,6 +1053,9 @@ class WavePalDevice:
 
     def stop(self, channels=None):
         """Stop playback. The stopped channels output 0 V.
+
+        Channels in Sync mode are left alone: they go low once the channels
+        they report stop. See `WavePalDevice.output_mode`.
 
         Args:
             channels: Output channel number 1-4, or several as a list,
@@ -944,10 +1076,18 @@ class WavePalDevice:
             voltage: Voltage, within `WavePalDevice.output_range`.
 
         Raises:
-            PulsePalError: If the voltage is outside the output range, or
-                the device rejects the command.
+            PulsePalError: If the voltage is outside the output range, a
+                channel is in Sync mode, whose voltage follows its target
+                (see `WavePalDevice.output_mode`), or the device rejects the
+                command.
         """
         bits = _common.channel_bits(channels)
+        for channel in _common.channel_numbers(channels):
+            if self._output_mode[channel] == "Sync":
+                raise PulsePalError(
+                    f"Channel {channel} is in Sync mode: its voltage follows channel {self._sync_target[channel]}'s "
+                    f"playback. Set output_mode[{channel}] = 'Signal' first."
+                )
         code = int(self._volts_to_codes([voltage])[0])
         self._write_command(self._OP_SET_FIXED_VOLTAGE,
                             struct.pack("<BH", bits, code))
@@ -1072,6 +1212,9 @@ class WavePalDevice:
             f"trigger_mode: {list(self._trigger_mode)}\n"
             f"link_trigger_channel1: {list(self._link_trigger_channel1)}\n"
             f"link_trigger_channel2: {list(self._link_trigger_channel2)}\n"
+            f"output_mode: {list(self._output_mode)}\n"
+            f"sync_target: {list(self._sync_target)}\n"
+            f"sync_voltage: {list(self._sync_voltage)}\n"
             f"waveforms: {loaded}"
         )
 
@@ -1232,6 +1375,81 @@ class WavePalDevice:
                             bytes([*map(int, links1), *map(int, links2)]))
         self._read_ack("setting the trigger channel links")
 
+    # One op programs the output modes and the sync targets, which the device
+    # checks together, so each list is sent with the other's current values
+    def _apply_output_mode(self, values):
+        modes = [to_name(value, OUTPUT_MODES, "output mode") for value in values]
+        self._send_output_modes(modes, self._sync_target[1:])
+        return modes
+
+    def _apply_sync_target(self, values):
+        targets = self._normalize_sync_targets(values)
+        self._send_output_modes(self._output_mode[1:], targets)
+        return targets
+
+    def _set_output_modes(self, modes, targets):
+        """Program the output modes and the sync targets with one command."""
+        self._send_output_modes(modes, targets)
+        self._output_mode._store(modes)
+        self._sync_target._store(targets)
+
+    def _send_output_modes(self, modes, targets):
+        self._check_output_modes(modes, targets)
+        self._write_command(self._OP_SET_OUTPUT_MODES,
+                            bytes([*(OUTPUT_MODES.index(mode) for mode in modes), *targets]))
+        self._read_ack("setting output_mode and sync_target")
+
+    def _normalize_sync_targets(self, values):
+        """Check new sync targets for all channels, and return them as the list holds them."""
+        targets = []
+        for channel, value in enumerate(values, start=1):
+            if (isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Integral)
+                    or not 1 <= value <= self.info.n_channels):
+                raise PulsePalError(
+                    f"sync_target values are output channel numbers, 1-{self.info.n_channels}. Received {value!r}."
+                )
+            if value == channel:
+                raise PulsePalError(
+                    f"sync_target[{channel}] cannot be {channel}: a channel cannot report itself. Choose another "
+                    "output channel."
+                )
+            targets.append(int(value))
+        return targets
+
+    @staticmethod
+    def _check_output_modes(modes, targets):
+        """Check that no channel in Sync mode reports a channel in Sync mode, which plays nothing."""
+        for channel, (mode, target) in enumerate(zip(modes, targets), start=1):
+            if mode == "Sync" and modes[target - 1] == "Sync":
+                raise PulsePalError(
+                    f"Channel {channel} would be in Sync mode, reporting channel {target}, which would be in Sync mode "
+                    f"too, and plays no waveform. Set sync_target[{channel}] to a channel in Signal mode, or "
+                    f"output_mode[{target}] to 'Signal' first."
+                )
+
+    def _apply_sync_voltage(self, values):
+        voltages = self._normalize_sync_voltages(values)
+        self._send_sync_voltages(voltages)
+        return voltages
+
+    @staticmethod
+    def _normalize_sync_voltages(values):
+        """Check new sync voltages for all channels, and return them as the list holds them, in volts."""
+        low, high = _SYNC_VOLTAGE_LIMITS
+        for value in values:
+            # Written so that NaN fails it
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real) or not low <= value <= high:
+                raise PulsePalError(
+                    f"sync_voltage values are in volts, {low:g} to {high:g}. Received {value!r}."
+                )
+        return [float(value) for value in values]
+
+    def _send_sync_voltages(self, voltages):
+        # In microvolts: the device converts them to DAC codes for its output range
+        self._write_command(self._OP_SET_SYNC_VOLTAGES,
+                            struct.pack("<4I", *(round(volts * 1e6) for volts in voltages)))
+        self._read_ack("setting sync_voltage")
+
     def _actual_rate(self, rate_hz):
         # The sample period is the nearest whole number of clock cycles, computed in integers as the
         # firmware's setSamplingRate() does. A rate halfway between two (e.g. 3072 Hz: 7812.5 cycles)
@@ -1379,6 +1597,10 @@ class WavePalDevice:
         elif op == self._OP_SET_TRIGGER_MODE:
             self._write_command(op, bytes(_TRIGGER_MODE_CODES[name] for name in self._trigger_mode[1:]))
             self._read_ack("setting trigger_mode")
+        elif op == self._OP_SET_OUTPUT_MODES:
+            self._send_output_modes(self._output_mode[1:], self._sync_target[1:])
+        elif op == self._OP_SET_SYNC_VOLTAGES:
+            self._send_sync_voltages(self._sync_voltage[1:])
         else:  # Trigger links
             self._send_trigger_links(self._link_trigger_channel1[1:], self._link_trigger_channel2[1:])
 

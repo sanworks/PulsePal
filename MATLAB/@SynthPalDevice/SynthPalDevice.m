@@ -1,3 +1,4 @@
+
 % SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four channel
 % waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave or white noise, or steps to
 % a fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(), or from the

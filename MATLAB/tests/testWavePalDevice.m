@@ -36,7 +36,8 @@ tests = {@testConnectionAndDefaults, @testWaveformsPlayExactly, @testLoopDuratio
     @testSamplingRateResendsLoopDurations, @testHalfwayValuesRoundAsInPython, @testTriggerModes, @testOneWaveformOnSeveralChannels, ...
     @testCurrentWaveformChangesAtTheNextStart, @testParamSyncWaitsForAnEdge, ...
     @testOutputRangeChangeReloadsWaveforms, @testEveryOutputRangePlays, @testFixedVoltageAndStop, ...
-    @testScreenSaverAndExportParams, @testImportParams, @testInvalidArgumentsAreRefused, @testFullLengthWaveform};
+    @testSyncOutputs, @testScreenSaverAndExportParams, @testImportParams, @testInvalidArgumentsAreRefused, ...
+    @testFullLengthWaveform};
 rng(1);
 W = WavePalDevice(portString);
 nFailed = 0;
@@ -90,6 +91,9 @@ assert(isequal(W.status().currentWaveform, zeros(1,4)), 'the device has current 
 assert(isequal(W.loopMode, false(1,4)) && isequal(W.loopDuration, zeros(1,4)), 'default loop settings');
 assert(isequal(W.triggerMode, {'Normal', 'Normal'}), 'default trigger mode');
 assert(isequal(W.linkTriggerChannel1, false(1,4)) && isequal(W.linkTriggerChannel2, false(1,4)), 'default links');
+assert(isequal(W.outputMode, {'Signal', 'Signal', 'Signal', 'Signal'}), 'default output modes');
+assert(isequal(W.syncTarget, [2 1 1 1]) && isequal(W.syncVoltage, [5 5 5 5]), 'default sync targets or voltages');
+assert(isequal(W.info.outputModes, {'Signal', 'Sync'}), 'info.outputModes');
 assert(isempty(W.status().playing), 'a channel is playing after connecting');
 end
 
@@ -298,7 +302,8 @@ params = W.exportParams();
 assert(isequal(params.loopMode, [false true false false]) && params.loopDuration(2) == 0.5, 'exported loop settings');
 assert(params.samplingRate == W.samplingRate && strcmp(params.outputRange, W.outputRange), 'exported device settings');
 assert(isequal(fieldnames(params)', {'samplingRate', 'outputRange', 'currentWaveform', 'loopMode', 'loopDuration', ...
-    'triggerMode', 'linkTriggerChannel1', 'linkTriggerChannel2'}), 'exported fields');
+    'triggerMode', 'linkTriggerChannel1', 'linkTriggerChannel2', 'outputMode', 'syncTarget', 'syncVoltage'}), ...
+    'exported fields');
 assert(isequal(params.currentWaveform, W.currentWaveform), 'exported current waveforms');
 W.loopMode(2) = false;
 W.loopDuration(2) = 0;
@@ -316,6 +321,9 @@ W.loopMode(3) = true;
 W.loopDuration(3) = 0.5;
 W.currentWaveform = [0 2 2 0];
 W.linkTriggerChannel2(4) = true;
+W.syncTarget(1) = 3;
+W.outputMode{1} = 'Sync';
+W.syncVoltage(1) = 3.3;
 W.triggerMode = {'Master', 'Param Sync'};
 expected = W.exportParams();
 setNormalMode(W);
@@ -323,8 +331,10 @@ W.samplingRate = 10000;
 resetLoops(W);
 W.currentWaveform = zeros(1,4);
 W.linkTriggerChannel2(4) = false;
+resetSyncOutputs(W);
 W.importParams(jsondecode(jsonencode(expected))); % As read from a .json file: columns
-assert(isequal(W.exportParams(), expected), 'imported settings');
+imported = W.exportParams();
+assert(isequal(imported, expected), 'imported settings');
 status = W.status();
 assert(isequal(status.currentWaveform, [0 2 2 0]), 'the current waveforms waited for an edge');
 expectError(@() W.importParams(struct('currentWaveform', [5 0 0 0], 'loopMode', [true true true true])));
@@ -337,6 +347,54 @@ resetLoops(W);
 W.samplingRate = 10000;
 W.currentWaveform = zeros(1,4);
 W.linkTriggerChannel2(4) = false;
+resetSyncOutputs(W);
+end
+
+function testSyncOutputs(W)
+% A channel in 'Sync' outputMode plays no waveform: trigger() and setFixedVoltage() refuse it, and the device skips it.
+% Its target plays as before. The class refuses a channel reporting itself or a sync channel, and voltages outside
+% 3-5 V, and changes nothing then. Only a scope can check the sync voltage itself.
+cleanup = onCleanup(@() resetSyncOutputs(W));
+setNormalMode(W);
+W.samplingRate = 100000;
+codes = loadRandomWaveform(W, 1, 3000, -5, 5, [1 2]);
+W.outputMode{2} = 'sync'; % Not case sensitive. Reports channel 1, its default syncTarget
+assert(isequal(W.outputMode, {'Signal', 'Sync', 'Signal', 'Signal'}), 'output modes');
+W.syncVoltage(2) = 3.3;
+expectError(@() W.trigger(2));
+expectError(@() W.setFixedVoltage(2, 1));
+W.linkTriggerChannel1(2) = true; % A TTL would skip it too
+W.trigger(1);
+assert(isequal(W.status().playing, 1), 'only channel 1 plays');
+waitUntilStopped(W, 1, 2);
+checkPlayed(W, 1, codes, numel(codes));
+W.stop(2); % Leaves a sync channel alone, without an error
+% Refused, and nothing changes
+expectError(@() setProperty(W, 'syncTarget', [2 1 3 1])); % Channel 3 reports itself
+expectError(@() setProperty(W, 'syncTarget', [2 1 5 1]));
+expectError(@() setProperty(W, 'syncTarget', [2 1 1.5 1]));
+expectError(@() setProperty(W, 'syncTarget', 1)); % A single value does not say which channels it is meant for
+expectError(@() setProperty(W, 'outputMode', {'Sync', 'Sync', 'Signal', 'Signal'})); % Channel 1 reports 2, a sync channel
+expectError(@() setProperty(W, 'outputMode', {'Signal', 'Sync', 'Signal', 'TTL'}));
+expectError(@() setProperty(W, 'outputMode', 'Sync'));
+expectError(@() setProperty(W, 'syncVoltage', [5 2.99 5 5]));
+expectError(@() setProperty(W, 'syncVoltage', [5 5.01 5 5]));
+expectError(@() setProperty(W, 'syncVoltage', [5 NaN 5 5]));
+expectError(@() setProperty(W, 'syncVoltage', 5));
+assert(isequal(W.outputMode, {'Signal', 'Sync', 'Signal', 'Signal'}) && isequal(W.syncTarget, [2 1 1 1]) && ...
+    isequal(W.syncVoltage, [5 3.3 5 5]), 'a refused sync setting was changed');
+% Both change together: channel 1 becomes a sync channel of channel 3, and channel 2 plays again
+W.importParams(struct('outputMode', {{'Sync', 'Signal', 'Signal', 'Signal'}}, 'syncTarget', [3 1 1 1]));
+W.trigger(2);
+waitUntilStopped(W, 2, 2);
+checkPlayed(W, 2, codes, numel(codes));
+end
+
+function resetSyncOutputs(W)
+W.outputMode = {'Signal', 'Signal', 'Signal', 'Signal'};
+W.syncTarget = [2 1 1 1];
+W.syncVoltage = [5 5 5 5];
+W.linkTriggerChannel1 = false(1,4);
 end
 
 function testInvalidArgumentsAreRefused(W)

@@ -5,7 +5,8 @@ player, ported from the WavePlayer firmware of the Bpod Analog Output Module. It
 waveforms of up to 1 million samples each, and each output channel plays one of them (its current
 waveform), streamed from the microSD card, when a TTL edge, a USB command or the joystick menu
 triggers it. Each waveform has two memory blocks, as in the Bpod AudioPlayer Live firmware, so
-that in param sync mode the next trial's waveform loads while the current one plays. The USB
+that in param sync mode the next trial's waveform loads while the current one plays. A channel in
+sync mode plays no waveform: it reports another channel's playback as a TTL level. The USB
 protocol is in `PROTOCOL.md` in this folder. Read this page before changing anything here.
 
 ## Where things are
@@ -17,7 +18,7 @@ The sketch is split into tabs. Arduino joins them into one file before compiling
 | Tab | Contents |
 |---|---|
 | `WavePal.ino` | Build configuration, pin map, named constants, global variables, `setup()`, `loop()` |
-| `Playback.ino` | `handler()` (the sample clock interrupt), the trigger interrupts, param sync, starting and stopping channels. "Waveforms" at the top explains the waveforms, memory blocks and param sync, and "How playback works" the buffering |
+| `Playback.ino` | `handler()` (the sample clock interrupt), the trigger interrupts, param sync, sync outputs, starting and stopping channels. "Waveforms" at the top explains the waveforms, memory blocks and param sync, "Sync outputs" the sync mode, and "How playback works" the buffering |
 | `Storage.ino` | The waveform data file, `refillPlaybackBuffers()` and `forgetBufferedBlock()` |
 | `USBOps.ino` | Commands from the PC (`processUSBCommands()`), `loadWaveform()`, comm failure handling |
 | `Menu.ino` | Thumb joystick menu, with its map |
@@ -96,6 +97,17 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
     playback buffers holding its chunks empty (`forgetBufferedBlock()`), as `loadWaveform()` and
     `unloadWaveforms()` do. Changing what a channel will play next (`currentWaveform[]`,
     `currentBlock[]`) is safe at any time: it applies from the channel's next start.
+11. **A sync output changes only where its target's output changes**, so that both change on
+    the same latch: `startChannels()` (first sample), `endPlayback()` (the 0 V after the last
+    sample, written on the next tick) and `holdChannels()` (a stop, written at once), through
+    `setSyncFollowers()`. Three traps. `holdChannels()` skips channels in sync mode, so
+    `setOutputModes()` stops a channel entering sync mode before it changes the mode.
+    `holdChannels()` writes the target's followers even if their level has not changed: one may
+    be waiting, low, for a tick that will not come once the sample clock stops. And outside
+    `handler()`, never write a playing channel: its `dacValue[]` holds the sample fetched for the
+    next tick, which would then play early. So `setOutputModes()` and `setSyncVoltages()` write
+    only channels in sync mode, and channels leaving it. A sync channel never plays, so a tick
+    still writes at most four channels.
 
 ## What runs in the playback interrupts
 
@@ -105,12 +117,13 @@ built for the wrong PCB drives the joystick button line as the DAC's SYNC output
 | Trigger channels | `trigger1ISR()`, `trigger2ISR()`, both through `triggerInterrupt()` | Every edge on the trigger inputs |
 
 They call `startChannels()`, `stopChannels()`, `holdChannels()`, `processTriggerEdge()`,
-`releaseGatedChannels()`, `applyStoredSet()` (a param sync edge), `fetchNextSample()` and the
-DAC functions. Shared with `loop()`: the playback state (`playing`, `stopAfterWrite`,
-`playBlock`, `playChunk`, ...), `bufferChunk` and `bufferBlock`, `nSamples`, the waveforms'
-`currentBlock`, the settings (`currentWaveform`, `loopMode`, `loopDuration`, `triggerMode`,
-`TriggerAddress`), what waits for a param sync edge (`loadStored`, `storedCurrentWaveform`,
-`currentWaveformsStored`) and `dacValue`.
+`releaseGatedChannels()`, `applyStoredSet()` (a param sync edge), `fetchNextSample()`,
+`setSyncFollowers()` and the DAC functions. Shared with `loop()`: the playback state (`playing`,
+`stopAfterWrite`, `playBlock`, `playChunk`, ...), `bufferChunk` and `bufferBlock`, `nSamples`, the
+waveforms' `currentBlock`, the settings (`currentWaveform`, `loopMode`, `loopDuration`,
+`triggerMode`, `TriggerAddress`), the sync outputs (`outputMode`, `syncTarget`, `syncChannels`,
+`syncFollowers`, `syncHighCode`, `syncHigh`), what waits for a param sync edge (`loadStored`,
+`storedCurrentWaveform`, `currentWaveformsStored`) and `dacValue`.
 
 When the same TTL reaches both trigger channels and one is in param sync mode, either pin
 interrupt can run first. `triggerInterrupt()`, as in Synth Pal, handles the param sync channel's
@@ -148,8 +161,11 @@ others at 100 kHz: the channels must play theirs to the end with no underrun, an
 once an edge makes them current, must play whole and up to random points (a whole waveform's sum
 would not show chunks stored out of order). Without an edge, it checks that param sync mode
 stores loads and current waveforms, that leaving the mode applies them, and that a load into a
-block a channel still plays stops it. With `--driver`, it also checks each trigger mode with TTL
-pulses, and param sync edges: an edge applies the stored set and starts nothing, a playing
+block a channel still plays stops it. In sync mode, it checks that the device refuses what the
+classes refuse (a channel reporting itself or a sync channel, a voltage outside 3-5 V, op 33 on a
+sync channel), that a sync channel ignores soft triggers, TTL edges and stops, that a channel
+entering sync mode stops, and that its target plays exactly. With `--driver`, it also checks each
+trigger mode with TTL pulses, and param sync edges: an edge applies the stored set and starts nothing, a playing
 channel finishes its waveform, and with the same TTL on both trigger channels (either one in
 param sync mode), the channel started plays the new waveform. It also reports transfer speed,
 underruns and the longest sample clock interrupt.
@@ -177,10 +193,18 @@ menu, check:
   a channel plays.
 - Param sync, with the same TTL on both trigger channels: the new waveform starts with the usual
   latency (a few µs from idle), on the scope.
+- Sync outputs, on the scope, with a TTL starting the target over and over: each sync channel
+  rises and falls with its target (from idle, and while another channel keeps the sample clock
+  running), is high for exactly the waveform's duration (also for a one-sample waveform and a loop
+  duration), falls with the target when a gated trigger stops it, stays high through master
+  restarts, and sits at its sync voltage (the same level as that voltage set with op 33 in signal
+  mode) in every output range. A sync voltage change, and a channel entering or leaving sync mode,
+  apply at once while the target plays.
 - The joystick menu: scroll through the channels, screen saver, device info, reboot and exit;
   each channel's item says "Play waveform N" with its current waveform, or "No waveform"; play
   and stop a channel from its item ("Stop waveform N" while it plays), and see the item change
-  back when the waveform ends. The splash screen shows the Wave Pal logo.
+  back when the waveform ends. A channel in sync mode says "Sync: channel N", a click does
+  nothing, and its LED lights while it is high. The splash screen shows the Wave Pal logo.
 - The screen saver: with a short timeout (`set_screen_saver(True, 10)`), the screen dims after
   10 s without activity, and a command, a TTL rising edge, or a joystick click or push brings it
   back; the click or push that wakes it does nothing else. Switch it off from the menu, power

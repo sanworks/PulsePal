@@ -20,12 +20,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
-// Waveform playback: the sample clock interrupt, the trigger inputs, param sync, and starting and stopping output
-// channels.
+// Waveform playback: the sample clock interrupt, the trigger inputs, param sync, sync outputs, and starting and stopping
+// output channels.
 //
 // Functions in this file:
 //   bufferForChunk()
 //   channelStartBlock()
+//   setSyncLevel()
+//   setSyncFollowers()
 //   endPlayback()
 //   fetchNextSample()
 //   handler()
@@ -42,6 +44,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   processTriggerEdge()
 //   anyParamSyncChannel()
 //   applyStoredSet()
+//   isValidOutputModes()
+//   setOutputModes()
+//   microvoltsToCode()
+//   updateSyncCodes()
+//   setSyncVoltages()
 //   setSamplingRate()
 //
 // ---------------------------------------------------------------------------------------------------------------
@@ -73,6 +80,24 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // the other edge starts play the new waveforms. When no trigger channel is left in param sync mode, what is stored
 // becomes current at once, as at an edge, so nothing is left stored for later. (Pulse Pal and Synth Pal firmware
 // discard a stored set then instead. Here the clients' record of the waveforms they loaded stays true.)
+//
+// ---------------------------------------------------------------------------------------------------------------
+// SYNC OUTPUTS
+//
+// Each output channel has an output mode (outputMode[], op 77). In signal mode, the default, it plays its current
+// waveform. In sync mode it plays none: it reports another output channel, its sync target (syncTarget[]), as a TTL
+// logic level. It is at its sync voltage (syncMicrovolts[], op 86, 3-5V) while the target plays, and at 0V otherwise.
+// Triggers skip it (channelStartBlock()), and op 88 and the other stops leave it alone (holdChannels()), so its level
+// always follows its target. A channel in sync mode cannot report another channel in sync mode (isValidOutputModes()),
+// so syncFollowers[] lists, for each channel playing waveforms, the sync channels that report it.
+//
+// The sync output changes on the same DAC latch as its target's output. It goes high with the target's first sample:
+// startChannels() sets it with the first sample, and writes both at once from idle, or leaves both for the next tick
+// of the running clock. It goes low with the 0V after the target's last sample: endPlayback() sets it with that 0V,
+// which handler() writes one sample period after the last sample, so the sync output is high for exactly the
+// waveform's duration. It also goes low at once when the target is stopped (holdChannels()). A restart (master mode)
+// leaves it high. The sync voltage is kept in microvolts and converted to a DAC code for the current output range
+// (syncHighCode[], updateSyncCodes()), so a range change keeps it, and no range can put more than 5V on a sync line.
 //
 // ---------------------------------------------------------------------------------------------------------------
 // HOW PLAYBACK WORKS
@@ -125,21 +150,45 @@ static inline byte bufferForChunk(uint32_t chunk) {
 }
 
 // The memory block a channel plays if it starts now: its current waveform's current block. NO_BLOCK if the channel
-// has no current waveform, or that waveform is empty.
+// has no current waveform, or that waveform is empty, or the channel is in sync mode.
 byte channelStartBlock(byte channel) {
   byte waveform = currentWaveform[channel];
-  if (waveform == 0) {
+  if ((waveform == 0) || (outputMode[channel] == OUTPUT_MODE_SYNC)) {
     return NO_BLOCK;
   }
   byte block = currentBlock[waveform - 1];
   return (nSamples[block] > 0) ? block : NO_BLOCK;
 }
 
-// The waveform on a channel has ended: fetch 0V, and stop the channel once handler() has written it
+// Sets a channel in sync mode high (its sync voltage) or low (0V), from the next DAC write. Its LED shows the level.
+static inline void setSyncLevel(byte channel, boolean high) {
+  syncHigh[channel] = high;
+  dacValue[channel] = high ? syncHighCode[channel] : DACBits_ZeroVolts;
+  DACFlags[channel] = 1;
+  digitalWriteFast(OutputLEDLines[channel], high);
+}
+
+// Sets the sync channels that report a channel high or low, from the next DAC write (see "Sync outputs" above).
+// Returns them, one bit per channel, for a caller that writes the DAC at once.
+static inline byte setSyncFollowers(byte channel, boolean high) {
+  byte followers = syncFollowers[channel];
+  if (followers) {
+    for (byte i = 0; i < N_CHANNELS; i++) {
+      if (bitRead(followers, i)) {
+        setSyncLevel(i, high);
+      }
+    }
+  }
+  return followers;
+}
+
+// The waveform on a channel has ended: fetch 0V, and stop the channel once handler() has written it. The sync channels
+// that report it go low on the same write.
 static inline void endPlayback(byte channel) {
   dacValue[channel] = DACBits_ZeroVolts;
   DACFlags[channel] = 1;
   stopAfterWrite[channel] = true;
+  setSyncFollowers(channel, false);
 }
 
 // Fetches the next sample of a playing channel into dacValue[], for the next dacWrite(). Called from the playback
@@ -221,9 +270,11 @@ boolean anyChannelPlaying() {
 }
 
 // Starts the selected channels (one bit per channel) from the first sample of their current waveform, restarting any
-// that are playing. Channels without a waveform are skipped. Interrupt context, or loop() with interrupts disabled.
+// that are playing. Channels without a waveform, and channels in sync mode, are skipped. The sync channels that report
+// the started channels go high with their first samples. Interrupt context, or loop() with interrupts disabled.
 void startChannels(byte channelBits) {
   byte started = 0;
+  byte followers = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
     byte block = bitRead(channelBits, i) ? channelStartBlock(i) : NO_BLOCK;
     if (block != NO_BLOCK) {
@@ -236,6 +287,7 @@ void startChannels(byte channelBits) {
       stopAfterWrite[i] = false;
       playing[i] = true;
       digitalWriteFast(OutputLEDLines[i], HIGH);
+      followers |= setSyncFollowers(i, true); // Before the fetch: a fetch that ends the waveform sets them low again
       fetchNextSample(i); // The first sample
       bitSet(started, i);
     }
@@ -246,10 +298,10 @@ void startChannels(byte channelBits) {
     // each later sample as soon as it runs, so starting it after this write would make the first sample longer than
     // the others by the time the write takes. handler() cannot run before this function returns, since it has the
     // same interrupt priority (or interrupts are disabled). No other channel has a sample waiting, since none was
-    // playing.
+    // playing. The sync channels that report the started channels are written on the same latch.
     hardwareTimer.begin(handler, samplePeriodMicros);
     timerRunning = true;
-    dacWriteChannels(started);
+    dacWriteChannels(started | followers);
     for (byte i = 0; i < N_CHANNELS; i++) {
       if (bitRead(started, i)) {
         fetchNextSample(i); // The second sample, written by the first run of handler()
@@ -259,28 +311,35 @@ void startChannels(byte channelBits) {
 }
 
 // Stops playback on the selected channels (one bit per channel), and holds their outputs at a DAC code, starting now.
-// Their LEDs light if the code is not 0V. Interrupt context, or loop() with interrupts disabled.
+// Their LEDs light if the code is not 0V. Channels in sync mode are skipped: their level follows the channels they
+// report, and the sync channels that report the stopped channels go low now. Interrupt context, or loop() with
+// interrupts disabled.
 void holdChannels(byte channelBits, uint16_t dacCode) {
-  channelBits &= ALL_CHANNELS;
+  channelBits &= ALL_CHANNELS & ~syncChannels;
   if (!channelBits) {
     return;
   }
+  byte followers = 0;
   for (byte i = 0; i < N_CHANNELS; i++) {
     if (bitRead(channelBits, i)) {
       playing[i] = false;
       stopAfterWrite[i] = false;
       dacValue[i] = dacCode;
       digitalWriteFast(OutputLEDLines[i], dacCode != DACBits_ZeroVolts);
+      followers |= setSyncFollowers(i, false);
     }
   }
-  dacWriteChannels(channelBits); // Also clears their DACFlags, so that a sample fetched for the next tick is not written
+  // Also clears their DACFlags, so that a sample fetched for the next tick is not written. The followers are written
+  // even if they were low already: one may have been set low by endPlayback() for a tick that will not come now.
+  dacWriteChannels(channelBits | followers);
   if (timerRunning && !anyChannelPlaying()) {
     hardwareTimer.end();
     timerRunning = false;
   }
 }
 
-// Stops playback on the selected channels (one bit per channel). Their outputs go to 0V at once.
+// Stops playback on the selected channels (one bit per channel). Their outputs go to 0V at once, and so do the sync
+// channels that report them. Channels in sync mode are skipped (see holdChannels()).
 void stopChannels(byte channelBits) {
   holdChannels(channelBits, DACBits_ZeroVolts);
 }
@@ -449,6 +508,107 @@ void applyStoredSet() {
       currentWaveform[i] = storedCurrentWaveform[i];
     }
     currentWaveformsStored = false;
+  }
+}
+
+// True if op 77's output modes and sync targets (numbered 1-4, as sent) are valid: each mode is signal or sync, each
+// target is another output channel, and no channel in sync mode reports a channel in sync mode, which plays nothing.
+// The targets of channels in signal mode are checked too, since they apply when a channel enters sync mode.
+bool isValidOutputModes(const byte *modes, const byte *targets) {
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if ((modes[i] > OUTPUT_MODE_SYNC) || (targets[i] < 1) || (targets[i] > N_CHANNELS) || (targets[i] == i + 1)) {
+      return false;
+    }
+  }
+  for (byte i = 0; i < N_CHANNELS; i++) { // After the loop above, which makes every target a valid index
+    if ((modes[i] == OUTPUT_MODE_SYNC) && (modes[targets[i] - 1] == OUTPUT_MODE_SYNC)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Sets every output channel's output mode and sync target (0-3), which isValidOutputModes() has accepted, and writes
+// the outputs that change (see "Sync outputs" above). A channel entering sync mode stops playing, and takes its
+// target's level at once, as does a sync channel given a new target. A channel leaving sync mode goes to 0V, and plays
+// from its next trigger. loop() with interrupts disabled, or setup() (LoadDefaultSettings()).
+void setOutputModes(const byte *modes, const byte *targets) {
+  byte entering = 0;
+  byte leaving = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if ((modes[i] == OUTPUT_MODE_SYNC) && (outputMode[i] != OUTPUT_MODE_SYNC)) {
+      bitSet(entering, i);
+    } else if ((modes[i] != OUTPUT_MODE_SYNC) && (outputMode[i] == OUTPUT_MODE_SYNC)) {
+      bitSet(leaving, i);
+    }
+  }
+  stopChannels(entering); // While they are still in signal mode: holdChannels() skips channels in sync mode
+  byte newSyncChannels = 0;
+  byte newFollowers[N_CHANNELS] = {0};
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    outputMode[i] = modes[i];
+    syncTarget[i] = targets[i];
+    if (modes[i] == OUTPUT_MODE_SYNC) {
+      bitSet(newSyncChannels, i);
+      bitSet(newFollowers[targets[i]], i);
+    }
+  }
+  syncChannels = newSyncChannels;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    syncFollowers[i] = newFollowers[i];
+    if (bitRead(newSyncChannels, i)) {
+      setSyncLevel(i, isPlaying(targets[i]));
+    } else if (bitRead(leaving, i)) {
+      syncHigh[i] = false;
+      dacValue[i] = DACBits_ZeroVolts;
+      digitalWriteFast(OutputLEDLines[i], LOW);
+    }
+  }
+  // Every sync channel is written, even one whose level has not changed, so that none is left waiting for a tick of
+  // the sample clock. Channels playing waveforms are not: that would write their next sample early.
+  if (newSyncChannels | leaving) {
+    dacWriteChannels(newSyncChannels | leaving);
+  }
+}
+
+// The DAC code of a voltage, in microvolts, in the current output range, as the clients convert a waveform's samples:
+// code 0 at the bottom of the range and 65535 at the top, rounded to the nearest code, and a halfway value to the even
+// one. So a sync voltage plays the same code as a sample of the same voltage. The voltage must be within the range.
+uint16_t microvoltsToCode(uint32_t microvolts) {
+  uint32_t span = rangeMaxMicrovolts[rangeIndex] - rangeMinMicrovolts[rangeIndex];
+  uint64_t scaled = (uint64_t)((int32_t)microvolts - rangeMinMicrovolts[rangeIndex]) * 65535;
+  uint32_t code = scaled / span;
+  uint32_t remainder = scaled % span;
+  if ((2 * remainder > span) || ((2 * remainder == span) && (code & 1))) {
+    code++;
+  }
+  return code;
+}
+
+// Converts the sync voltages to DAC codes in the current output range. setOutputRange() calls it, so a sync voltage
+// keeps its value in every range. loop() with interrupts disabled, or setup().
+void updateSyncCodes() {
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    syncHighCode[i] = microvoltsToCode(syncMicrovolts[i]);
+  }
+}
+
+// Sets every output channel's sync voltage (op 86), in microvolts, MIN_SYNC_MICROVOLTS to MAX_SYNC_MICROVOLTS. Sync
+// channels that are high change to the new voltage at once. loop() with interrupts disabled.
+void setSyncVoltages(const uint32_t *microvolts) {
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    syncMicrovolts[i] = microvolts[i];
+  }
+  updateSyncCodes();
+  byte highChannels = 0;
+  for (byte i = 0; i < N_CHANNELS; i++) {
+    if (bitRead(syncChannels, i) && syncHigh[i]) {
+      dacValue[i] = syncHighCode[i];
+      bitSet(highChannels, i);
+    }
+  }
+  if (highChannels) {
+    dacWriteChannels(highChannels);
   }
 }
 

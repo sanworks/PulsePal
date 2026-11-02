@@ -21,7 +21,8 @@ the code map, build instructions and the rules to follow when changing the firmw
 /WavePal
 Wave Pal: alternative firmware for Pulse Pal 3 (Teensy 4.1) that makes it a four channel waveform
 player. It stores four waveforms of up to 1 million samples on the microSD card, and each output
-channel plays one of them when it is triggered by TTL, by software or from the joystick. It is
+channel plays one of them when it is triggered by TTL, by software or from the joystick, or
+reports another channel's playback as a TTL level (sync mode). It is
 controlled with the Python class pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py) or
 the MATLAB class in /MATLAB/@WavePalDevice. PROTOCOL.md and AGENTS.md in that folder describe its
 USB protocol and code.

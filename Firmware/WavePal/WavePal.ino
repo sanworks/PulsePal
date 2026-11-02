@@ -25,7 +25,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // samples each on the microSD card, and each output channel plays one of them (its current waveform) when triggered:
 // by a TTL edge on a trigger channel, by a command from the PC, or from the thumb joystick menu. Several channels can
 // play the same waveform. In param sync mode, a waveform loaded during one trial becomes current at the next trial's
-// TTL edge. The sampling rate (up to 100kHz) and the output range are set for the whole device. It is the WavePlayer
+// TTL edge. An output channel in sync mode plays no waveform: it reports another channel's playback as a TTL logic
+// level. The sampling rate (up to 100kHz) and the output range are set for the whole device. It is the WavePlayer
 // firmware for the Bpod Analog Output Module (BpodWavePlayer.ino), ported to Pulse Pal 3 hardware, with the trigger
 // channels in place of the Bpod UART, and the double-buffered waveforms of its AudioPlayer Live firmware.
 // The USB protocol is documented in PROTOCOL.md in this folder, and AGENTS.md lists the rules for changing this code.
@@ -110,6 +111,9 @@ enum OpCode {
   OP_SET_LOOP_DURATION = 'D',         // 68. Loop duration of each output channel, in samples
   OP_SET_TRIGGER_MODE = 'T',          // 84. Trigger mode of each trigger channel. See enum TriggerModeValue
   OP_SET_TRIGGER_LINKS = 'I',         // 73. Links from the trigger channels to the output channels
+  OP_SET_OUTPUT_MODES = 'M',          // 77. Output mode of each output channel, and the channel each one reports in
+                                      // sync mode. See enum OutputModeValue
+  OP_SET_SYNC_VOLTAGES = 'V',         // 86. Each output channel's sync voltage, in microvolts
   OP_GET_STATUS = 'G',                // 71. Returns the playback state
   OP_GET_PLAYBACK_CHECKSUMS = 'Z'     // 90. For testing: samples played since each channel started, and their sum
 };
@@ -131,6 +135,16 @@ static inline bool isValidTriggerMode(byte mode) {
   return mode <= TRIGGER_MODE_MASTER;
 }
 
+// Values of outputMode[], one per output channel. See "Sync outputs" in Playback.ino.
+enum OutputModeValue {
+  OUTPUT_MODE_SIGNAL = 0,             // The channel plays its current waveform when triggered
+  OUTPUT_MODE_SYNC = 1                // The channel plays no waveform. It is at its sync voltage while the channel it
+                                      // reports (syncTarget[]) plays, and at 0V otherwise.
+};
+#define MIN_SYNC_MICROVOLTS 3000000 // Range of the sync voltage, op 86. It is within every output range.
+#define MAX_SYNC_MICROVOLTS 5000000
+#define DEFAULT_SYNC_MICROVOLTS 5000000
+
 // Values of rangeIndex. These are WavePlayer's ranges without its 12V ones, which need the Analog Output Module's
 // external 3V reference (Pulse Pal 3 has none), so the indices differ from WavePlayer's. The unipolar ranges must stay
 // below the bipolar ones: setOutputRange() relies on it.
@@ -142,6 +156,8 @@ enum OutputRange {
 };
 #define N_OUTPUT_RANGES 4
 const byte dacRangeCodes[N_OUTPUT_RANGES] = {0, 1, 3, 4}; // The AD5754R's output range select code for each range
+const int32_t rangeMinMicrovolts[N_OUTPUT_RANGES] = {0, 0, -5000000, -10000000}; // The voltage of DAC code 0...
+const int32_t rangeMaxMicrovolts[N_OUTPUT_RANGES] = {5000000, 10000000, 5000000, 10000000}; // ...and of code 65535
 
 // Values of inMenu, the current level of the thumb joystick menu. See the menu map in Menu.ino.
 enum MenuLevel {
@@ -254,6 +270,21 @@ volatile byte triggerMode[N_TRIGGER_CHANNELS] = {0}; // Of trigger channels 1 an
 volatile byte TriggerAddress[2][N_CHANNELS] = {0}; // Output channels triggered by trigger channel 1 (row 1) and 2 (row 2)
 volatile byte currentWaveform[N_CHANNELS] = {0}; // The waveform (1-4) each output channel plays from its next start.
                                                  // 0 = none: the channel ignores triggers.
+// Sync outputs. See "Sync outputs" in Playback.ino. setOutputModes() sets outputMode, syncTarget, syncChannels and
+// syncFollowers together.
+volatile byte outputMode[N_CHANNELS] = {0}; // See enum OutputModeValue
+const byte defaultSyncTarget[N_CHANNELS] = {1, 0, 0, 0}; // Channel 1 reports channel 2, and the others report channel 1
+volatile byte syncTarget[N_CHANNELS] = {1, 0, 0, 0}; // The output channel (0-3, never the channel itself) each channel
+                                                     // reports in sync mode. Op 77 sends them numbered 1-4.
+volatile byte syncChannels = 0; // The output channels in sync mode, one bit per channel
+volatile byte syncFollowers[N_CHANNELS] = {0}; // For each output channel, the channels in sync mode that report it (one
+                                               // bit per channel). A channel in sync mode has none: op 77 refuses one
+                                               // that reports another in sync mode.
+uint32_t syncMicrovolts[N_CHANNELS] = {DEFAULT_SYNC_MICROVOLTS, DEFAULT_SYNC_MICROVOLTS, DEFAULT_SYNC_MICROVOLTS,
+                                       DEFAULT_SYNC_MICROVOLTS}; // Each channel's sync voltage (op 86)
+volatile uint16_t syncHighCode[N_CHANNELS] = {0}; // syncMicrovolts as DAC codes in the current range. Set by
+                                                  // setOutputRange() and setSyncVoltages()
+volatile boolean syncHigh[N_CHANNELS] = {0}; // True while a channel in sync mode is set to its sync voltage
 
 // ---------------------------------------------------------------------------------------------------------------
 // Waveforms, memory blocks and playback buffers. See "Waveforms" and "How playback works" in Playback.ino.

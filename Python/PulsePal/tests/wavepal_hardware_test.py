@@ -585,6 +585,78 @@ def test_fixed_voltage_and_stop(W):
     W.stop()
 
 
+def send_raw(W, op, data):
+    """Send a command the class would refuse to send, and return the device's confirm byte."""
+    W._write_command(ord(op), bytes(data))
+    return W._read_raw(1)[0]
+
+
+def expect_refused(function, *args):
+    try:
+        function(*args)
+    except PulsePalError:
+        return
+    raise AssertionError(f"{function.__name__}{args} was not refused")
+
+
+def test_sync_outputs(W, D):
+    """Sync mode, without a scope: the device refuses what the classes refuse (a channel reporting
+    itself or a sync channel, a voltage outside 3-5 V, a fixed voltage on a sync channel); a sync
+    channel ignores soft triggers, TTL edges (with --driver) and stops; a channel entering sync mode
+    stops; and the channel it reports plays exactly. Only a scope can check the sync voltage itself
+    (see /Firmware/WavePal/AGENTS.md)."""
+    W.sampling_rate = 100000
+    codes = load(W, 1, random_waveform(20000), [1, 2])
+    load(W, 3, random_waveform(200000), 3)  # 2 s
+    try:
+        for modes, targets in (([0, 1, 0, 0], [2, 2, 1, 1]),     # Channel 2 reports itself
+                               ([0, 1, 0, 0], [2, 0, 1, 1]), ([0, 1, 0, 0], [2, 5, 1, 1]),
+                               ([0, 2, 0, 0], [2, 1, 1, 1]),     # No output mode 2
+                               ([1, 1, 0, 0], [2, 1, 1, 1]),     # Channel 1 reports channel 2, a sync channel
+                               ([0, 1, 0, 1], [2, 4, 1, 1])):    # Channel 2 reports channel 4, a sync channel
+            assert send_raw(W, "M", modes + targets) == 0, f"op 77 accepted {modes + targets}"
+        for microvolts in (2999999, 5000001, 0):
+            voltages = np.array([5000000, microvolts, 5000000, 5000000], "<u4").tobytes()
+            assert send_raw(W, "V", voltages) == 0, f"op 86 accepted {microvolts} uV"
+
+        W.output_mode[2] = "Sync"                                 # Reports channel 1
+        W.sync_voltage[2] = 3.3
+        assert send_raw(W, "!", [0x02, 0, 0x80]) == 0, "op 33 accepted a sync channel"
+        W.sync_target[4] = 2
+        expect_refused(W.output_mode.__setitem__, 4, "Sync")      # Channel 2 is a sync channel
+        assert W.output_mode == [None, "Signal", "Sync", "Signal", "Signal"], W.output_mode
+
+        W.trigger(3)                                              # A channel entering sync mode stops playing
+        assert W.status().playing == [3]
+        W.output_mode[3] = "Sync"
+        assert W.status().playing == [], "a channel entering sync mode went on playing"
+        W.output_mode[3] = "Signal"
+
+        W._write_command(ord("P"), bytes([0x03]))                # A soft trigger skips channel 2
+        assert W.status().playing == [1], W.status().playing
+        W.stop(2)                                                 # Leaves a sync channel alone
+        assert W.status().playing == [1]
+        wait_until_stopped(W, [1], timeout=2)
+        check_played(W, 1, codes, codes.size)
+        if D is not None:                                         # So does a TTL edge
+            W.link_trigger_channel1 = [True, True, False, False]  # Earlier tests leave other links
+            W.link_trigger_channel2 = [False] * 4
+            driver_pulse(D)
+            assert W.status().playing == [1], W.status().playing
+            wait_until_stopped(W, [1], timeout=2)
+            check_played(W, 1, codes, codes.size)
+
+        W.output_mode[2] = "Signal"                               # Plays its waveform again
+        W.trigger(2)
+        wait_until_stopped(W, [2], timeout=2)
+        check_played(W, 2, codes, codes.size)
+    finally:
+        W.stop()
+        W._set_output_modes(["Signal"] * 4, WavePal._DEFAULT_SYNC_TARGETS)
+        W.sync_voltage = [5.0] * 4
+        W.link_trigger_channel1 = [False] * 4
+
+
 def test_screen_saver_and_export_params(W):
     """Op 99 takes the screen saver's state and timeout, as on Pulse Pal and Synth Pal. Left on,
     with 1800 s: a new device's settings. export_params() holds every setting."""
@@ -680,6 +752,7 @@ def main():
         test_sampling_rate_change_during_playback,
         test_channel_joining_a_running_clock_plays_exactly,
         test_fixed_voltage_and_stop,
+        lambda W: test_sync_outputs(W, D),
         test_screen_saver_and_export_params,
         test_output_range_change_reloads_waveforms,
         test_every_output_range_plays,

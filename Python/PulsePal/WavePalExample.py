@@ -98,6 +98,17 @@ W.trigger_mode[2] = "Gated"                          # Leaving param sync mode m
 # Hold a channel at a fixed voltage until it is triggered or stopped
 W.set_fixed_voltage(3, 1.5)
 
+# Sync outputs: a channel in "Sync" output mode plays no waveform. It reports
+# another channel's playback as a TTL level, e.g. for a recording system: its
+# sync_voltage (3-5 V) while that channel (its sync_target) plays, 0 V otherwise.
+W.sync_target[4] = 1
+W.output_mode[4] = "Sync"    # Channel 4 is high while channel 1 plays...
+W.sync_voltage[4] = 3.3      # ...at 3.3 V
+W.trigger(1)
+time.sleep(1)
+W.stop(1)                    # Channel 1 still loops: stopping it takes channel 4 low too
+W.output_mode[4] = "Signal"  # Plays its waveform again from its next trigger
+
 # Playback state, e.g. to check for underruns (blocks of samples the microSD
 # card did not deliver in time) after an experiment
 print(W.status())

@@ -194,7 +194,7 @@ void processUSBCommands() {
     case OP_SET_FIXED_VOLTAGE: { // Op 33 ('!'). One bit per output channel, then the DAC code.
       byte channelBits = PPUSB.readByte();
       uint16_t dacCode = PPUSB.readUint16();
-      if (channelBits & ~ALL_CHANNELS) {
+      if ((channelBits & ~ALL_CHANNELS) || (channelBits & syncChannels)) { // A sync channel's level follows its target
         PPUSB.writeByte(0);
         break;
       }
@@ -260,6 +260,41 @@ void processUSBCommands() {
         TriggerAddress[0][i] = newLinks[i];
         TriggerAddress[1][i] = newLinks[N_CHANNELS + i];
       }
+      interrupts();
+      PPUSB.writeByte(1);
+    } break;
+
+    case OP_SET_OUTPUT_MODES: { // Op 77 ('M'). Output channels 1-4's output modes, then their sync targets (1-4).
+      byte newSettings[2 * N_CHANNELS];
+      PPUSB.readByteArray(newSettings, 2 * N_CHANNELS);
+      const byte *newTargets = newSettings + N_CHANNELS;
+      if (!isValidOutputModes(newSettings, newTargets)) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      byte targetIndices[N_CHANNELS];
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        targetIndices[i] = newTargets[i] - 1; // Convert for zero-indexing
+      }
+      noInterrupts(); // Applies at once, also in param sync mode
+      setOutputModes(newSettings, targetIndices);
+      interrupts();
+      PPUSB.writeByte(1);
+    } break;
+
+    case OP_SET_SYNC_VOLTAGES: { // Op 86 ('V'). One uint32 per output channel: its sync voltage, in microvolts.
+      uint32_t newVoltages[N_CHANNELS];
+      PPUSB.readUint32Array(newVoltages, N_CHANNELS);
+      bool valid = true;
+      for (byte i = 0; i < N_CHANNELS; i++) {
+        valid = valid && (newVoltages[i] >= MIN_SYNC_MICROVOLTS) && (newVoltages[i] <= MAX_SYNC_MICROVOLTS);
+      }
+      if (!valid) {
+        PPUSB.writeByte(0);
+        break;
+      }
+      noInterrupts();
+      setSyncVoltages(newVoltages);
       interrupts();
       PPUSB.writeByte(1);
     } break;
@@ -402,7 +437,7 @@ void applyOutputRange(byte newRange) {
 
 // The settings the device starts with, also loaded after a comm failure. The Python and MATLAB classes program the same
 // ones when they connect. Waveforms are kept, unless the output range changes, but no channel plays one until op 67
-// sets its current waveform.
+// sets its current waveform. Every channel is in signal mode, with the default sync targets and voltages.
 void LoadDefaultSettings() {
   setSamplingRate(DEFAULT_SAMPLING_RATE);
   noInterrupts();
@@ -421,6 +456,11 @@ void LoadDefaultSettings() {
     TriggerAddress[1][i] = 0;
     currentWaveform[i] = 0;
   }
+  const byte signalModes[N_CHANNELS] = {OUTPUT_MODE_SIGNAL, OUTPUT_MODE_SIGNAL, OUTPUT_MODE_SIGNAL, OUTPUT_MODE_SIGNAL};
+  const uint32_t syncVoltages[N_CHANNELS] = {DEFAULT_SYNC_MICROVOLTS, DEFAULT_SYNC_MICROVOLTS, DEFAULT_SYNC_MICROVOLTS,
+                                             DEFAULT_SYNC_MICROVOLTS};
+  setOutputModes(signalModes, defaultSyncTarget); // Every channel plays waveforms. A sync channel goes to 0V.
+  setSyncVoltages(syncVoltages);
   interrupts();
 }
 
