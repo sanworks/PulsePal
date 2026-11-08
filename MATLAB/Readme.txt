@@ -1,6 +1,6 @@
 ***MATLAB Control Interface for Pulse Pal***
 
-There are two control interfaces in this folder:
+There are two primary control interfaces in this folder:
 1. @PulsePalDevice, a modern object-oriented interface
 2. /Legacy/, the original interface.
 

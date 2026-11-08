@@ -13,7 +13,7 @@ This repository contains:
 -Design files for the circuit board
 -Design files for the enclosure
 
-Documentation and bill of materials is provided online at:
+Documentation is provided online at:
 https://sites.google.com/site/pulsepalwiki/
 
 Code contributions are welcome! Please follow guidelines in CONTRIBUTING.md

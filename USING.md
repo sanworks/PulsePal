@@ -20,7 +20,8 @@ starts with an example. Python has example scripts: `/Python/PulsePal/PulsePalEx
 | Synth Pal | Sine, triangle, square and sawtooth waves, white noise, and fixed voltages, 1 Hz to 20 kHz, with on and off ramps | Pulse Pal 3 | `SynthPalDevice` |
 
 A Pulse Pal 3 runs one firmware at a time. To change it, run `LoadPulsePalFirmware` in MATLAB
-(add `/MATLAB/FirmwareLoader` to the path first). Connecting with the wrong class raises an error
+(add `/MATLAB/FirmwareLoader` to the path first) or in Python use the Sanworks firmware loader:
+github.com/sanworks/Sanworks-FirmwareLoader. Connecting with the wrong class raises an error
 that names the firmware the device runs. A class connects to firmware newer than it knows, with a
 warning: new firmware only adds commands, so the class works as before. Update the classes to use
 what is new.
@@ -612,7 +613,7 @@ change at once; a channel at rest takes its new settings at once, and one still 
 finishes on its old settings (at the new frequency) and takes the new ones when it reaches its
 resting voltage.
 
-### Pitfalls
+### Limitations
 
 - **The frequency is shared** by all four channels.
 - **Levels are checked together.** Raising `peak_to_peak` beyond what the mean voltage allows
@@ -620,7 +621,7 @@ resting voltage.
 - **`peak_to_peak` or `fixed_voltage`:** the waveform decides which one plays. A channel keeps
   both. The device holds only the one that plays, so `sync_from_device()` reads that one, and
   the object keeps its own value of the other.
-- **Settings changed with the joystick** are not in the object until `sync_from_device()` reads
+- **Settings changed with the joystick** are not in the PC object until `sync_from_device()` reads
   them.
 - **The ramps lengthen playback:** a trigger plays `on_ramp_duration + play_duration +
   off_ramp_duration`, and a stop (including closing the connection) fades out over the off
