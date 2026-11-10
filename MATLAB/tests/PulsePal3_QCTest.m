@@ -11,10 +11,10 @@ function results = PulsePal3_QCTest(Port, DriverPort, varargin)
 %   - the six LEDs work (the operator confirms them), and the joystick: the device runs its own joystick test (op 104,
 %     firmware from October 2026), prompting on its screen for each direction and three clicks, and reports how far
 %     the joystick went.
-% The automated checks take about 30 s, the LED and joystick checks as long as the operator takes (about 20 s).
+% The automated checks take about 30 s (31 s with the DS1054Z), the LED and joystick checks as long as the operator
+% takes (about 20 s).
 %
-% Bench: output channels 1-4 connected to channels 1-4 of a Rigol MSO5000 oscilloscope on the network (SCOPE_ADDRESS
-% below), with no load.
+% Bench: output channels 1-4 connected to channels 1-4 of a Rigol MSO5000 oscilloscope on the network, with no load.
 %   PulsePal3_QCTest('COM33')           The trigger channels are tested with the device's own output channels 1 and
 %                                       2: near the end, the panel asks for them to be moved onto trigger channels 1
 %                                       and 2 (they go back to the oscilloscope for the next unit).
@@ -23,7 +23,9 @@ function results = PulsePal3_QCTest(Port, DriverPort, varargin)
 %                                       No cables are moved.
 %   results = PulsePal3_QCTest(..., Name, Value)
 % Options:
-%   'Scope'         The oscilloscope's IP address (default: SCOPE_ADDRESS below)
+%   'Scope'         The oscilloscope's IP address. Needed on a computer's first run: it is then kept as a MATLAB
+%                   preference on that computer, for later runs that leave it out. It is not kept in this file, which
+%                   is public. rmpref('PulsePal3_QCTest') forgets it
 %   'Manual'        false skips the checks that need the operator: the LEDs and the joystick, and without a driver
 %                   the trigger channels. The panel then cannot pass. Default true
 %   'RecordFolder'  Folder for each unit's record (a .mat file, and a line in PulsePal3_QC_log.csv), or '' for
@@ -55,9 +57,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
 
-% Rigol MSO5074 on the bench. (The office DS1054Z, 192.168.0.197, is a DS1000Z: its SCPI commands are handled below,
-% but this version of the panel has only been run on the MSO5074.)
-SCOPE_ADDRESS = '192.168.50.47';
+% Rigol MSO5074 on the bench. (The office DS1054Z is a DS1000Z: its SCPI commands are handled below. It checks the DC
+% levels to a wider limit, dcErrorDS1000Z below: see "The DS1054Z's" under Oscilloscope.)
+% The oscilloscope's address is a MATLAB preference of each computer (see 'Scope' above), never written here.
+SCOPE_PREFERENCE = {'PulsePal3_QCTest', 'ScopeAddress'};
 
 % Pass limits, with what the first unit tested (serial number 20885950) measured over nine runs: MSO5074, 20 MHz
 % bandwidth limit, no load.
@@ -66,6 +69,9 @@ LIMITS = struct( ...
     'zeroCalibrated', 0.0004, ... % V. After calibration (in steps of 0.3 mV), on another scope scale. Measured < 0.11 mV
     'noise', 0.001, ... % V RMS at 0 V, scope noise included. Measured 0.46-0.49 mV
     'dcError', 0.020, ... % V at -10, -5, 5 and 10 V, the scope's own zero error on its scale taken out. Measured < 7 mV
+    'dcErrorDS1000Z', 0.01, ... % Fraction of the level added to dcError on a DS1000Z: its offset accuracy. A DS1054Z
+    ...                           % read unit 20885540's outputs 0.15-0.45% low at +/-10 V, and 31 mV apart, where a
+    ...                           % DMM read all four the same within its 10 mV resolution
     'smallStep', 0.001, ... % V. Error of 10 mV steps up and down from 0 V, against 0 V next to them. Measured -0.36 to
     ...                       % +0.36 mV: each step's own size (about one DAC code), the same within 0.1 mV run to run
     'stepTransient', 0.038, ... % V. A channel's own transients beyond the levels it steps between (DAC write
@@ -94,11 +100,18 @@ end
 DriverPort = char(DriverPort); % "" as well as '' means no driver
 parser = inputParser;
 parser.FunctionName = 'PulsePal3_QCTest';
-addParameter(parser, 'Scope', SCOPE_ADDRESS);
+addParameter(parser, 'Scope', '');
 addParameter(parser, 'Manual', true);
 addParameter(parser, 'RecordFolder', defaultRecordFolder());
 parse(parser, varargin{:});
 scopeAddress = char(parser.Results.Scope);
+if isempty(scopeAddress)
+    if ~ispref(SCOPE_PREFERENCE{:})
+        error('PulsePal3_QCTest:scope', ['No oscilloscope address on this computer yet: give it once, e.g. ' ...
+            'PulsePal3_QCTest(''%s'', ''Scope'', ''<IP address>''). Later runs here use it.'], Port);
+    end
+    scopeAddress = getpref(SCOPE_PREFERENCE{:});
+end
 manual = logical(parser.Results.Manual);
 recordFolder = char(parser.Results.RecordFolder);
 useDriver = ~isempty(DriverPort);
@@ -156,6 +169,10 @@ if useDriver
 end
 S = scopeOpen(scopeAddress);
 releaseS = onCleanup(@() releaseScope(S));
+if ~ispref(SCOPE_PREFERENCE{:}) || ~strcmp(getpref(SCOPE_PREFERENCE{:}), scopeAddress)
+    setpref(SCOPE_PREFERENCE{:}, scopeAddress); % Only once it has connected: a mistyped address is not kept
+    fprintf('        (oscilloscope address kept on this computer for later runs)\n');
+end
 scopeErrorList = scopeInit(S);
 report(true, 'Oscilloscope', S.idn);
 if ~isempty(scopeErrorList)
@@ -325,38 +342,77 @@ end
         % captures give each channel every level, and every channel a different level from the others in each capture,
         % so that two channels shorted together pull each other off. The scope's own zero error on this scale (up to
         % 20 mV) is taken from the 0 V capture of each channel, a few seconds apart. A DS1000Z offsets only +/-2 V
-        % below 0.5 V/div, so it measures at 0.5 V/div (20 mV per code, against 4 mV).
+        % below 0.5 V/div, so it measures at 0.5 V/div (28.6 mV per code on the DS1054Z, against 4 mV).
+        % Each level is played with a 1 ms triangle of +/-60 mV around it, and measured over whole periods of it: the
+        % mean, as played. A steady level would read as the scope code nearest it, up to half a code off, as the
+        % scopes' noise with the 20 MHz limit is a small part of a code (0.01-0.36 codes RMS on the DS1054Z at
+        % 0.5 V/div). The +/-10 V levels are played 60 mV inside, where the triangle stays in the DAC's range.
+        % The looping trains are stopped by loading the next ones (op 95), never by P.stop(). With firmware v22, a stop
+        % (op 98) can leave a channel that was playing a custom train set to its old memory block, which the next load of
+        % the train empties: the channel then ends at once when triggered, at 0 V (35 of 1000 rounds of load, trigger
+        % and stop). A load stops the channels playing its train with the timer interrupt held off, which leaves them
+        % set to take the train's new block. The first round triggers once before its capture, and loads again: a
+        % channel left so by a stop before the panel ends at that trigger, which resets it.
         levels = [-10 -5 0 5 10];
         vdiv = conditional(S.isMSO5000, 0.1, 0.5);
+        ditherPeriod = 1e-3; % Whole periods in either scope's record: 10 or 12 divisions of 1 ms
+        ramp = linspace(-1, 1, 51);
+        triangle = 0.06*[ramp, ramp(end - 1:-1:2)]; % 100 samples of 10 us
+        centres = sign(levels).*min(abs(levels), 10 - max(triangle));
+        expected = arrayfun(@(v) mean(dacVolts(v + triangle)), centres);
+        prm = dutDefaults;
+        prm.customTrainID = 1:4;
+        prm.customTrainLoop(:) = true; % Each pass starts as the last sample of the one before ends
+        prm.phase1Duration(:) = 10e-6;
+        prm.pulseTrainDuration(:) = 30; % Longer than any capture: the next load stops it
         measured = NaN(4, 5);
         clipped = false(4, 5);
         for r = 0:4
             index = mod((0:3) + r, 5) + 1;
             channelLevels = levels(index);
             for c = 1:4
-                P.setFixedVoltage(c, channelLevels(c));
+                P.sendCustomWaveform(c, 10e-6, centres(index(c)) + triangle); % Stops the last round's train
+            end
+            if r == 0
+                P.importParams(prm);
+                P.trigger(1:4); % See above
+                for c = 1:4
+                    P.sendCustomWaveform(c, 10e-6, centres(index(c)) + triangle);
+                end
             end
             scopeSetup(S, vdiv*[1 1 1 1], -channelLevels, 1e-3, 0, 1e5, 1, channelLevels(1) + 3*vdiv);
+            P.trigger(1:4);
             rec = scopeStatic(S);
             for c = 1:4
-                measured(c, index(c)) = mean(rec(c).v);
+                nWhole = round(floor(numel(rec(c).v)*rec(c).dt/ditherPeriod + 1e-6)*ditherPeriod/rec(c).dt);
+                measured(c, index(c)) = mean(rec(c).v(1:nWhole));
                 clipped(c, index(c)) = rec(c).clipped > 0;
             end
         end
-        P.setFixedVoltage(1:4, 0);
-        expected = dacVolts(levels);
+        for c = 1:4
+            P.sendCustomWaveform(c, 10e-6, 0); % Stops the channels, as above
+        end
+        P.setDefaultParams();
+        % A DS1000Z's offset is accurate to 1% of its value: that much of each level is added to the limit there
+        if S.isMSO5000
+            limits = LIMITS.dcError*ones(1, 5);
+            limitText = sprintf('+/-%g mV', 1e3*LIMITS.dcError);
+        else
+            limits = LIMITS.dcError + LIMITS.dcErrorDS1000Z*abs(levels);
+            limitText = sprintf('+/-%g mV + %g%% of the level on a DS1000Z', 1e3*LIMITS.dcError, ...
+                100*LIMITS.dcErrorDS1000Z);
+        end
         for c = 1:4
             scopeZero = measured(c, 3) - expected(3);
             err = measured(c, :) - expected - scopeZero;
             others = [1 2 4 5];
-            ok = all(abs(err(others)) <= LIMITS.dcError) && ~any(clipped(c, :));
+            ok = all(abs(err(others)) <= limits(others)) && ~any(clipped(c, :));
             note = '';
             if any(clipped(c, :))
                 note = ' (clipped: far off)';
             end
-            report(ok, sprintf('Ch%d DC levels', c), sprintf(['errors %s mV at -10, -5, 5, 10 V (limit +/-%g mV; ' ...
-                'scope zero %+.1f mV)%s'], sprintf('%+.1f ', 1e3*err(others)), 1e3*LIMITS.dcError, 1e3*scopeZero, ...
-                note));
+            report(ok, sprintf('Ch%d DC levels', c), sprintf(['errors %s mV at -10, -5, 5, 10 V (limit %s; ' ...
+                'scope zero %+.1f mV)%s'], sprintf('%+.1f ', 1e3*err(others)), limitText, 1e3*scopeZero, note));
         end
     end
 
@@ -542,12 +598,23 @@ end
             % Levels from the rest before the train: the scope's offset on this scale is up to 0.3 V
             x = rec(c).v - median(rec(c).v(t < -50e-6));
             sequence = sequences{c};
-            up = crossings(t, x, 3.5, 0.3);
-            up = up(up > -20e-6 & up < 20e-6);
-            [~, ends] = crossings(t, x, 3.5, 0.3);
-            ends = ends(ends > nSamples*10e-6 - 50e-6 & ends < nSamples*10e-6 + 50e-6);
+            [allUp, allDown] = crossings(t, x, 3.5, 0.3);
+            up = allUp(allUp > -20e-6 & allUp < 20e-6);
+            ends = allDown(allDown > nSamples*10e-6 - 50e-6 & allDown < nSamples*10e-6 + 50e-6);
             if isempty(up) || isempty(ends)
-                report(false, sprintf('Ch%d custom train', c), 'start or end of the train not found');
+                % Where they were instead: the record may show the train late, early, short or not at all
+                if isempty(allUp)
+                    found = 'never rose through 3.5 V';
+                else
+                    found = sprintf('rose through 3.5 V %d time%s, first at %+.3f ms', numel(allUp), ...
+                        conditional(isscalar(allUp), '', 's'), 1e3*allUp(1));
+                    if ~isempty(allDown)
+                        found = sprintf('%s, and last fell through it at %+.3f ms', found, 1e3*allDown(end));
+                    end
+                end
+                report(false, sprintf('Ch%d custom train', c), sprintf(['start or end of the train not found: it ' ...
+                    '%s from the trigger (expected 0 and %g ms); rest %+.2f V, record %+.2f to %+.2f V%s'], found, ...
+                    nSamples*10e-3, median(rec(c).v(t < -50e-6)), min(rec(c).v), max(rec(c).v), clippedNote(rec(c))));
                 continue
             end
             period = (ends(end) - up(1))/nSamples;
@@ -900,6 +967,16 @@ end
 %   acquisition armed after the settings (scopeStatic(), scopeTriggered()), and a record identical to the channel's
 %   previous one is refused.
 % - RAW memory can only be read while stopped, and right after a stop the first read can be an empty block.
+% The DS1054Z's (firmware 00.04.04.SP3):
+% - Its preamble's YORigin is the offset in whole codes, truncated (see scopeRead()), and YREFerence is 88, not 127.
+% - After :SINGle, :TRIGger:STATus? reads STOP for up to 150 ms, then RUN, and WAIT 0.2-0.35 s after :SINGle (at
+%   20 ms/div): a train played before WAIT is missed, and a STOP read too soon is the last acquisition's.
+% - Its screen shows "Can operate now!" through the panel, from the second capture on, whatever the waveform mode and
+%   with no redundant :STOP: it cost no time measured. (Writing :WAVeform:STARt past STOP showed "Stop point
+%   changed!", which scopeRead() no longer does.)
+% - Its DC offset accuracy is +/-0.1 div +/-2 mV +/-1% of the offset (datasheet): the zero error is taken out by the
+%   DC levels check, but up to 100 mV at a 10 V offset is not, so the check allows 1% of each level more there
+%   (LIMITS.dcErrorDS1000Z). Only the MSO5074 checks the levels to +/-20 mV.
 
 function S = scopeOpen(address)
 try
@@ -940,7 +1017,8 @@ end
 
 function scopeSetup(S, vdiv, offset, tpd, tOffset, points, triggerSource, triggerLevel)
 % vdiv, offset: 1x4, V/div and V. tpd: s/div; tOffset: time of the screen's centre after the trigger. points: memory
-% depth on the MSO5000 (10 divisions); the DS1000Z takes the nearest of its own depths for 12 divisions.
+% depth on the MSO5000 (10 divisions); the DS1000Z takes the largest of its own depths that holds no more points per
+% division (12 divisions).
 for ch = 1:4
     p = sprintf(':CHANnel%d', ch);
     if scopeSet(S, [p ':SCALe'], vdiv(ch)) && isKey(S.memo, [p ':OFFSet'])
@@ -957,9 +1035,14 @@ if S.isMSO5000
     tokens = {'1k', '10k', '100k', '1M', '10M'};
     [~, i] = min(abs(log(depths/points)));
 else
-    depths = [3e3 3e4 3e5 3e6]; % With all four channels on
+    % With all four channels on. Its depths are 10 times apart, and its LAN sends about 0.6 MB/s: the next depth up
+    % took 52 s of a 75 s panel to read, most of it past what the checks use (past 250 MSa/s, more than the screen).
+    depths = [3e3 3e4 3e5 3e6];
     tokens = {'3000', '30000', '300000', '3000000'};
-    [~, i] = min(abs(log(depths/(1.2*points))));
+    i = find(depths <= 1.2*points, 1, 'last');
+    if isempty(i)
+        i = 1;
+    end
 end
 if ~isKey(S.memo, ':ACQuire:MDEPth') || ~strcmp(S.memo(':ACQuire:MDEPth'), tokens{i})
     scopeWrite(S, ':RUN'); % The memory depth can only be set while running
@@ -1052,14 +1135,21 @@ for ch = 1:4
     if codesPerDiv < 10 || codesPerDiv > 60
         error('PulsePal3_QCTest:scope', 'Channel %d: the scope is not at the scale it was set to.', ch);
     end
-    if S.isMSO5000 && abs(xInc*points/(10*S.memo('tpd')) - 1) > 0.01
+    if abs(xInc*points/(conditional(S.isMSO5000, 10, 12)*S.memo('tpd')) - 1) > 0.01
         error('PulsePal3_QCTest:scope', 'Channel %d: the scope is not at the timebase it was set to.', ch);
     end
     codes = zeros(points, 1, 'uint8');
     for first = 1:chunk:points
         last = min(points, first + chunk - 1);
-        scopeWrite(S, sprintf(':WAVeform:STARt %d', first));
-        scopeWrite(S, sprintf(':WAVeform:STOP %d', last));
+        % STARt is never written past STOP: the DS1000Z then moves STOP itself, and says so on its screen
+        if isKey(S.memo, 'waveformStop') && first > S.memo('waveformStop')
+            scopeWrite(S, sprintf(':WAVeform:STOP %d', last));
+            scopeWrite(S, sprintf(':WAVeform:STARt %d', first));
+        else
+            scopeWrite(S, sprintf(':WAVeform:STARt %d', first));
+            scopeWrite(S, sprintf(':WAVeform:STOP %d', last));
+        end
+        S.memo('waveformStop') = last;
         block = scopeReadBlock(S, ':WAVeform:DATA?');
         if numel(block) ~= last - first + 1
             error('PulsePal3_QCTest:scope', 'Channel %d: asked for %d points, received %d.', ch, ...
@@ -1073,7 +1163,14 @@ for ch = 1:4
             'capture: it did not acquire a new one.'], ch);
     end
     S.memo(previousKey) = codes;
-    rec(ch).v = (double(codes) - yOrigin - yRef)*yInc;
+    if S.isMSO5000
+        rec(ch).v = (double(codes) - yOrigin - yRef)*yInc;
+    else
+        % The DS1000Z's YORigin is the channel's offset in codes, truncated to an integer: up to a code (28.6 mV at
+        % 0.5 V/div) short of it, so offset levels read too close to 0 V. Converted from the offset as set, a DS1054Z
+        % read the same levels on 0.5, 1 and 2 V/div within about 20 mV; from YORigin, up to 120 mV apart.
+        rec(ch).v = (double(codes) - yRef)*yInc - str2double(S.memo(sprintf(':CHANnel%d:OFFSet', ch)));
+    end
     rec(ch).t = ((0:points - 1)' - xRef)*xInc + xOrigin;
     rec(ch).dt = xInc;
     rec(ch).clipped = mean(codes == 0 | codes == 255);
