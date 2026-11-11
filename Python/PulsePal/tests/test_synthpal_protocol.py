@@ -3,7 +3,7 @@
 These tests need no device: a simulated Synth Pal behind a fake serial port
 checks each command's layout, records it, and replies as the firmware would.
 They are a fast check that the class matches the Synth Pal serial protocol,
-which is documented in /Firmware/SynthPal/PROTOCOL.md.
+which is documented in PulsePal-Firmware/SynthPal/PROTOCOL.md.
 
 Run them with:
 
@@ -30,7 +30,7 @@ OP_MENU_BYTE = 213
 
 
 def samples_per_cycle(centihz):
-    """As samplesPerCycleFor() in /Firmware/SynthPal/Settings.ino."""
+    """As samplesPerCycleFor() in PulsePal-Firmware/SynthPal/Settings.ino."""
     return 4 * (2_500_000 // centihz)
 
 
@@ -98,7 +98,7 @@ class FakeSynthPal:
         if op == ord("G"):
             return self.status_reply
         if op == ord("R"):
-            # As op 82 in /Firmware/SynthPal/USBOps.ino: every setting, in op 85's layout
+            # As op 82 in PulsePal-Firmware/SynthPal/USBOps.ino: every setting, in op 85's layout
             return struct.pack("<I4B4i4i4i4I4I4I8B2B", self.centihz, *self.waveform, *self.amplitude, *self.mean,
                                *self.resting, *self.play_duration, *self.on_ramp, *self.off_ramp, *self.links,
                                *self.trigger_mode)
@@ -140,7 +140,8 @@ class FakeSynthPal:
                     self.stored = None  # Leaving param sync mode discards a stored set
             return bytes([ok])
         if op == ord("U"):
-            # As op 85 in /Firmware/SynthPal/USBOps.ino: checked whole, then stored in param sync mode, or applied
+            # As op 85 in PulsePal-Firmware/SynthPal/USBOps.ino: checked whole, then stored in param sync mode, or
+            # applied
             values = struct.unpack("<I4B4i4i4i4I4I4I8B2B", payload)
             settings = {"centihz": values[0], "waveform": list(values[1:5]), "amplitude": list(values[5:9]),
                         "mean": list(values[9:13]), "resting": list(values[13:17]),
@@ -164,7 +165,7 @@ class FakeSynthPal:
 
     @staticmethod
     def is_valid_output_level(waveform, resting, mean, amplitude):
-        """As isValidOutputLevel() in /Firmware/SynthPal/Settings.ino."""
+        """As isValidOutputLevel() in PulsePal-Firmware/SynthPal/Settings.ino."""
         if waveform > 5 or abs(resting) > 10_000_000 or abs(mean) > 10_000_000:  # 5: White Noise, the last
             return False
         if waveform == 4:  # Fixed Voltage: the amplitude is the voltage

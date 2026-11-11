@@ -741,8 +741,8 @@ end
     end
 
     function testJoystick()
-        % The device runs its own joystick test (op 104, "Joystick test" in /Firmware/PROTOCOL.md): its screen asks for
-        % the joystick to be left alone, pushed fully up, down, left and right, and clicked 3 times, and shows the
+        % The device runs its own joystick test (op 104, "Joystick test" in PulsePal-Firmware/PROTOCOL.md): its screen
+        % asks for the joystick to be left alone, pushed fully up, down, left and right, and clicked 3 times, and shows the
         % position as it moves. It reports the resting position, how far each direction went, and the clicks counted.
         stepTimeout = 20; % Seconds the device allows each step
         P.stop();

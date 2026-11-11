@@ -9,6 +9,10 @@ Thank you for considering a contribution to Pulse Pal!
 4. [Push](https://docs.github.com/en/get-started/using-git/pushing-commits-to-a-remote-repository) your updated local fork to its remote location on Github.
 5. Create a [pull request](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests) for us to integrate your changes into the project.
 
+The firmware and the hardware design files have repositories of their own, which take contributions in the same way:
+[PulsePal-Firmware](https://github.com/sanworks/PulsePal-Firmware) (pull requests against its `develop` branch) and
+[PulsePal-CAD](https://github.com/sanworks/PulsePal-CAD).
+
 # Style Guidelines
 PulsePal aspires to comply with best practices as specified in Richard Johnson's [MATLAB Style Guidelines 2.0](https://www.mathworks.com/matlabcentral/fileexchange/46056-matlab-style-guidelines-2-0) for MATLAB code, and with PEP8 for Python. We recognize that neuroscience researchers are often beyond busy with research, and we do not want contributions to our tools be hindered in any way. If you are time constrained, please ensure that your contributed code works as intended, and we will make any necessary style edits on our part before the next stable release.
 

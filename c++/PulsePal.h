@@ -41,7 +41,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // device confirmed it. They return false, and print the reason to std::cerr, if the device is not connected, an
 // argument is out of range (in which case nothing is sent), or the device rejected the command or did not reply.
 //
-// Serial protocol: /Firmware/PROTOCOL.md. The Python and MATLAB classes in this repository use the same protocol.
+// Serial protocol: PulsePal-Firmware/PROTOCOL.md. The Python and MATLAB classes in this repository use the same protocol.
 
 #ifndef PULSEPAL_PULSEPAL_H
 #define PULSEPAL_PULSEPAL_H
@@ -116,7 +116,7 @@ public:
     // parameters instead of applying them, and applies them at the next rising edge on that trigger channel. This is
     // how the next trial's parameters can be sent during the current trial. Only syncAllParams() and
     // sendCustomPulseTrain() are held back this way: the single-parameter methods above and setTriggerMode() take effect
-    // at once, so use setTriggerMode() to leave param sync mode. See "Param sync mode" in /Firmware/PROTOCOL.md.
+    // at once, so use setTriggerMode() to leave param sync mode. See "Param sync mode" in PulsePal-Firmware/PROTOCOL.md.
     bool syncAllParams();
 
     // Upload a custom pulse train. ID is 1-2 on Pulse Pal 2, or 1-4 on Pulse Pal 3. customPulseTimes are pulse onset
@@ -169,8 +169,8 @@ public:
     } currentInputParams[3]; // Use 1-indexing for the trigger channels
 
 private:
-    // Op codes and parameter codes are fixed by the serial protocol (/Firmware/PROTOCOL.md) and match the OpCode and
-    // ParamID enums in /Firmware/PulsePal/PulsePal.ino. They are listed explicitly, never derived from a position.
+    // Op codes and parameter codes are fixed by the serial protocol (PulsePal-Firmware/PROTOCOL.md) and match the OpCode and
+    // ParamID enums in PulsePal-Firmware/PulsePal/PulsePal.ino. They are listed explicitly, never derived from a position.
     enum OpCode {
         OP_HANDSHAKE = 72,
         OP_PROGRAM_ALL_PARAMS_LEGACY = 73,  // Firmware v21. Replaced by op 92

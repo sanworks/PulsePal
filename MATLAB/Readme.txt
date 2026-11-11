@@ -18,16 +18,16 @@ If using the Legacy interface
 
 ***MATLAB Control Interface for Wave Pal***
 
-Wave Pal is alternative firmware that makes a Pulse Pal 3 a four channel waveform player (see /Firmware/WavePal).
-To control it:
+Wave Pal is alternative firmware that makes a Pulse Pal 3 a four channel waveform player (see WavePal in
+github.com/sanworks/PulsePal-Firmware). To control it:
 1. Add this folder ('MATLAB') to the MATLAB path.
 2. Run W = WavePalDevice('COM3'); % Replace COM3 with the correct USB serial port name
 3. Type 'help WavePalDevice' for an example and a description of its settings.
 
 ***MATLAB Control Interface for Synth Pal***
 
-Synth Pal is alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (see
-/Firmware/SynthPal). To control it:
+Synth Pal is alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (see SynthPal in
+github.com/sanworks/PulsePal-Firmware). To control it:
 1. Add this folder ('MATLAB') to the MATLAB path.
 2. Run S = SynthPalDevice('COM3'); % Replace COM3 with the correct USB serial port name
 3. Type 'help SynthPalDevice' for an example and a description of its settings.

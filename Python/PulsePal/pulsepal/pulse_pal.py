@@ -149,7 +149,7 @@ CUSTOM_TRAIN_TARGETS = ("Pulses", "Bursts")
 """Names of the custom train targets, in order of their code on the device.
 See `PulsePalDevice.custom_train_target`."""
 
-# Output parameters by parameter code (see "Parameter codes" in /Firmware/PROTOCOL.md), with
+# Output parameters by parameter code (see "Parameter codes" in PulsePal-Firmware/PROTOCOL.md), with
 # the kind of value each takes. The codes are fixed: installed clients and the firmware use them.
 # "pulse_time" is a time of at least DeviceInfo.min_pulse_width_us.
 _OUTPUT_PARAMETERS = {
@@ -191,7 +191,7 @@ _TIME_PARAMETERS = ("phase1_duration", "inter_phase_interval", "phase2_duration"
                     "burst_duration", "inter_burst_interval", "pulse_train_duration", "pulse_train_delay")
 _VOLTAGE_PARAMETERS = ("phase1_voltage", "phase2_voltage", "resting_voltage")
 
-# The default parameters: the device's own (LoadDefaultParameters() in /Firmware/PulsePal/SDSettings.ino), which it
+# The default parameters: the device's own (LoadDefaultParameters() in PulsePal-Firmware/PulsePal/SDSettings.ino), which it
 # loads at startup, after a comm failure and after formatting its microSD card, so that it plays the same program
 # whichever way it got its defaults. The MATLAB class has the same; the legacy clients keep their own.
 _DEFAULT_OUTPUT_VALUES = {
@@ -783,7 +783,7 @@ class PulsePalDevice:
                 "newer is required."
             )
         if firmware_version > self._CURRENT_FIRMWARE_VERSION:
-            # New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+            # New firmware only adds commands (see PulsePal-Firmware/PROTOCOL.md), so this class still works with it
             warnings.warn(
                 f"Pulse Pal firmware v{firmware_version} is newer than this pulsepal package knows "
                 f"(v{self._CURRENT_FIRMWARE_VERSION}). It works with it, but update the package to use what "
@@ -1747,7 +1747,7 @@ class PulsePalDevice:
 
         Raises PulsePalError, before anything is sent, for a value the device cannot play. The
         device refuses most of them too, but it also resets them (see validateOutputParams() in
-        /Firmware/PulsePal/USBOps.ino), so the local copy would describe a different program.
+        PulsePal-Firmware/PulsePal/USBOps.ino), so the local copy would describe a different program.
         """
         name, kind = _OUTPUT_PARAMETERS[code]
         label = f"{name} on channel {channel}"
@@ -1930,7 +1930,7 @@ class PulsePalDevice:
 
         Values are grouped by width so that the whole program travels as
         one uint32 block, one uint16 block and one uint8 block. See op 92
-        in /Firmware/PROTOCOL.md.
+        in PulsePal-Firmware/PROTOCOL.md.
         """
         time_values = []
         for name in _TIME_PARAMETERS:
@@ -1997,7 +1997,7 @@ class PulsePalDevice:
         """
         self._write_serial((self._OP_MENU_BYTE, 93), "uint8")
         # The device sends the whole parameter set as one message, so read it in one go and
-        # unpack it here. See "Op codes", op 93, in /Firmware/PROTOCOL.md.
+        # unpack it here. See "Op codes", op 93, in PulsePal-Firmware/PROTOCOL.md.
         message = self._read_raw(self._PARAM_MESSAGE_BYTES)
         values = struct.unpack(f"{self._ENDIANNESS}32I12H26B", message)
         params = {}

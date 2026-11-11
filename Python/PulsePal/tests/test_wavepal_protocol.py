@@ -3,7 +3,7 @@
 These tests need no device: a simulated Wave Pal behind a fake serial port
 checks each command's layout, records it, and replies as the firmware would.
 They are a fast check that the class matches the Wave Pal serial protocol,
-which is documented in /Firmware/WavePal/PROTOCOL.md.
+which is documented in PulsePal-Firmware/WavePal/PROTOCOL.md.
 
 Run them with:
 

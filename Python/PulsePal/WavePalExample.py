@@ -20,8 +20,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 # Example usage of Wave Pal's Python interface. Wave Pal is alternative
 # firmware that makes a Pulse Pal 3 a four channel waveform player: load it
-# from /Firmware/WavePal first. Each section below is a self-contained
-# snippet, meant to be read alongside the docstrings in pulsepal/wave_pal.py.
+# first (WavePal in github.com/sanworks/PulsePal-Firmware). Each section below
+# is a self-contained snippet, meant to be read alongside the docstrings in
+# pulsepal/wave_pal.py.
 
 import time
 

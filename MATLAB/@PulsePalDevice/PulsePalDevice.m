@@ -123,7 +123,7 @@
 % device wherever it is plugged in, give its serial number instead of a port name (Windows and Linux):
 %   P = PulsePalDevice('SerialNumber', '20345420');
 %
-% The USB protocol is documented in /Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
+% The USB protocol is documented in PulsePal-Firmware/PROTOCOL.md. The Python class, pulsepal.PulsePalDevice
 % (/Python/PulsePal/pulsepal/pulse_pal.py), works the same way, with snake_case names.
 
 %{
@@ -205,7 +205,7 @@ classdef PulsePalDevice < handle
         MaxSettingsFileNameLength = 15 % Characters, including '.pps'
         ProgramFormatVersion = 1 % Version of the program file format (see saveProgramToFile()), as in the Python GUI
         % Output parameter names in order of their parameter code, and the kind of value each takes. The codes are
-        % fixed: see "Parameter codes" in /Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
+        % fixed: see "Parameter codes" in PulsePal-Firmware/PROTOCOL.md. A 'PulseTime' is a time of at least 2 timer cycles.
         ParamNames = {...
             'isBiphasic' 'phase1Voltage' 'phase2Voltage' 'phase1Duration' 'interPhaseInterval' 'phase2Duration'...
             'interPulseInterval' 'burstDuration' 'interBurstInterval' 'pulseTrainDuration' 'pulseTrainDelay'...
@@ -337,7 +337,7 @@ classdef PulsePalDevice < handle
                                'https://sites.google.com/site/pulsepalwiki/updating-firmware']);
                     end
                     if obj.firmwareVersion > obj.CurrentFirmwareVersion
-                        % New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+                        % New firmware only adds commands (see PulsePal-Firmware/PROTOCOL.md), so this class still works with it
                         warning('PulsePalDevice:newerFirmware', ['Pulse Pal firmware v' num2str(obj.firmwareVersion) ...
                                 ' is newer than this class knows (v' num2str(obj.CurrentFirmwareVersion) '). It '...
                                 'works with it, but update the MATLAB software to use what is new.'])
@@ -409,14 +409,14 @@ classdef PulsePalDevice < handle
                     obj.info.minPulseWidth_us = 2*obj.cyclePeriod;
                 end
                 obj.info.maxTime = obj.MaxTime;
-            elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
+            elseif HandShakeOkByte == 87 % 'W': the device runs Wave Pal firmware (PulsePal-Firmware/WavePal)
                 wavePalVersion = replyVersion;
                 obj.port = [];
                 error(['The device at port ' portString ' runs Wave Pal firmware (v' num2str(wavePalVersion) ...
                        '), not Pulse Pal firmware.' newline 'To use it as a Pulse Pal, load Pulse Pal firmware '...
                        'onto it with LoadPulsePalFirmware (in /MATLAB/FirmwareLoader).' newline ...
                        'To use it as a Wave Pal, connect with WavePalDevice.'])
-            elseif HandShakeOkByte == 83 % 'S': the device runs Synth Pal firmware (/Firmware/SynthPal)
+            elseif HandShakeOkByte == 83 % 'S': the device runs Synth Pal firmware (PulsePal-Firmware/SynthPal)
                 synthPalVersion = replyVersion;
                 obj.port = [];
                 error(['The device at port ' portString ' runs Synth Pal firmware (v' num2str(synthPalVersion) ...
@@ -1393,7 +1393,7 @@ classdef PulsePalDevice < handle
 
         function syncAllParams(obj)
             %   Encode and transmit the complete parameter set in one command: op 92, or op 73 on firmware v21. This is
-            %   more efficient than item-wise data transfers. See "Op codes" in /Firmware/PROTOCOL.md.
+            %   more efficient than item-wise data transfers. See "Op codes" in PulsePal-Firmware/PROTOCOL.md.
             obj.checkSyncParams();
             obj.unsentParams = {}; % All are sent below
             [~, targets] = ismember(obj.customTrainTarget, obj.CustomTrainTargetNames);
@@ -1765,7 +1765,7 @@ classdef PulsePalDevice < handle
         function params = defaultParams
             % The default parameters, as the GUI keeps them: numbers, with each mode as its code (0 = 'Normal',
             % 'Pulses') and each on/off parameter as 0 or 1. setDefaultParams() programs them. They are the device's
-            % own defaults (LoadDefaultParameters() in /Firmware/PulsePal/SDSettings.ino), which it loads at startup,
+            % own defaults (LoadDefaultParameters() in PulsePal-Firmware/PulsePal/SDSettings.ino), which it loads at startup,
             % after a comm failure and after formatting its microSD card, as in the Python class. The legacy functions
             % in /MATLAB/Legacy keep their own.
             params = struct;

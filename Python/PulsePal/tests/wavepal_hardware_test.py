@@ -20,7 +20,7 @@ loaded. Along the way, the script reports waveform transfer speed, underruns,
 and the longest run of the sample clock interrupt against the sample period.
 
 Things only a scope or the joystick can check are listed in
-/Firmware/WavePal/AGENTS.md.
+PulsePal-Firmware/WavePal/AGENTS.md.
 """
 import argparse
 import sys
@@ -604,7 +604,7 @@ def test_sync_outputs(W, D):
     itself or a sync channel, a voltage outside 3-5 V, a fixed voltage on a sync channel); a sync
     channel ignores soft triggers, TTL edges (with --driver) and stops; a channel entering sync mode
     stops; and the channel it reports plays exactly. Only a scope can check the sync voltage itself
-    (see /Firmware/WavePal/AGENTS.md)."""
+    (see PulsePal-Firmware/WavePal/AGENTS.md)."""
     W.sampling_rate = 100000
     codes = load(W, 1, random_waveform(20000), [1, 2])
     load(W, 3, random_waveform(200000), 3)  # 2 s

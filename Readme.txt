@@ -8,10 +8,12 @@ Pulse Pal is an open source instrument, released into the public domain under th
 IMPORTANT: This license means that you can build and modify the device for your own use and even release derivative works commercially, but all derivative versions of the software and hardware MUST remain open source under the GNU public license v3.
 
 This repository contains:
--Firmware (written in Arduino)
 -Software APIs in MATLAB, Python and C++
--Design files for the circuit board
--Design files for the enclosure
+-A firmware loader for MATLAB, and USB drivers for older versions of Windows
+
+The rest of Pulse Pal is in two other repositories:
+-Firmware (written in Arduino), with versioned releases: https://github.com/sanworks/PulsePal-Firmware
+-Design files for the circuit board and enclosure: https://github.com/sanworks/PulsePal-CAD
 
 Documentation is provided online at:
 https://sites.google.com/site/pulsepalwiki/
@@ -22,7 +24,7 @@ Using Pulse Pal from Python or MATLAB: USING.md covers the device limits, the st
 experiments and pitfalls.
 
 Developer documentation: AGENTS.md is the guide to this repository (for people and for AI coding agents),
-and Firmware/PROTOCOL.md documents the USB serial protocol.
+and PROTOCOL.md in the firmware repository documents the USB serial protocol.
 
 Preassembled Pulse Pals are available at:
 https://sanworks.io

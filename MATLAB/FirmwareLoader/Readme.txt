@@ -8,6 +8,7 @@ On Linux, Pulse Pal 2's firmware is loaded with bossac, which this folder does n
 from a terminal with: sudo apt install bossa-cli
 
 Firmware files in this folder begin with stable versions as of 1 July, 2026, and include more recent updates.
+The firmware's source code and releases are at https://github.com/sanworks/PulsePal-Firmware
 If you need an earlier firmware version, it must be installed manually. Installation instructions are here:
 https://sites.google.com/site/pulsepalwiki/upgrading-firmware
 

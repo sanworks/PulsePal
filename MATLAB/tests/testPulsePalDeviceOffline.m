@@ -4,7 +4,7 @@
 %
 % Usage: from a terminal, at the root of the repository:
 %   matlab -batch "addpath('MATLAB', 'MATLAB/tests'); testPulsePalDeviceOffline"
-% Takes a few seconds. The expected bytes are built here from /Firmware/PROTOCOL.md, independently of the class.
+% Takes a few seconds. The expected bytes are built here from PulsePal-Firmware/PROTOCOL.md, independently of the class.
 
 %{
 ----------------------------------------------------------------------------
@@ -161,7 +161,7 @@ expectError(@() PulsePalDevice(SimulatedPulsePalPort(3, 20)));
 end
 
 function testDefaultParametersMessage()
-% The whole op 92 message, built from /Firmware/PROTOCOL.md: all four channels of each parameter in turn
+% The whole op 92 message, built from PulsePal-Firmware/PROTOCOL.md: all four channels of each parameter in turn
 [P, port] = connect();
 P.syncToDevice();
 times = kron([2 2 2 20 0 0 20000 0], ones(1,4)); % Timer cycles of 50 us: the firmware's defaults

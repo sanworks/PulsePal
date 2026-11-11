@@ -1,4 +1,4 @@
-% WavePalDevice controls a Pulse Pal 3 running Wave Pal firmware (/Firmware/WavePal), which makes it a four
+% WavePalDevice controls a Pulse Pal 3 running Wave Pal firmware (PulsePal-Firmware/WavePal), which makes it a four
 % channel waveform player. The device stores four waveforms of up to 1 million samples each on its microSD card,
 % and each output channel plays one of them when it is triggered: by a TTL pulse on a trigger channel, from MATLAB
 % with trigger(), or from the thumb joystick. Waveforms play at up to 100 kHz.
@@ -67,7 +67,7 @@
 %   W.outputMode{4} = 'Sync';   % Channel 4 reports channel 1, its default syncTarget...
 %   W.syncVoltage(4) = 3.3;     % ...at 3.3 V
 %
-% Wave Pal's USB protocol is documented in /Firmware/WavePal/PROTOCOL.md. The Python class,
+% Wave Pal's USB protocol is documented in PulsePal-Firmware/WavePal/PROTOCOL.md. The Python class,
 % pulsepal.WavePalDevice (/Python/PulsePal/pulsepal/wave_pal.py), has the same features.
 
 %{
@@ -715,11 +715,13 @@ classdef WavePalDevice < handle
             reply = reply(1);
             if reply == obj.PulsePalHandshakeReply
                 error(['The device on ' char(portString) ' runs Pulse Pal firmware (v' num2str(version) ').'...
-                       newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with PulsePalDevice.'])
+                       newline 'Load Wave Pal firmware onto it (WavePal in github.com/sanworks/PulsePal-Firmware), ' ...
+                       'or connect with PulsePalDevice.'])
             end
             if reply == obj.SynthPalHandshakeReply
                 error(['The device on ' char(portString) ' runs Synth Pal firmware (v' num2str(version) ').'...
-                       newline 'Load Wave Pal firmware onto it (/Firmware/WavePal), or connect with SynthPalDevice.'])
+                       newline 'Load Wave Pal firmware onto it (WavePal in github.com/sanworks/PulsePal-Firmware), ' ...
+                       'or connect with SynthPalDevice.'])
             end
             if reply ~= obj.WavePalHandshakeReply
                 error(['The device on ' char(portString) ' returned an unexpected handshake signature.'])

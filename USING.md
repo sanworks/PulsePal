@@ -4,7 +4,8 @@ This guide is for writing experiment code with a Pulse Pal, and with Wave Pal an
 alternative firmwares for Pulse Pal 3. It covers the device's limits, the standard calls in
 Python and MATLAB, recipes for common experiments, and the mistakes that are easy to make. It is
 written for scientists and for AI agents that help them. To change this repository instead (the
-firmware, the classes, the protocol), see `AGENTS.md`.
+classes, the GUIs), see `AGENTS.md`; the firmware and its protocol are in
+[PulsePal-Firmware](https://github.com/sanworks/PulsePal-Firmware), with an `AGENTS.md` of its own.
 
 The full API reference is in each class: the [Python documentation](https://sanworks.github.io/PulsePal/Python/),
 or `help PulsePalDevice` (and `help WavePalDevice`, `help SynthPalDevice`) in MATLAB, which
@@ -635,7 +636,9 @@ resting voltage.
 
 ## More
 
-- `/Firmware/PROTOCOL.md`, `/Firmware/WavePal/PROTOCOL.md` and `/Firmware/SynthPal/PROTOCOL.md`
+- [PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/PROTOCOL.md),
+  [WavePal/PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/WavePal/PROTOCOL.md) and
+  [SynthPal/PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/SynthPal/PROTOCOL.md), in the firmware repository,
   document the USB protocols, for writing a client in another language. `/c++/` holds a C++
   class for Pulse Pal.
 - The Pulse Pal wiki, https://sites.google.com/site/pulsepalwiki/, has the hardware

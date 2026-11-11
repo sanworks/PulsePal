@@ -484,7 +484,7 @@ codes = expectedCodes(volts, rangeLimits(W.outputRange));
 end
 
 function limits = rangeLimits(rangeName)
-% The limits of an output range in volts, as in /Firmware/WavePal/PROTOCOL.md
+% The limits of an output range in volts, as in PulsePal-Firmware/WavePal/PROTOCOL.md
 switch rangeName
     case '0V:5V'
         limits = [0 5];

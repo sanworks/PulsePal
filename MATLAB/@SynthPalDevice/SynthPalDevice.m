@@ -1,5 +1,5 @@
 
-% SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (/Firmware/SynthPal), which makes it a four channel
+% SynthPalDevice controls a Pulse Pal 3 running Synth Pal firmware (PulsePal-Firmware/SynthPal), which makes it a four channel
 % waveform synthesizer. Each output channel plays a sine, triangle, square or sawtooth wave or white noise, or steps to
 % a fixed voltage, when it is triggered: by a TTL pulse on a trigger channel, from MATLAB with trigger(), or from the
 % thumb joystick. Each channel has its own waveform, peak to peak voltage, mean voltage, resting voltage, play duration,
@@ -94,7 +94,7 @@
 % is samplesPerCycle * frequency) is at most 100 kHz, so a sample falls on every edge, peak and trough. The frequency
 % played is exact.
 %
-% Synth Pal's USB protocol is documented in /Firmware/SynthPal/PROTOCOL.md. The Python class,
+% Synth Pal's USB protocol is documented in PulsePal-Firmware/SynthPal/PROTOCOL.md. The Python class,
 % pulsepal.SynthPalDevice (/Python/PulsePal/pulsepal/synth_pal.py), has the same features.
 
 %{
@@ -792,7 +792,8 @@ classdef SynthPalDevice < handle
                     names = {'Wave Pal', 'WavePalDevice'};
                 end
                 error(['The device on ' char(portString) ' runs ' names{1} ' firmware (v' num2str(version) ').'...
-                       newline 'Load Synth Pal firmware onto it (/Firmware/SynthPal), or connect with ' names{2} '.'])
+                       newline 'Load Synth Pal firmware onto it (SynthPal in github.com/sanworks/PulsePal-Firmware), ' ...
+                       'or connect with ' names{2} '.'])
             end
             if reply ~= obj.SynthPalHandshakeReply
                 error(['The device on ' char(portString) ' returned an unexpected handshake signature.'])
@@ -984,7 +985,7 @@ classdef SynthPalDevice < handle
 
         function valid = isValidLevel(obj, waveform, amplitude_uV, mean_uV)
             % Whether the device accepts a channel's waveform, amplitude and mean voltage together, as
-            % isValidOutputLevel() in /Firmware/SynthPal/Settings.ino checks them
+            % isValidOutputLevel() in PulsePal-Firmware/SynthPal/Settings.ino checks them
             if strcmp(waveform, 'Fixed Voltage')
                 valid = abs(amplitude_uV) <= obj.MaxVoltage_uV;
             else

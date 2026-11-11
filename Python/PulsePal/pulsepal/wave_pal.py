@@ -22,9 +22,9 @@ with WavePalDevice("COM3") as W:
 ```
 
 The device needs Wave Pal firmware, which is in
-[/Firmware/WavePal](https://github.com/sanworks/PulsePal/tree/develop/Firmware/WavePal) in the
-Pulse Pal repository. Its USB protocol is documented in
-[PROTOCOL.md](https://github.com/sanworks/PulsePal/blob/develop/Firmware/WavePal/PROTOCOL.md).
+[/WavePal](https://github.com/sanworks/PulsePal-Firmware/tree/main/WavePal) in the
+Pulse Pal firmware repository. Its USB protocol is documented in
+[PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/WavePal/PROTOCOL.md).
 
 ## Channel settings
 
@@ -136,7 +136,7 @@ OUTPUT_RANGES = {
     "-10V:10V": (-10.0, 10.0),
 }
 """Output ranges in order of their range index on the device, with their
-limits in volts. See "Output ranges" in /Firmware/WavePal/PROTOCOL.md."""
+limits in volts. See "Output ranges" in PulsePal-Firmware/WavePal/PROTOCOL.md."""
 
 TRIGGER_MODES = ("Normal", "Toggle", "Gated", "Param Sync", "Master")
 """Names of the trigger modes. See `WavePalDevice.trigger_mode`."""
@@ -255,7 +255,7 @@ class DeviceStatus:
     An underrun is a block of samples that was not read from the microSD
     card by the time it was due. The output then holds its last value
     until the block arrives. See "Storage and buffering" in the
-    [Wave Pal protocol](https://github.com/sanworks/PulsePal/blob/develop/Firmware/WavePal/PROTOCOL.md#storage-and-buffering).
+    [Wave Pal protocol](https://github.com/sanworks/PulsePal-Firmware/blob/main/WavePal/PROTOCOL.md#storage-and-buffering).
     """
 
     longest_interrupt_us: float

@@ -20,7 +20,7 @@ the PC expects. The tests send commands while channels play, commands the device
 must refuse, bytes that are no command, many commands in one write, and
 reconnects; and they time USB round trips and custom train uploads with the PC's
 CPU idle and fully loaded. Playback timing itself needs a scope (see
-/Firmware/PulsePal/AGENTS.md).
+PulsePal-Firmware/PulsePal/AGENTS.md).
 
 The test saves and deletes HWTEST*.pps on the microSD card. It never formats the
 card, writes the DAC calibration or uses the debugging ops (86, 87).

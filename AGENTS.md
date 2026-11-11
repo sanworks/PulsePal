@@ -2,9 +2,22 @@
 
 Pulse Pal is an open source pulse train generator: a device that plays precisely timed
 voltage pulse trains on four analog output channels, started by software or by two trigger
-inputs. This repository holds its firmware, its client libraries and its hardware design
-files. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse Pal 3
+inputs. Two hardware versions are supported: Pulse Pal 2 (Arduino Due) and Pulse Pal 3
 (Teensy 4.1). The current firmware is v22.
+
+Pulse Pal is split into three repositories. Clone them side by side, under these names, in one
+folder:
+
+| Repository | Contents |
+|---|---|
+| [PulsePal](https://github.com/sanworks/PulsePal) (this one) | The clients: the Python, MATLAB and C++ classes, the GUIs, the MATLAB firmware loader, the tests, USB drivers, and `/USING.md` |
+| [PulsePal-Firmware](https://github.com/sanworks/PulsePal-Firmware) | The firmware of Pulse Pal, Wave Pal and Synth Pal, their USB protocols (`PROTOCOL.md`) and the build check. Released with GitFlow: `main` holds the latest release, tagged with its version (`v22`), and `develop` the work since. Its own `AGENTS.md` |
+| [PulsePal-CAD](https://github.com/sanworks/PulsePal-CAD) | Circuit board and enclosure design files, and the Pulse Pal 3 bill of materials |
+
+In this repository's files, a path that starts with `PulsePal-Firmware/` or `PulsePal-CAD/` is
+in that repository (`PulsePal-Firmware/PROTOCOL.md`), and one that starts with `/` is in this
+one. The history of the firmware and the design files before the split (November 2026) is in
+this repository's history, under `/Firmware/` and `/CAD/`.
 
 This file is about changing the repository. To use a Pulse Pal, Wave Pal or Synth Pal from
 Python or MATLAB, for example to write or check an experiment script, read `/USING.md`: the
@@ -16,41 +29,43 @@ a change alters what users see.
 | Path | Contents |
 |---|---|
 | `/USING.md` | Using the devices from Python and MATLAB: limits, standard calls, recipes, pitfalls |
-| `/Firmware/PulsePal/` | Current firmware, for **both** Pulse Pal 2 and Pulse Pal 3. Read its `AGENTS.md` before changing it |
-| `/Firmware/PROTOCOL.md` | The USB serial protocol: op codes, parameter codes, replies, settings file layout |
-| `/Firmware/WavePal/` | Wave Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform player. Its own `AGENTS.md` and `PROTOCOL.md` |
-| `/Firmware/SynthPal/` | Synth Pal: alternative firmware that makes a Pulse Pal 3 a four channel waveform synthesizer (sine, triangle, square, sawtooth, fixed voltage), with Pulse Pal's trigger modes, param sync included. Its own `AGENTS.md` and `PROTOCOL.md` |
-| `/Firmware/tools/` | `build_check.py`: compiles both hardware versions (or Wave Pal and Synth Pal, with `--sketch wavepal` and `--sketch synthpal`), and compares compiled functions between git revisions |
-| `/Firmware/Old/` | Archived firmware, no longer developed |
 | `/Python/PulsePal/` | The `pulsepal` Python package (`pulsepal/`: `pulse_pal.py`, `wave_pal.py`, `synth_pal.py`, the GUI in `gui.py`, shared code in `_common.py`), examples and offline tests. `/Python/Legacy/Python3/` holds the previous Python class, for existing rig code (the Python 2 class was removed in October 2026) |
 | `/MATLAB/@PulsePalDevice/` | MATLAB class. `/MATLAB/tests/testPulsePalDeviceOffline.m` tests it against a simulated device. `/MATLAB/Legacy/` holds the older function-based interface |
 | `/MATLAB/@WavePalDevice/` | MATLAB class for Wave Pal. `/MATLAB/tests/testWavePalDevice.m` tests it on a device |
 | `/MATLAB/@SynthPalDevice/` | MATLAB class for Synth Pal. `/MATLAB/tests/testSynthPalDevice.m` tests it on a device |
+| `/MATLAB/FirmwareLoader/` | `LoadPulsePalFirmware`: loads firmware onto a device without Arduino. Holds compiled firmware, one file per firmware, hardware version and firmware version (`PulsePal_HW3_v022.hex`) |
 | `/c++/` | C++ class (serial port via libserialport) and offline tests. `/c++/legacy/` holds the previous version, which also supports Pulse Pal 1 |
-| `/CAD/`, `/Drivers/` | Hardware design files and USB drivers |
+| `/Drivers/` | USB drivers, for Pulse Pal 2 and older on Windows 7 and XP |
 
 ## The protocol ties everything together
 
 The firmware and four clients (Python class, MATLAB class, MATLAB legacy functions, C++
-class) all encode the same serial protocol, documented in `/Firmware/PROTOCOL.md`. A change
-on one side usually needs a matching change on the others.
+class) all encode the same serial protocol, documented in `PulsePal-Firmware/PROTOCOL.md`. A
+change on one side usually needs a matching change on the others, and the firmware is in its
+own repository: make both changes, on each repository's `develop` branch. A client that uses a
+new op needs firmware that has it, so the firmware release that adds an op goes out no later
+than the clients that send it. A firmware release with a new version number also changes, here,
+the newest version each class knows (`_CURRENT_FIRMWARE_VERSION` in Python,
+`CurrentFirmwareVersion` in MATLAB and C++), which the classes warn of when a device runs a newer
+one, and the files in `/MATLAB/FirmwareLoader/`.
 
 Op codes, parameter codes, message layouts and the settings file layout are **fixed**,
 because installed copies of the clients rely on them. Add new op codes instead of changing
 existing ones.
 
-Wave Pal has a protocol of its own, in `/Firmware/WavePal/PROTOCOL.md`, with the same framing
-byte. Its clients are `/Python/PulsePal/pulsepal/wave_pal.py` and `/MATLAB/@WavePalDevice/`. So
-does Synth Pal, in `/Firmware/SynthPal/PROTOCOL.md`, with clients
-`/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three firmwares answer the same handshake (op 72) with different
-bytes, 'K', 'W' and 'S', and every client names the firmware it finds when it is not its own.
-Pulse Pal also answers op 103, with which the current Pulse Pal classes connect: the session's
-times are then in the device's own timer cycles (10 µs on Pulse Pal 3), where op 72 makes them
-50 µs cycles, as every older client sends them (see "Time units" in `/Firmware/PROTOCOL.md`).
-Older firmware, Wave Pal and Synth Pal ignore op 103, and the classes fall back to op 72. A Pulse
-Pal 3 answers nothing for its first 5 s, then answers op 103 and op 72 together, and the classes
-then send op 103 again (see "Connecting" in `/Firmware/PROTOCOL.md`). A test
-harness that pings a Pulse Pal mid-session sends op 103: op 72 would switch the session's unit.
+Wave Pal has a protocol of its own, in `PulsePal-Firmware/WavePal/PROTOCOL.md`, with the same
+framing byte. Its clients are `/Python/PulsePal/pulsepal/wave_pal.py` and
+`/MATLAB/@WavePalDevice/`. So does Synth Pal, in `PulsePal-Firmware/SynthPal/PROTOCOL.md`, with
+clients `/Python/PulsePal/pulsepal/synth_pal.py` and `/MATLAB/@SynthPalDevice/`. The three
+firmwares answer the same handshake (op 72) with different bytes, 'K', 'W' and 'S', and every
+client names the firmware it finds when it is not its own. Pulse Pal also answers op 103, with
+which the current Pulse Pal classes connect: the session's times are then in the device's own
+timer cycles (10 µs on Pulse Pal 3), where op 72 makes them 50 µs cycles, as every older client
+sends them (see "Time units" in `PulsePal-Firmware/PROTOCOL.md`). Older firmware, Wave Pal and
+Synth Pal ignore op 103, and the classes fall back to op 72. A Pulse Pal 3 answers nothing for its
+first 5 s, then answers op 103 and op 72 together, and the classes then send op 103 again (see
+"Connecting" in `PulsePal-Firmware/PROTOCOL.md`). A test harness that pings a Pulse Pal
+mid-session sends op 103: op 72 would switch the session's unit.
 All three answer op 100 with the circuit board revision, which they read from five pins at
 startup (`readHardwareRevision()`), and op 102 with the USB serial number. The Python and MATLAB
 classes read both into `info` when they connect, and the C++ class into `getHardwareRevision()`
@@ -106,9 +121,10 @@ share these conventions. Keep them in new code.
   nothing is sent. The device refuses most such values too, but it then resets them, so the
   client's copy would no longer describe what the device plays. When the device does refuse a
   value, the Python `PulsePalDevice` reads the parameter back (op 93). Pulse Pal's limits, which
-  all three Pulse Pal classes check, are listed in "Value limits" in `/Firmware/PROTOCOL.md`;
-  change them there and in every class together. The Pulse Pal classes hold a time as the device
-  plays it, rounded to the timer cycle, and store values read back from the device as they are.
+  all three Pulse Pal classes check, are listed in "Value limits" in
+  `PulsePal-Firmware/PROTOCOL.md`; change them there and in every class together. The Pulse Pal
+  classes hold a time as the device plays it, rounded to the timer cycle, and store values read
+  back from the device as they are.
 - **The cycle rate is 1e6 / period**, from the period op 94 reports. `1 / (period / 1e6)` is
   99999.99999999999 at 10 µs, and 10 cycles read back from the device then converted to
   0.00010000000000000002 s.
@@ -157,15 +173,15 @@ share these conventions. Keep them in new code.
 - **The handshake reads until the device is quiet.** A command an earlier session sent just
   before it closed can still be queued on the device, which answers it after the client has
   discarded its input. So every client reads the handshake's reply until no byte has arrived for
-  50 ms, and takes the last 5 bytes (see "Connecting" in `/Firmware/PROTOCOL.md`). A test fake
-  that queues all its replies in advance must report none of them as waiting, or the handshake
-  reads them all.
+  50 ms, and takes the last 5 bytes (see "Connecting" in `PulsePal-Firmware/PROTOCOL.md`). A
+  test fake that queues all its replies in advance must report none of them as waiting, or the
+  handshake reads them all.
 - **Synth Pal's levels.** The device holds one amplitude per channel, a fixed voltage or a
   periodic waveform's peak to peak voltage, and checks each of ops 65, 87 and 77 against the
   other two. The classes keep `peak_to_peak` and `fixed_voltage` apart, and `_send_levels()` /
   `sendLevels()` find an order of ops the device accepts. They keep a record of what the device
   holds to plan from, and start again from 0 V if the device refuses a step (see "Levels" in
-  `/Firmware/SynthPal/PROTOCOL.md`).
+  `PulsePal-Firmware/SynthPal/PROTOCOL.md`).
 - **The Python GUI** (`pulsepal/gui.py`) sizes some parts in pixels, measured against Windows'
   9 point Segoe UI, and scales them with the desktop's font (`_scaled()`). Check a layout
   change with a larger desktop font, as on Ubuntu, and in dark mode, which uses the clam theme.
@@ -179,12 +195,6 @@ share these conventions. Keep them in new code.
 ## Checks you can run without a device
 
 ```bash
-# Compile the firmware for both hardware versions (needs arduino-cli; see build_check.py)
-python Firmware/tools/build_check.py
-
-# Compile, and compare every compiled function with the last commit
-python Firmware/tools/build_check.py --compare HEAD
-
 # Python client: check the bytes it sends, using a fake serial port.
 # uv creates the environment (numpy, pyserial) on first use; see /Python/PulsePal/README.md
 cd Python/PulsePal && uv run python tests/test_protocol.py
@@ -192,12 +202,10 @@ cd Python/PulsePal && uv run python tests/test_protocol.py
 # MATLAB client: the same, against a simulated device (/MATLAB/tests/SimulatedPulsePalPort.m)
 matlab -batch "addpath('MATLAB', 'MATLAB/tests'); testPulsePalDeviceOffline"
 
-# Wave Pal: compile its firmware, and check the bytes its Python class sends
-python Firmware/tools/build_check.py --sketch wavepal
+# Wave Pal: check the bytes its Python class sends
 cd Python/PulsePal && uv run python tests/test_wavepal_protocol.py
 
 # Synth Pal: the same
-python Firmware/tools/build_check.py --sketch synthpal
 cd Python/PulsePal && uv run python tests/test_synthpal_protocol.py
 
 # C++ class: the same check, and a byte-for-byte comparison with the Python class's op 92 and
@@ -205,6 +213,10 @@ cd Python/PulsePal && uv run python tests/test_synthpal_protocol.py
 cmake -S c++ -B c++/build && cmake --build c++/build --config Release
 ctest --test-dir c++/build -C Release --output-on-failure
 ```
+
+The firmware's own checks, which compile it for both hardware versions and compare every
+compiled function with another revision, are in PulsePal-Firmware (`tools/build_check.py`; see
+its `AGENTS.md`). Run them, and these, after a change to a protocol.
 
 Everything else needs a device: pulse timing, the trigger inputs, the screen, the joystick
 menu and the microSD card. `/Python/PulsePal/tests/benchmark_serial.py` measures USB latency
@@ -220,16 +232,17 @@ played against a model of its synthesis, and `/MATLAB/tests/testSynthPalDevice.m
 MATLAB class.
 
 When you finish a change, state plainly what was and was not tested, and give the user a
-short list of things to check on the device. `/Firmware/PulsePal/AGENTS.md` lists the
+short list of things to check on the device. `PulsePal-Firmware/PulsePal/AGENTS.md` lists the
 usual checks.
 
 ## Style
 
-- Match the surrounding code. The firmware is long-lived and written in a consistent style,
-  and a large reformat makes support calls harder for the people who maintain it.
+- Match the surrounding code. It is long-lived and written in a consistent style, and a large
+  reformat makes support calls harder for the people who maintain it.
 - Keep existing names for variables, functions, op codes and parameters.
 - Comments explain why, and record the traps: interrupt context, fixed numbers, hardware
   quirks.
 - Python follows PEP 8; MATLAB follows the guidelines in `CONTRIBUTING.md`.
-- Work on the `develop` branch. `master` holds the latest stable release.
-- Commit messages list the changes per component, e.g. `-Firmware: Fixed X -Python: Added Y`.
+- Work on the `develop` branch. `master` holds the latest stable release. (PulsePal-Firmware's
+  release branch is `main`.)
+- Commit messages list the changes per component, e.g. `-Python: Fixed X -MATLAB: Added Y`.

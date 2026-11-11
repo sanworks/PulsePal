@@ -20,8 +20,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 # Example usage of Synth Pal's Python interface. Synth Pal is alternative
 # firmware that makes a Pulse Pal 3 a four channel waveform synthesizer: load
-# it from /Firmware/SynthPal first. Each section below is a self-contained
-# snippet, meant to be read alongside the docstrings in pulsepal/synth_pal.py.
+# it first (SynthPal in github.com/sanworks/PulsePal-Firmware). Each section
+# below is a self-contained snippet, meant to be read alongside the docstrings
+# in pulsepal/synth_pal.py.
 
 import time
 

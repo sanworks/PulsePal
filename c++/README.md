@@ -16,7 +16,8 @@ pulsePal.end();
 ```
 
 [PulsePal.h](PulsePal.h) documents every method. [PulsePalExample.cpp](PulsePalExample.cpp) is a longer
-example, and the serial protocol is described in [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
+example, and the serial protocol is described in the firmware repository's
+[PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/PROTOCOL.md).
 
 The class uses [libserialport](https://sigrok.org/wiki/Libserialport) for the USB serial port. It is an actively
 maintained, cross-platform C library from the sigrok project, packaged for Homebrew, Debian/Ubuntu, MSYS2 and
@@ -102,8 +103,8 @@ faulty cable or hub, or a program that stopped mid-command). Click its joystick,
 - Param sync trigger mode: `setTriggerMode(channel, 3)`. While a trigger channel is in this mode,
   `syncAllParams()` stores the parameters on the device, and the next rising edge on that trigger channel applies
   them. This is how the next trial's parameters can be sent during the current trial. Only `syncAllParams()` is
-  held back: every other method takes effect at once. See "Param sync mode" in
-  [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
+  held back: every other method takes effect at once. See "Param sync mode" in the firmware's
+  [PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/PROTOCOL.md).
 - `getHardwareVersion()` returns 2 or 3, and `getHardwareRevision()` the revision of the device's circuit board,
   0-31 (0 on Pulse Pal 2, and on a board that encodes none). Save both with your data to record exactly which
   hardware ran an experiment.
@@ -123,8 +124,8 @@ These changed:
   9999.9999 s, the longest time the device's joystick menu shows, except phase durations, the inter-pulse interval
   and the pulse train duration, whose minimum is 0.00001 s (one timer cycle) on Pulse Pal 3 and 0.0001 s (two) on
   Pulse Pal 2: the shortest pulse each one's trigger channels detect reliably. Custom pulse times must be multiples
-  of that minimum. These are the MATLAB and Python classes' limits, listed in "Value limits" in
-  [/Firmware/PROTOCOL.md](../Firmware/PROTOCOL.md).
+  of that minimum. These are the MATLAB and Python classes' limits, listed in "Value limits" in the firmware's
+  [PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/PROTOCOL.md).
 - Times are rounded to the nearest timer cycle (10 µs on Pulse Pal 3, 50 µs on Pulse Pal 2), and voltages to the
   nearest DAC code, as in the Python class. `initialize()` connects with op 103, so that times are in the device's
   own cycles, and with op 72 to firmware from before October 2026, whose cycle is 50 µs. The legacy class truncated times, so e.g. a 0.0007 s phase was sent as 13 cycles (0.00065 s) instead of 14.

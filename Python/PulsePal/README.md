@@ -10,8 +10,8 @@ can run:
 | Class | Device | Example |
 |---|---|---|
 | `PulsePalDevice` | Pulse Pal 2 or 3 running Pulse Pal firmware: pulse trains | `PulsePalExample.py` |
-| `WavePalDevice` | Pulse Pal 3 running Wave Pal firmware (`/Firmware/WavePal`): sampled waveforms | `WavePalExample.py` |
-| `SynthPalDevice` | Pulse Pal 3 running Synth Pal firmware (`/Firmware/SynthPal`): sine, triangle, square and sawtooth waves, white noise, and fixed voltages | `SynthPalExample.py` |
+| `WavePalDevice` | Pulse Pal 3 running Wave Pal firmware ([WavePal](https://github.com/sanworks/PulsePal-Firmware/tree/main/WavePal) in the firmware repository): sampled waveforms | `WavePalExample.py` |
+| `SynthPalDevice` | Pulse Pal 3 running Synth Pal firmware ([SynthPal](https://github.com/sanworks/PulsePal-Firmware/tree/main/SynthPal) in the firmware repository): sine, triangle, square and sawtooth waves, white noise, and fixed voltages | `SynthPalExample.py` |
 
 ```python
 from pulsepal import PulsePalDevice

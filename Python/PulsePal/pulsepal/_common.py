@@ -204,7 +204,7 @@ def other_firmware_error(handshake_reply, version, port_name, expected):
     return PulsePalError(
         f"The device on {port_name} runs {name} firmware (v{version}), not "
         f"{expected} firmware. Load {expected} firmware onto it "
-        f"(/Firmware/{expected_name}), or connect with {client}."
+        f"({expected_name} in github.com/sanworks/PulsePal-Firmware), or connect with {client}."
     )
 
 

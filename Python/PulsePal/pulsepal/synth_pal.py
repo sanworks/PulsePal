@@ -24,9 +24,9 @@ with SynthPalDevice("COM3") as S:
 ```
 
 The device needs Synth Pal firmware, which is in
-[/Firmware/SynthPal](https://github.com/sanworks/PulsePal/tree/develop/Firmware/SynthPal) in the
-Pulse Pal repository. Its USB protocol is documented in
-[PROTOCOL.md](https://github.com/sanworks/PulsePal/blob/develop/Firmware/SynthPal/PROTOCOL.md).
+[/SynthPal](https://github.com/sanworks/PulsePal-Firmware/tree/main/SynthPal) in the
+Pulse Pal firmware repository. Its USB protocol is documented in
+[PROTOCOL.md](https://github.com/sanworks/PulsePal-Firmware/blob/main/SynthPal/PROTOCOL.md).
 
 ## Channel settings
 
@@ -143,7 +143,7 @@ are Pulse Pal's trigger modes, with the same codes."""
 
 # The output ranges the device chooses from, in order of their index on the
 # device, with their limits in volts. See "Output ranges" in
-# /Firmware/SynthPal/PROTOCOL.md.
+# PulsePal-Firmware/SynthPal/PROTOCOL.md.
 OUTPUT_RANGES = {
     "0V:5V": (0.0, 5.0),
     "0V:10V": (0.0, 10.0),
@@ -174,7 +174,7 @@ class _Rejected(PulsePalError):
 
 def _is_valid_level(waveform, amplitude_uv, mean_uv):
     """Whether the device accepts an output channel's waveform, amplitude and mean voltage together, as
-    isValidOutputLevel() in /Firmware/SynthPal/Settings.ino checks them. On the device, a channel has one
+    isValidOutputLevel() in PulsePal-Firmware/SynthPal/Settings.ino checks them. On the device, a channel has one
     amplitude: a fixed voltage's voltage, or a periodic waveform's peak to peak voltage."""
     if waveform == FIXED_VOLTAGE:
         return abs(amplitude_uv) <= _MAX_VOLTAGE_UV
@@ -280,7 +280,7 @@ class DeviceStatus:
     that may have come later than their fixed time after a sample clock
     tick. It is normally 0; a change of frequency during playback can
     make one update late. See "Timing" in the
-    [Synth Pal protocol](https://github.com/sanworks/PulsePal/blob/develop/Firmware/SynthPal/PROTOCOL.md#timing).
+    [Synth Pal protocol](https://github.com/sanworks/PulsePal-Firmware/blob/main/SynthPal/PROTOCOL.md#timing).
     """
 
 

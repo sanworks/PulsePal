@@ -38,8 +38,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 static const uint8_t OpMenuByte = 213; // First byte of every command
 static const uint8_t HandshakeReply = 75; // 'K'
-static const uint8_t WavePalHandshakeReply = 87; // 'W': the device runs Wave Pal firmware (/Firmware/WavePal)
-static const uint8_t SynthPalHandshakeReply = 83; // 'S': the device runs Synth Pal firmware (/Firmware/SynthPal)
+static const uint8_t WavePalHandshakeReply = 87; // 'W': the device runs Wave Pal firmware (PulsePal-Firmware/WavePal)
+static const uint8_t SynthPalHandshakeReply = 83; // 'S': the device runs Synth Pal firmware (PulsePal-Firmware/SynthPal)
 static const uint32_t OldestFirmwareSupported = 21;
 static const uint32_t CurrentFirmwareVersion = 22;
 
@@ -310,8 +310,8 @@ bool PulsePal::initialize(std::string portString)
             std::ostringstream otherFirmwareError;
             otherFirmwareError << "The device on port " << portString << " runs " << name << " firmware (v"
                                << readUint32(reply + 1) << "), not Pulse Pal firmware. To use it as a Pulse Pal, load "
-                               << "Pulse Pal firmware onto it (see /Firmware/Readme.txt). To use it as a " << name
-                               << ", use its Python or MATLAB class.";
+                               << "Pulse Pal firmware onto it (see github.com/sanworks/PulsePal-Firmware). To use it "
+                               << "as a " << name << ", use its Python or MATLAB class.";
             reportError(otherFirmwareError.str());
         } else {
             reportError("The device on port " + portString + " did not return the Pulse Pal handshake. It may not be a Pulse Pal. "
@@ -334,7 +334,7 @@ bool PulsePal::initialize(std::string portString)
         return false;
     }
     if (version > CurrentFirmwareVersion) {
-        // New firmware only adds commands (see /Firmware/PROTOCOL.md), so this class still works with it
+        // New firmware only adds commands (see PulsePal-Firmware/PROTOCOL.md), so this class still works with it
         std::cerr << "PulsePal: Pulse Pal firmware v" << version << " is newer than this C++ class knows (v"
                   << CurrentFirmwareVersion << "). It works with it, but update the class to use what is new."
                   << std::endl;
@@ -400,7 +400,7 @@ bool PulsePal::initialize(std::string portString)
     if (hardwareVersion > 2) {
         // A device left in param sync mode by an earlier session would store the syncAllParams() below instead of
         // applying it, and keep its old parameters until a TTL arrived. Op 91 is not deferred that way, so it takes
-        // both trigger channels out of param sync mode first. See "Param sync mode" in /Firmware/PROTOCOL.md.
+        // both trigger channels out of param sync mode first. See "Param sync mode" in PulsePal-Firmware/PROTOCOL.md.
         const uint8_t normalMode[5] = {OpMenuByte, OP_PROGRAM_PARAM_ALL_CHANNELS, PARAM_TRIGGER_MODE, 0, 0};
         if (!sendCommand(normalMode, 5, "initialize()") || !readConfirm("initialize()")) {
             end();

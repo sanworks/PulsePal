@@ -3,7 +3,7 @@
 These tests need no Pulse Pal: a fake serial port records what the class writes,
 and replies to acknowledgement reads. They are a fast check that the class still
 matches the firmware's serial protocol, which is documented in
-/Firmware/PROTOCOL.md.
+PulsePal-Firmware/PROTOCOL.md.
 
 Run them with:
 
@@ -114,7 +114,7 @@ def expect_error(function, *args, error=PulsePalError, **kwargs):
 
 def test_parameter_names_match_parameter_codes():
     """The names and the codes must agree, or commands carry the wrong code. The codes are fixed
-    (see "Parameter codes" in /Firmware/PROTOCOL.md)."""
+    (see "Parameter codes" in PulsePal-Firmware/PROTOCOL.md)."""
     device = make_device()
     expected = ["is_biphasic", "phase1_voltage", "phase2_voltage", "phase1_duration", "inter_phase_interval",
                 "phase2_duration", "inter_pulse_interval", "burst_duration", "inter_burst_interval",
@@ -625,7 +625,7 @@ def test_waveform_matches_an_equivalent_pulse_train():
 
 
 def test_a_rejected_command_raises():
-    """The firmware replies 0 when it rejects a command (see /Firmware/PROTOCOL.md)."""
+    """The firmware replies 0 when it rejects a command (see PulsePal-Firmware/PROTOCOL.md)."""
     device = make_device(ack=0)
     device.port.response = bytearray(bytes([0]) + parameter_message())
     error = expect_error(device.phase1_voltage.__setitem__, 1, 6)

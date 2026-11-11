@@ -973,7 +973,7 @@ end
 
 function [low, high, label] = fieldRange(obj, paramName)
 % The values an edit field takes (paramName as in its EditField_ name), and its label: as in the Python GUI
-% (_FIELD_RANGES), the limits the class checks (see "Value limits" in /Firmware/PROTOCOL.md)
+% (_FIELD_RANGES), the limits the class checks (see "Value limits" in PulsePal-Firmware/PROTOCOL.md)
 switch paramName
     case {'RestingVoltage', 'Phase1Voltage', 'Phase2Voltage'}
         low = -10;

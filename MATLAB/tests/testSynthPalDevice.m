@@ -534,7 +534,7 @@ end
 end
 
 function limits = rangeLimits(meanVoltage, amplitude, restingVoltage)
-% The output range the device should choose, as in "Output ranges" in /Firmware/SynthPal/PROTOCOL.md: the first that
+% The output range the device should choose, as in "Output ranges" in PulsePal-Firmware/SynthPal/PROTOCOL.md: the first that
 % holds the waveform and the resting voltage (the mean voltage, unless given)
 if nargin < 3
     restingVoltage = meanVoltage;

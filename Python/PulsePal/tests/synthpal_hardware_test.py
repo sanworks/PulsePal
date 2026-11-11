@@ -21,7 +21,7 @@ through the ramps (`playback_envelopes()`). Along the way, the script
 reports the longest run of the sample clock interrupt against the sample period.
 
 Things only a scope, a TTL source or the joystick can check are listed in
-/Firmware/SynthPal/AGENTS.md.
+PulsePal-Firmware/SynthPal/AGENTS.md.
 """
 import argparse
 import sys
@@ -35,7 +35,7 @@ from pulsepal import synth_pal as SynthPal  # noqa: E402
 from pulsepal import PulsePalDevice, PulsePalError, SynthPalDevice, WavePalDevice  # noqa: E402
 
 SINE_TABLE_SIZE = 4096
-# As fillSineTable() in /Firmware/SynthPal/Playback.ino: computed in double, stored in single
+# As fillSineTable() in PulsePal-Firmware/SynthPal/Playback.ino: computed in double, stored in single
 SINE_TABLE = np.sin(np.pi / 2 * np.arange(SINE_TABLE_SIZE + 1) / SINE_TABLE_SIZE).astype(
     np.float32)
 RANGE_LIMITS_UV = [(0, 5_000_000), (0, 10_000_000), (-5_000_000, 5_000_000),
@@ -46,12 +46,12 @@ MODELLED_WAVEFORMS = tuple(name for name in SynthPal.WAVEFORMS if name != NOISE)
 
 
 def samples_per_cycle(centihz):
-    """As samplesPerCycleFor() in /Firmware/SynthPal/Settings.ino."""
+    """As samplesPerCycleFor() in PulsePal-Firmware/SynthPal/Settings.ino."""
     return 4 * (2_500_000 // centihz)
 
 
 def output_range(waveform, resting_uv, amplitude_uv, mean_uv=None):
-    """As outputRangeFor() in /Firmware/SynthPal/Settings.ino: an index into RANGE_LIMITS_UV. The
+    """As outputRangeFor() in PulsePal-Firmware/SynthPal/Settings.ino: an index into RANGE_LIMITS_UV. The
     mean voltage is the resting voltage unless given."""
     mean_uv = resting_uv if mean_uv is None else mean_uv
     lowest2 = min(2 * resting_uv, 2 * mean_uv - amplitude_uv)
@@ -77,7 +77,7 @@ def round_half_away(x):
 
 
 def unit_waveform(waveform, n):
-    """As unitWaveform() in /Firmware/SynthPal/Playback.ino: one cycle of n samples of a periodic
+    """As unitWaveform() in PulsePal-Firmware/SynthPal/Playback.ino: one cycle of n samples of a periodic
     waveform, from -1 to 1, in single precision."""
     i = np.arange(n, dtype=np.int64)
     quarter = n // 4
@@ -176,7 +176,7 @@ def expected_sum(cycle, n_played):
 
 
 def expected_samples(duration_s, centihz):
-    """As durationToSamples() in /Firmware/SynthPal/Settings.ino."""
+    """As durationToSamples() in PulsePal-Firmware/SynthPal/Settings.ino."""
     microseconds = round(duration_s * 1e6)
     if microseconds == 0:
         return 0

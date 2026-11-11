@@ -1,7 +1,8 @@
 % SimulatedPulsePalPort stands in for a Pulse Pal's serial port in /MATLAB/tests/testPulsePalDeviceOffline.m. It records
-% every write, and replies as Pulse Pal firmware does (/Firmware/PROTOCOL.md): the handshakes (ops 103 and 72), the hardware info, the
-% circuit board revision, a confirm byte to each command that sends one, and the parameters of the last op 92 to op 93. It has the methods of
-% pulsepal.DotNetSerialPort that PulsePalDevice uses, so P = PulsePalDevice(SimulatedPulsePalPort()) connects to it.
+% every write, and replies as Pulse Pal firmware does (PulsePal-Firmware/PROTOCOL.md): the handshakes (ops 103 and 72), the
+% hardware info, the circuit board revision, a confirm byte to each command that sends one, and the parameters of the last
+% op 92 to op 93. It has the methods of pulsepal.DotNetSerialPort that PulsePalDevice uses, so
+% P = PulsePalDevice(SimulatedPulsePalPort()) connects to it.
 
 %{
 ----------------------------------------------------------------------------
