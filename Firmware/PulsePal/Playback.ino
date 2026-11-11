@@ -41,6 +41,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //   updateUsesBursts()
 //   endContinuousLoop()
 //   stopCustomTrainChannels()
+//   stopOutputChannels()
 //   playbackOngoing() (HW2 only)
 
 #if (HARDWARE_VERSION == 2)
@@ -755,6 +756,24 @@ void stopCustomTrainChannels(byte train, byte block) {
       killChannel(x);
     }
   }
+}
+
+// Stops output channels from loop(), one bit per channel (bit 0 = channel 1), all in the same cycle: the stop ops (80,
+// 81 and 98) and the joystick test. killChannel() runs with interrupts off, so that handler() never sees a channel half
+// stopped. It clears customTrainPlayID before StimulusStatus, and a tick between the two found a channel still playing
+// with no custom train: handler() set customTrainPlayID and customTrainPlayBlock again, to the train's current block,
+// and the stopped channel kept them. The next load of the train (op 95) emptied that block and made the other one
+// current, and at its next trigger the channel played the empty block, and ended at once at its resting voltage: 26
+// to 35 of 1000 rounds of stop, load and trigger, with all four channels playing a new sample every cycle (v22, Pulse
+// Pal 3). Call from loop() only: in handler(), interrupts() would let other interrupts in.
+void stopOutputChannels(byte channelBits) {
+  noInterrupts();
+  for (int x = 0; x < 4; x++) {
+    if (bitRead(channelBits, x)) {
+      killChannel(x);
+    }
+  }
+  interrupts();
 }
 
 #if (HARDWARE_VERSION == 2)

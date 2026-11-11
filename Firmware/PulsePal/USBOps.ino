@@ -474,16 +474,12 @@ void processUSBCommands() {
           PPUSB.writeByte(1); // Send confirm byte
         } break;
         case OP_ABORT_ALL: { // Op 80. Soft-abort ongoing stimulation without disconnecting from client
-         for (int i = 0; i < 4; i++) {
-          killChannel(i);
-        }
+         stopOutputChannels(0x0F);
        } break;
        case OP_DISCONNECT: { // Op 81. Disconnect from PC app
           inMenu = MENU_TOP;
           usbTimeFactor = LEGACY_TIME_FACTOR; // Until the next client's handshake, as at startup
-          for (int i = 0; i < 4; i++) {
-            killChannel(i);
-          }
+          stopOutputChannels(0x0F);
           for (int i = 0; i < 16; i++) {
            CommanderString[i] = DefaultCommanderString[i];
          } 
@@ -716,11 +712,7 @@ void processUSBCommands() {
         } break;
         case OP_ABORT_CHANNELS: { // Op 98. Terminate ongoing stimulation on a specific set of output channels
          inByte = PPUSB.readByte();
-         for (int i = 0; i < 4; i++) {
-          if bitRead(inByte, i) {
-            killChannel(i);
-          }
-        }
+         stopOutputChannels(inByte);
        } break;
         case OP_SET_SCREEN_SAVER: { // Op 99. Switch the screen saver on (1) or off (0), and set its timeout in seconds. Used by the
                                     // MATLAB and Python classes. Saved to the EEPROM once no channel is playing (see updateScreenSaver()).

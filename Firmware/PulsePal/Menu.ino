@@ -1108,9 +1108,7 @@ FLASHMEM void runJoystickTest(byte stepTimeout) { // Bench testing only, so it r
   byte resultBits = 0; // Bits 0-3: up, down, left and right passed. Bit 4: the resting position is in the middle
   char line1[17];
   char line2[17];
-  for (int i = 0; i < 4; i++) {
-    killChannel(i);
-  }
+  stopOutputChannels(0x0F);
   if (screenDimmed) {
     endScreenSaver();
   }

@@ -243,7 +243,11 @@ The interrupt can run at any point in `loop()`, but `loop()` never runs inside t
 So when `loop()` updates several variables that the interrupt reads, the interrupt can see
 them half-updated; update them in a safe order (rule 2 is an example), or with interrupts off
 for a few instructions (op 77 schedules its channels' `SoftTriggerScheduled` flags that way,
-so they start in the same cycle). A tick that arrives meanwhile runs as soon as interrupts
+so they start in the same cycle). Stopping a channel is such an update: `loop()` stops
+channels with `stopOutputChannels()`, which calls `killChannel()` with interrupts off. A tick
+in the middle of a `killChannel()` from `loop()` once left a stopped channel set to its custom
+train's old memory block; the next load of the train emptied that block, and the channel's
+next trigger ended it at once. A tick that arrives meanwhile runs as soon as interrupts
 are back on; only interrupts off for longer than a cycle lose one. Shared variables
 include `SystemTime`, `StimulatingState`, `DACFlag`, `DACFlags`, `dacValue`,
 `SoftTriggerScheduled`, `abortRequested`, `screenSaverActivity`, `triggerEdgeCount`, `channelStartCount` (op 101 reads
@@ -294,7 +298,8 @@ playback, the menu or the USB ops, ask the user to check:
 - The joystick menu: edit a parameter; save, load and erase a settings file.
 - `stop()` during playback from Python, then trigger again.
 - Custom trains, including trains 3 and 4 on Pulse Pal 3: loading a train while a channel
-  plays it stops the channel, and the next trigger plays the new train; a biphasic custom pulse
+  plays it stops the channel, and the next trigger plays the new train; so does `stop()`
+  during the train, then one load and a trigger, in every one of 1000 rounds; a biphasic custom pulse
   that starts during the one before is dropped, and the pulses after it play at their own times
   (in a looping train whose last pulse is dropped, the next pass starts when that pulse would
   have ended); in a train targeting bursts, a burst that starts during the one before is

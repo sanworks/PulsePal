@@ -347,12 +347,13 @@ end
         % mean, as played. A steady level would read as the scope code nearest it, up to half a code off, as the
         % scopes' noise with the 20 MHz limit is a small part of a code (0.01-0.36 codes RMS on the DS1054Z at
         % 0.5 V/div). The +/-10 V levels are played 60 mV inside, where the triangle stays in the DAC's range.
-        % The looping trains are stopped by loading the next ones (op 95), never by P.stop(). With firmware v22, a stop
-        % (op 98) can leave a channel that was playing a custom train set to its old memory block, which the next load of
-        % the train empties: the channel then ends at once when triggered, at 0 V (35 of 1000 rounds of load, trigger
-        % and stop). A load stops the channels playing its train with the timer interrupt held off, which leaves them
-        % set to take the train's new block. The first round triggers once before its capture, and loads again: a
-        % channel left so by a stop before the panel ends at that trigger, which resets it.
+        % The looping trains are stopped by loading the next ones (op 95), never by P.stop(). With v22 firmware built
+        % before November 2026 (see stopOutputChannels()), a stop (op 98) can leave a channel that was playing a custom
+        % train set to its old memory block, which the next load of the train empties: the channel then ends at once
+        % when triggered, at 0 V (35 of 1000 rounds of load, trigger and stop). A load stops the channels playing its
+        % train with the timer interrupt held off, which leaves them set to take the train's new block. The first round
+        % triggers once before its capture, and loads again: a channel left so by a stop before the panel ends at that
+        % trigger, which resets it.
         levels = [-10 -5 0 5 10];
         vdiv = conditional(S.isMSO5000, 0.1, 0.5);
         ditherPeriod = 1e-3; % Whole periods in either scope's record: 10 or 12 divisions of 1 ms
